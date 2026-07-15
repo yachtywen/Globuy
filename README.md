@@ -113,3 +113,4 @@ python examples/08_evaluation.py
 ## Docker 基础服务
 
 `docker compose up --build` 会启动 API、Redis 和 Qdrant。首版 Agent 尚未读取 Redis/Qdrant；它们是为后续长期记忆和向量召回预留的基础服务。
+"# Globuy" 
