@@ -1,0 +1,31 @@
+{
+  "code": 0,
+  "message": "",
+  "data": {
+    "model": {
+      "itemList": [
+        {
+          "itemId": "10001",
+          "itemName": "头戴式蓝牙主动降噪耳机",
+          "priceYuanDouble": 399.0,
+          "discntPriceYuan": "299.00",
+          "itemGradeAvg": "4.8",
+          "orderPayUV": "1.2万+",
+          "commentCount": 2000,
+          "picUrlFull": "https://img.example.com/taobao-headphone.jpg",
+          "shopId": "shop-1",
+          "shopName": "示例旗舰店",
+          "options": {"颜色": ["黑色", "白色"]}
+        },
+        {
+          "itemId": "10002",
+          "itemName": "蓝牙耳机保护套",
+          "priceYuanDouble": 19.9,
+          "picUrlFull": "https://img.example.com/case.jpg"
+        }
+      ],
+      "page": {"pageNo": 1, "pageSize": 10, "totalItems": 100, "totalPages": 10}
+    }
+  }
+}
+

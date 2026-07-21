@@ -23,11 +23,25 @@ def test_planner_exposes_an_ordered_tool_plan() -> None:
 
 def test_candidate_tools_rank_and_calculate_cost() -> None:
     candidates = [
-        {"title": "A", "score": 0.8, "rating": 4.6, "price": 900},
-        {"title": "B", "score": 0.9, "rating": 4.2, "price": 950},
+        {
+            "item_id": "a",
+            "platform": "taobao",
+            "title": "A",
+            "retrieval_rank": 2,
+            "rating": 4.6,
+            "price": 900,
+        },
+        {
+            "item_id": "b",
+            "platform": "jingdong",
+            "title": "B",
+            "retrieval_rank": 1,
+            "rating": 4.2,
+            "price": 950,
+        },
     ]
     picked = item_picker.invoke({"items": candidates, "limit": 1})
-    assert picked["selected"][0]["title"] == "B"
+    assert picked["picks"][0]["title"] == "B"
 
     compared = price_compare.invoke(
         {
@@ -40,9 +54,9 @@ def test_candidate_tools_rank_and_calculate_cost() -> None:
     assert compared["best_offer"]["title"] == "B"
 
     shipping = shipping_calc.invoke(
-        {"item_price": 100, "quantity": 2, "shipping_fee": 20, "duty_rate": 0.1}
+        {"item_price": 100, "quantity": 2, "shipping_fee": 20}
     )
-    assert shipping["total"] == 240
+    assert shipping["total_cost"] == 220
 
 
 def test_preference_store_and_prompt_injection(tmp_path: Path) -> None:
@@ -89,8 +103,21 @@ def test_baseline_judge_uses_dynamic_rubric() -> None:
 @pytest.mark.asyncio
 async def test_agentloop_can_fork_without_real_model() -> None:
     parent = AgentLoop(model=None)
-    child = parent.fork(tool_names=["planner"], extra_instructions="只负责规划。")
+    child = parent.fork()
     answer, metadata = await child.run("帮我规划", "fork-test")
     assert "帮我规划" in answer
-    assert len(child.tools) == 1
+    assert [tool.name for tool in child.tools] == [tool.name for tool in parent.tools]
+    assert child.business_tools == parent.business_tools
+    assert child.system_prompt == parent.system_prompt
+    assert child.model is parent.model
+    assert child.checkpointer is not parent.checkpointer
     assert metadata["model"] is None
+
+
+def test_agentloop_expert_is_separate_from_homogeneous_fork() -> None:
+    parent = AgentLoop(model=None)
+    expert = parent.expert(tool_names=["planner"], extra_instructions="只负责规划。")
+
+    assert [tool.name for tool in expert.tools] == ["planner"]
+    assert "只负责规划" in expert.system_prompt
+    assert expert.enable_dispatch is False

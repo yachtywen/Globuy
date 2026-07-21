@@ -20,5 +20,19 @@ def ensure_child(root: Path, *parts: str) -> Path:
     return candidate
 
 
+def safe_join(root: Path, *parts: str) -> Path:
+    """Resolve an existing or future path below root without creating it."""
+
+    resolved_root = root.resolve()
+    candidate = resolved_root.joinpath(*(safe_path_part(part) for part in parts)).resolve()
+    if candidate != resolved_root and resolved_root not in candidate.parents:
+        raise ValueError(f"路径越界: {candidate}")
+    return candidate
+
+
 def session_path(output_root: Path, thread_id: str) -> Path:
     return ensure_child(output_root, "sessions", thread_id)
+
+
+def upload_path(uploaded_root: Path, thread_id: str) -> Path:
+    return ensure_child(uploaded_root, thread_id)

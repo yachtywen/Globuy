@@ -4,6 +4,8 @@ Keeping provider creation here prevents API and graph code from depending on a
 specific vendor. More providers can be added without changing the AgentLoop.
 """
 
+from functools import lru_cache
+
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
@@ -22,8 +24,15 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
     kwargs: dict[str, object] = {
         "model": settings.llm_model,
         "api_key": settings.llm_api_key,
-        "temperature": 0,
+        "temperature": settings.llm_temperature,
     }
     if settings.llm_base_url:
         kwargs["base_url"] = settings.llm_base_url
     return ChatOpenAI(**kwargs)
+
+
+@lru_cache(maxsize=1)
+def get_chat_model() -> BaseChatModel | None:
+    """Return the process-wide model shared by parent and forked loops."""
+
+    return build_chat_model(get_settings())

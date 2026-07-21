@@ -1,0 +1,29 @@
+{
+  "code": 0,
+  "message": "",
+  "data": {
+    "products": [
+      {
+        "id": "20001",
+        "title": "真无线入耳式TWS蓝牙耳机",
+        "price": "199.50",
+        "imageUrl": "jfs/t1/example/jd-headphone.jpg",
+        "sales": "8000+",
+        "monthSales": "1200",
+        "shopId": "shop-2",
+        "shopName": "京东示例店",
+        "asgStructuredAttribute": {"佩戴方式": "入耳式"}
+      },
+      {
+        "id": "20002",
+        "title": "头戴耳机替换线",
+        "price": "29.90",
+        "imageUrl": "https://img.example.com/cable.jpg"
+      }
+    ],
+    "totalCount": 96,
+    "currentPage": 1,
+    "pageSize": 48,
+    "totalPages": 2
+  }
+}

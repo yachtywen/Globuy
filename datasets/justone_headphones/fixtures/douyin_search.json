@@ -1,0 +1,74 @@
+{
+  "code": 0,
+  "message": null,
+  "data": {
+    "has_more": true,
+    "extra": {
+      "search_id": "search-next-page",
+      "session_id": "fixture-session"
+    },
+    "total": 500,
+    "summary_promotions": [
+      {
+        "product_id": "30001",
+        "promotion_id": "31001",
+        "base_model": {
+          "product_info": {
+            "name": "抖音商城无线降噪蓝牙耳机",
+            "main_img": {
+              "url_list": ["https://img.example.com/douyin-headphone.jpg"]
+            },
+            "detail_url": "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=30001",
+            "category": {
+              "first_category": {
+                "category_id": 1001,
+                "category_name": "3C数码及配件"
+              },
+              "third_category": {
+                "category_id": 1003,
+                "category_name": "耳机"
+              }
+            },
+            "month_sale": {"origin": 5000},
+            "good_ratio": {"origin": 96.5}
+          },
+          "marketing_info": {
+            "price_desc": {
+              "price": {"origin": 15900, "integer": "159", "decimal": ""},
+              "regular_price": {"origin": 19900},
+              "price_text": "到手价"
+            }
+          },
+          "shop_info": {
+            "shop_id": 9001,
+            "shop_name": "抖音示例店",
+            "shop_score_info": {
+              "shop_score": {"score": 95}
+            }
+          },
+          "promotion_info": {"promotion_status": 2},
+          "tag_info": {"tag_codes": ["spot_goods", "FreightFree"]}
+        }
+      },
+      {
+        "product_id": "30002",
+        "promotion_id": "31002",
+        "base_model": {
+          "product_info": {
+            "name": "耳机收纳盒",
+            "main_img": {
+              "url_list": ["https://img.example.com/box.jpg"]
+            },
+            "detail_url": "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=30002",
+            "month_sale": {"origin": 30},
+            "good_ratio": {"origin": 90}
+          },
+          "marketing_info": {
+            "price_desc": {"price": {"origin": 2500}}
+          },
+          "shop_info": {"shop_name": "配件示例店"}
+        }
+      }
+    ]
+  }
+}

@@ -1,16 +1,52 @@
-"""Cross-platform product-search boundary."""
+"""Single-platform product search over the local OpenSearch catalog."""
+
+from __future__ import annotations
+
+import asyncio
+from functools import lru_cache
+from typing import Annotated
 
 from langchain_core.tools import tool
+from pydantic import Field
+
+from app.config import get_settings
+from app.infrastructure.opensearch import build_opensearch_client
+from app.search.encoder import get_embedding_encoder
+from app.search.schemas import ItemSearchOutput, Platform, SearchFilters
+from app.search.service import ProductSearchService, SearchNotConfiguredError
+
+
+@lru_cache(maxsize=1)
+def get_product_search_service() -> ProductSearchService:
+    settings = get_settings()
+    return ProductSearchService(
+        build_opensearch_client(settings), get_embedding_encoder(), settings
+    )
 
 
 @tool
-def item_search(query: str, platforms: list[str] | None = None) -> dict:
-    """Search configured commerce platforms for product candidates."""
+async def item_search(
+    query: Annotated[str, Field(min_length=1, max_length=500)],
+    platform: Platform,
+    top_k: Annotated[int, Field(ge=1, le=50)] = 20,
+    filters: SearchFilters | None = None,
+) -> dict:
+    """Search one commerce platform using BM25 and frozen dense-vector retrieval."""
 
-    return {
-        "status": "not_configured",
-        "query": query.strip(),
-        "platforms": platforms or [],
-        "items": [],
-        "message": "尚未接入电商平台数据源，不能编造商品或实时价格。",
-    }
+    normalized_query = query.strip()
+    try:
+        output = await asyncio.to_thread(
+            get_product_search_service().search,
+            normalized_query,
+            platform,
+            top_k,
+            filters,
+        )
+    except SearchNotConfiguredError as exc:
+        output = ItemSearchOutput(
+            status="not_configured", platform=platform, message=str(exc)
+        )
+    except Exception as exc:
+        output = ItemSearchOutput(status="error", platform=platform, message=str(exc))
+
+    return output.model_dump(mode="json")

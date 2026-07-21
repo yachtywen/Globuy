@@ -1,0 +1,36 @@
+{
+  "items": {
+    "page": "1",
+    "page_size": 3,
+    "pagecount": "2",
+    "item": [
+      {
+        "title": "头戴式蓝牙主动降噪耳机",
+        "pic_url": "//img.example.com/taobao-headphone.jpg",
+        "promotion_price": "299.00",
+        "price": "399.00",
+        "sales": "120",
+        "num_iid": "10001",
+        "detail_url": "https://item.taobao.com/item.htm?id=10001"
+      },
+      {
+        "title": "蓝牙耳机保护套",
+        "pic_url": "//img.example.com/case.jpg",
+        "price": "19.90",
+        "sales": 50,
+        "num_iid": "10002",
+        "detail_url": "https://item.taobao.com/item.htm?id=10002"
+      },
+      {
+        "title": "缺少价格的耳机",
+        "num_iid": "10003",
+        "detail_url": "https://item.taobao.com/item.htm?id=10003"
+      }
+    ]
+  },
+  "error_code": "0000",
+  "call_args": {
+    "key": "fixture-key",
+    "secret": "fixture-secret"
+  }
+}

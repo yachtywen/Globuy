@@ -30,5 +30,24 @@ def get_prompt(key: str, default: str = "") -> str:
     return value if isinstance(value, str) else default
 
 
+def get_system_prompt(memory_context: str | None = None) -> str:
+    sections = [get_prompt("system.base", MAIN_SYSTEM_PROMPT)]
+    for key in ("system.loop_protocol", "system.fork_policy", "system.tool_boundaries"):
+        value = get_prompt(key)
+        if value:
+            sections.append(value)
+    if memory_context:
+        sections.append(get_prompt("system.memory_prefix", "用户长期偏好：\n") + memory_context)
+    return "\n\n".join(section.strip() for section in sections if section.strip())
+
+
+def get_planner_prompt() -> str:
+    return get_prompt("agents.planner")
+
+
+def get_shopping_summary_prompt() -> str:
+    return get_prompt("agents.summary")
+
+
 MAIN_SYSTEM_PROMPT = """你是 globuy，一个帮助用户规划购物、搜索商品和比较价格的助手。
 明确区分事实、推断和暂未接入的能力，不要编造商品、价格或库存。"""

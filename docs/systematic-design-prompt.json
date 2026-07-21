@@ -1,0 +1,564 @@
+{
+  "meta": {
+    "title": "SoulRich Product Website - Systematic Design Specification",
+    "version": "2.0",
+    "philosophy": "System-driven design based on Dieter Rams' principles + Swiss Style grid systems",
+    "purpose": "A comprehensive, transferable design system for premium hardware product websites"
+  },
+  "level_0_design_philosophy": {
+    "title": "Core Design Philosophy & System Logic",
+    "description": "The foundational thinking that drives all design decisions",
+    "guiding_principles": {
+      "dieter_rams_essence": {
+        "core": "Less, but better (Weniger, aber besser)",
+        "interpretation": "Every element must justify its existence. Remove until it breaks, then add back only what's essential.",
+        "application": [
+          "No decorative elements without function",
+          "Information hierarchy through typography, not ornamentation",
+          "Interaction feedback through subtle state changes, not animations"
+        ]
+      },
+      "swiss_style_system": {
+        "core": "Grid-based rationalism",
+        "interpretation": "Mathematical precision creates visual harmony",
+        "application": [
+          "All elements align to an underlying grid",
+          "Asymmetric balance through proportional relationships",
+          "Typography as the primary visual element"
+        ]
+      },
+      "material_honesty": {
+        "core": "Truth to materials",
+        "interpretation": "Each material should look and feel like itself",
+        "application": [
+          "Matte surfaces show no false reflections",
+          "Metal gradients suggest actual material properties",
+          "No skeuomorphic decorations"
+        ]
+      }
+    },
+    "system_logic": {
+      "information_architecture": {
+        "flow": "Emotional → Rational → Technical → Practical",
+        "narrative": [
+          {
+            "stage": "Hero",
+            "purpose": "Emotional connection through pure form",
+            "strategy": "Minimal text, maximum product presence"
+          },
+          {
+            "stage": "Philosophy",
+            "purpose": "Intellectual justification",
+            "strategy": "Quote establishes design credibility"
+          },
+          {
+            "stage": "Internal Structure",
+            "purpose": "Technical excellence demonstration",
+            "strategy": "Exploded view shows engineering rigor"
+          },
+          {
+            "stage": "Dimensions",
+            "purpose": "Precision communication",
+            "strategy": "Technical drawing language"
+          },
+          {
+            "stage": "Specifications",
+            "purpose": "Complete information",
+            "strategy": "Data-dense, scannable format"
+          },
+          {
+            "stage": "App Interface",
+            "purpose": "Ecosystem visualization",
+            "strategy": "Show complete user experience"
+          }
+        ]
+      },
+      "visual_hierarchy_system": {
+        "principle": "Size + Weight + Position = Importance",
+        "levels": [
+          {
+            "level": "L1 - Primary",
+            "use": "Product name, section titles",
+            "treatment": "Largest size, boldest weight, prominent position"
+          },
+          {
+            "level": "L2 - Secondary",
+            "use": "Model identifier, subtitles",
+            "treatment": "Medium size, regular weight, supporting position"
+          },
+          {
+            "level": "L3 - Tertiary",
+            "use": "Descriptions, annotations",
+            "treatment": "Small size, readable weight, informational position"
+          },
+          {
+            "level": "L4 - Quaternary",
+            "use": "Labels, technical data",
+            "treatment": "Smallest size, functional only"
+          }
+        ]
+      },
+      "color_logic": {
+        "philosophy": "Neutral base + Functional accents",
+        "system": {
+          "60_percent": {
+            "role": "Background neutrality",
+            "colors": [
+              "#F0EFE9",
+              "#FFFFFF"
+            ],
+            "purpose": "Create calm, museum-like environment"
+          },
+          "30_percent": {
+            "role": "Material definition",
+            "colors": [
+              "#E8E8E6",
+              "#D8D8D8",
+              "#C8C8C8"
+            ],
+            "purpose": "Define product materials through subtle gradients"
+          },
+          "10_percent": {
+            "role": "Functional accents",
+            "colors": [
+              "#F4793E",
+              "#3A6B5A",
+              "#2E4A7A"
+            ],
+            "purpose": "Highlight interactive/important elements ONLY"
+          }
+        },
+        "rule": "Accent colors must serve a functional purpose (indicators, controls, highlights), never decoration"
+      }
+    }
+  },
+  "level_1_design_tokens": {
+    "title": "Atomic Design Tokens",
+    "description": "The smallest indivisible design units that compose the entire system",
+    "spacing_system": {
+      "base_unit": "8px",
+      "logic": "All spacing derives from powers and divisions of the base unit",
+      "scale": {
+        "xs": "4px (0.5×)",
+        "sm": "8px (1×)",
+        "md": "16px (2×)",
+        "lg": "24px (3×)",
+        "xl": "32px (4×)",
+        "xxl": "48px (6×)",
+        "xxxl": "64px (8×)"
+      },
+      "application_rule": "Spacing between related elements < spacing between unrelated groups"
+    },
+    "typography_system": {
+      "typeface_choice": {
+        "primary": "Helvetica Neue (Grotesque sans-serif)",
+        "rationale": "Neutral, legible, timeless, German design heritage",
+        "fallback": "Arial"
+      },
+      "modular_scale": {
+        "base": "14px",
+        "ratio": "Major third (1.25)",
+        "scale": {
+          "hero_title": "90-110px (6-8 steps up)",
+          "section_title": "48-56px (4 steps up)",
+          "subtitle": "18-22px (1-2 steps up)",
+          "body": "14-16px (base)",
+          "caption": "11-12px (1 step down)",
+          "label": "10px (2 steps down)"
+        }
+      },
+      "weights": {
+        "regular": "400 - body text, descriptions",
+        "medium": "500 - subtitles, secondary info",
+        "semibold": "600 - section titles, labels",
+        "bold": "700 - product name, primary titles"
+      },
+      "letter_spacing_rule": "Larger text = tighter spacing; Smaller text = looser spacing for readability"
+    },
+    "grid_system": {
+      "primary_grid": {
+        "type": "Modular grid",
+        "column_width": "60px",
+        "gutter": "24px",
+        "margin": "48px",
+        "total_columns": 12,
+        "application": "Overall page layout, section widths"
+      },
+      "secondary_grid": {
+        "type": "Baseline grid",
+        "line_height": "24px (3× base unit)",
+        "application": "Vertical rhythm, text alignment"
+      },
+      "tertiary_grid": {
+        "type": "Micro grid",
+        "unit": "8px",
+        "application": "Component internal spacing, illustration details"
+      }
+    },
+    "elevation_system": {
+      "philosophy": "Minimal shadows, content creates depth",
+      "levels": {
+        "flat": "No shadow - primary content surfaces",
+        "subtle": "0 2px 8px rgba(0,0,0,0.04) - hover states",
+        "medium": "0 4px 16px rgba(0,0,0,0.06) - floating elements",
+        "large": "0 8px 32px rgba(0,0,0,0.08) - modals (rarely used)"
+      },
+      "rule": "Use elevation sparingly. Most elements should be flat."
+    }
+  },
+  "level_2_component_patterns": {
+    "title": "Component Design Patterns",
+    "description": "Reusable component archetypes and their behavioral rules",
+    "section_archetype": {
+      "structure": {
+        "header": {
+          "pattern": "Label → Title → Subtitle",
+          "spacing": "Label 8px → Title 16px → Subtitle",
+          "alignment": "Left-aligned (Swiss style)"
+        },
+        "content": {
+          "pattern": "Single focal point per section",
+          "rule": "One primary message, supported by secondary information"
+        },
+        "footer": {
+          "pattern": "Navigation or call-to-action (minimal)",
+          "usage": "Only when needed for flow"
+        }
+      },
+      "spacing_between_sections": "96-128px (12-16× base unit)"
+    },
+    "illustration_system": {
+      "philosophy": "Technical precision meets aesthetic clarity",
+      "style_rules": {
+        "line_weights": {
+          "outline": "2px - primary forms",
+          "detail": "1.5px - secondary features",
+          "annotation": "0.5-1px - labels, dimension lines",
+          "grid": "0.3px - background patterns"
+        },
+        "gradient_usage": {
+          "rule": "Maximum 3 stops, <10% luminance variation",
+          "purpose": "Suggest material properties, not create depth"
+        },
+        "color_application": {
+          "base": "Neutral grays and off-whites",
+          "accent": "Only for functional elements (controls, indicators)",
+          "annotation": "#F4793E for dimensions, #6E6E6E for labels"
+        }
+      },
+      "illustration_types": {
+        "hero_product": {
+          "purpose": "Show complete product in context",
+          "style": "Photorealistic vector, orthographic view",
+          "detail_level": "High - all features visible",
+          "background": "Seamless with page background"
+        },
+        "exploded_view": {
+          "purpose": "Reveal internal structure",
+          "style": "Isometric cutaway",
+          "detail_level": "Very high - engineering precision",
+          "annotation": "Component labels with leader lines"
+        },
+        "technical_drawing": {
+          "purpose": "Communicate precise dimensions",
+          "style": "Orthographic projection (Front/Top/Side/Iso)",
+          "detail_level": "Medium - key features only",
+          "annotation": "Dimension lines, view labels"
+        },
+        "component_detail": {
+          "purpose": "Highlight individual parts",
+          "style": "Isolated, centered",
+          "detail_level": "High - material texture visible",
+          "annotation": "Part name below"
+        }
+      }
+    },
+    "interaction_patterns": {
+      "cursor_system": {
+        "type": "Custom reticle cursor",
+        "purpose": "Precision pointing tool aesthetic",
+        "behavior": {
+          "default": "60px circle with crosshair, blurred background",
+          "hover": "Crosshair color changes to accent, blur reduces",
+          "active": "No additional animation (anti-gimmick)"
+        },
+        "philosophy": "Enhance precision perception, not decorate"
+      },
+      "scroll_indicators": {
+        "progress_bar": {
+          "position": "Top-right edge",
+          "width": "2px",
+          "color": "Accent primary",
+          "behavior": "Grows with scroll progress"
+        },
+        "section_reveal": {
+          "animation": "Fade + upward translate",
+          "duration": "0.6s",
+          "easing": "cubic-bezier(0.4, 0, 0.2, 1)",
+          "trigger": "10% intersection threshold"
+        }
+      },
+      "hover_states": {
+        "principle": "Subtle feedback, not performance",
+        "cards": {
+          "change": "Slight elevation increase + shadow",
+          "duration": "0.3s"
+        },
+        "links": {
+          "change": "Color shift to accent",
+          "duration": "0.2s"
+        },
+        "active_card": {
+          "change": "Background inversion (accent bg, white text)",
+          "usage": "Highlight current principle/item"
+        }
+      }
+    }
+  },
+  "level_3_layout_composition": {
+    "title": "Layout & Composition Rules",
+    "description": "How components combine to create complete layouts",
+    "hero_section_logic": {
+      "grid_occupation": {
+        "text_block": "Columns 1-4 (left third)",
+        "product_image": "Columns 5-12 (right two-thirds, overflow)"
+      },
+      "asymmetric_balance": {
+        "visual_weight_text": "35% (dense typography)",
+        "visual_weight_image": "65% (large product presence)",
+        "balance_point": "Optical center, not mathematical center"
+      },
+      "overflow_strategy": {
+        "image_bleeds": "Right edge and bottom edge",
+        "purpose": "Break grid intentionally for dynamism",
+        "rule": "Overflow only after establishing grid discipline"
+      }
+    },
+    "grid_content_sections": {
+      "design_philosophy": {
+        "layout": "Full-width quote + 2×3 card grid",
+        "card_behavior": "Variable widths, narrow gaps",
+        "background": "Subtle grid pattern (60px intervals)",
+        "grid_crosses": "0.5px at intersections, multiply blend"
+      },
+      "internal_structure": {
+        "layout": "Top-heavy (large illustration) + bottom support (3 components)",
+        "proportion": "Main 60% height, components 40% height",
+        "alignment": "Components align to main illustration's key points"
+      },
+      "technical_dimensions": {
+        "layout": "2×2 orthographic grid",
+        "spacing": "Equal gutters between views",
+        "legend": "Below grid, full width"
+      }
+    },
+    "two_column_sections": {
+      "technical_specifications": {
+        "left_column": {
+          "width": "50%",
+          "content": "Data tables (dense, scannable)",
+          "alignment": "Left-aligned labels, right-aligned values"
+        },
+        "right_column": {
+          "width": "50%",
+          "content": "Illustrations (dimension diagram + packaging)",
+          "stacking": "Vertical, centered"
+        }
+      },
+      "app_interface": {
+        "layout": "Three equal columns (phone interfaces)",
+        "phone_sizing": "Scaled iPhone 15 Pro (393×852pt → 314×682px)",
+        "spacing": "Even distribution, minimal side margins",
+        "labels": "Outside frame, below each phone"
+      }
+    }
+  },
+  "level_4_responsive_adaptation": {
+    "title": "Responsive Behavior System",
+    "description": "How the design adapts across viewport sizes",
+    "breakpoint_strategy": {
+      "desktop": {
+        "range": ">1024px",
+        "approach": "Full grid, maximum whitespace"
+      },
+      "tablet": {
+        "range": "768px - 1024px",
+        "approach": "Condensed grid, reduced whitespace, maintain hierarchy"
+      },
+      "mobile": {
+        "range": "<768px",
+        "approach": "Single column, stacked content, essential only"
+      }
+    },
+    "adaptation_rules": {
+      "typography": {
+        "desktop": "Full modular scale",
+        "tablet": "Reduce hero title 10-15%",
+        "mobile": "Reduce hero title 30-40%, body text readable"
+      },
+      "spacing": {
+        "desktop": "Full scale (8px base)",
+        "tablet": "Reduce to 6px base",
+        "mobile": "Reduce to 4px base"
+      },
+      "illustrations": {
+        "desktop": "Full detail, all annotations",
+        "tablet": "Scale proportionally, maintain readability",
+        "mobile": "Simplify details, stack vertically"
+      },
+      "layouts": {
+        "hero": {
+          "desktop": "Side-by-side",
+          "mobile": "Stacked, image first"
+        },
+        "grids": {
+          "desktop": "Multi-column",
+          "tablet": "Reduce columns",
+          "mobile": "Single column"
+        },
+        "app_phones": {
+          "desktop": "3 horizontal",
+          "tablet": "2 horizontal + 1 below",
+          "mobile": "Single column stack"
+        }
+      }
+    }
+  },
+  "level_5_content_strategy": {
+    "title": "Content & Messaging Framework",
+    "description": "How information is structured and presented",
+    "voice_and_tone": {
+      "personality": [
+        "Confident but not arrogant",
+        "Technical but not cold",
+        "Minimal but not sparse",
+        "Precise but not pedantic"
+      ],
+      "writing_style": {
+        "sentences": "Short, declarative, active voice",
+        "vocabulary": "Technical terms used correctly, not pretentiously",
+        "density": "Information-rich, word-count-poor"
+      }
+    },
+    "information_hierarchy": {
+      "must_know": {
+        "content": "Product name, key specs, price (if applicable)",
+        "presentation": "Largest, boldest, earliest"
+      },
+      "should_know": {
+        "content": "Features, benefits, technical details",
+        "presentation": "Medium prominence, scannable format"
+      },
+      "nice_to_know": {
+        "content": "Full specifications, compatibility, accessories",
+        "presentation": "Detailed sections, expandable if needed"
+      }
+    },
+    "language_localization": {
+      "primary": "English (global audience)",
+      "approach": "Simple, clear, avoid idioms",
+      "technical_terms": "Use industry-standard terminology"
+    }
+  },
+  "level_6_technical_implementation": {
+    "title": "Implementation Guidelines",
+    "description": "Technical approach to realize the design system",
+    "technology_stack": {
+      "html": "Semantic HTML5, proper heading hierarchy",
+      "css": "CSS3 with custom properties (variables)",
+      "svg": "Inline SVG for all illustrations (scalable, styleable)",
+      "javascript": "Vanilla ES6+, minimal dependencies"
+    },
+    "performance_principles": {
+      "critical_rendering_path": {
+        "inline_critical_css": "Above-the-fold styles in <head>",
+        "defer_non_critical": "Load remaining CSS asynchronously"
+      },
+      "asset_optimization": {
+        "svg": "Inline, minified, remove metadata",
+        "images": "Next-gen formats (WebP), responsive srcset",
+        "fonts": "Subset to required characters, preload critical"
+      },
+      "animation_efficiency": {
+        "use_transform_and_opacity": "GPU-accelerated properties only",
+        "avoid_layout_thrashing": "No width/height/top/left animations",
+        "request_animation_frame": "For smooth cursor and scroll"
+      }
+    },
+    "accessibility_commitment": {
+      "wcag_level": "AA minimum",
+      "focus_indicators": "Clear, visible outlines on interactive elements",
+      "color_contrast": "4.5:1 minimum for text",
+      "keyboard_navigation": "Full site navigable via keyboard",
+      "screen_reader_support": "Proper ARIA labels, semantic HTML"
+    },
+    "browser_support": {
+      "modern": "Latest Chrome, Firefox, Safari, Edge",
+      "graceful_degradation": "Core content accessible on older browsers",
+      "progressive_enhancement": "Advanced features enhance experience"
+    }
+  },
+  "level_7_quality_assurance": {
+    "title": "Design Quality Checklist",
+    "description": "Validation criteria for design decisions",
+    "rams_test": [
+      "Is this element functionally necessary?",
+      "Does this decoration serve a purpose?",
+      "Can this be removed without breaking functionality?",
+      "Is this honest, or does it promise what it can't deliver?",
+      "Will this feel dated in 5 years?"
+    ],
+    "swiss_style_test": [
+      "Does this align to the grid?",
+      "Is the typography hierarchy clear?",
+      "Is there unnecessary ornamentation?",
+      "Does the layout have asymmetric balance?",
+      "Is information presented in order of importance?"
+    ],
+    "system_coherence_test": [
+      "Does this use existing design tokens?",
+      "Is this consistent with other sections?",
+      "Can this be abstracted into a reusable pattern?",
+      "Does this follow the color logic (60-30-10)?",
+      "Is spacing derived from the base unit?"
+    ]
+  },
+  "transferability_framework": {
+    "title": "How to Apply This System to Other Products",
+    "step_1_replace_tokens": {
+      "action": "Update design tokens in Level 1",
+      "elements": [
+        "Color palette (match brand)",
+        "Typography scale (adjust for voice)",
+        "Spacing base (change density if needed)"
+      ]
+    },
+    "step_2_adapt_illustrations": {
+      "action": "Redraw illustrations using Level 2 rules",
+      "elements": [
+        "Hero product (orthographic view)",
+        "Exploded view (identify key components)",
+        "Technical drawings (4 standard views)",
+        "Component details (3-5 key parts)"
+      ]
+    },
+    "step_3_restructure_content": {
+      "action": "Apply Level 5 content strategy",
+      "elements": [
+        "Define must/should/nice to know info",
+        "Write in brand voice",
+        "Structure by information hierarchy"
+      ]
+    },
+    "step_4_maintain_principles": {
+      "action": "Keep Level 0 philosophy intact",
+      "non_negotiable": [
+        "Less is more",
+        "Grid-based layouts",
+        "Functional color usage",
+        "Typography as primary design element",
+        "Material honesty"
+      ]
+    }
+  }
+}

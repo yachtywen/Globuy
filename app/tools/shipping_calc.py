@@ -1,32 +1,34 @@
-"""Shipping, duty and landed-cost estimation."""
+"""Domestic single-offer shipping and total-cost calculation."""
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.tools.costs import calculate_domestic_cost
 
 
-@tool
+class ShippingCalcInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_price: Annotated[float, Field(ge=0)]
+    quantity: Annotated[int, Field(ge=1)] = 1
+    shipping_fee: Annotated[float | None, Field(ge=0)] = None
+    currency: Literal["CNY"] = "CNY"
+
+
+@tool(args_schema=ShippingCalcInput)
 def shipping_calc(
-    item_price: float,
-    quantity: int = 1,
-    shipping_fee: float = 0,
-    duty_rate: float = 0,
-    extra_fees: float = 0,
-    currency: str = "CNY",
+    item_price: Annotated[float, Field(ge=0)],
+    quantity: Annotated[int, Field(ge=1)] = 1,
+    shipping_fee: Annotated[float | None, Field(ge=0)] = None,
+    currency: Literal["CNY"] = "CNY",
 ) -> dict[str, Any]:
-    """Estimate landed cost from item, shipping, duty, and extra fees."""
+    """Calculate one domestic offer; unknown shipping remains unknown."""
 
-    quantity = max(quantity, 1)
-    merchandise = round(max(item_price, 0) * quantity, 2)
-    duty = round(merchandise * max(duty_rate, 0), 2)
-    total = round(merchandise + max(shipping_fee, 0) + duty + max(extra_fees, 0), 2)
-    return {
-        "status": "estimate",
-        "currency": currency.upper(),
-        "merchandise": merchandise,
-        "shipping_fee": max(shipping_fee, 0),
-        "estimated_duty": duty,
-        "extra_fees": max(extra_fees, 0),
-        "total": total,
-        "warning": "税率和清关费用为输入估算值，不构成海关或税务意见。",
-    }
+    return calculate_domestic_cost(
+        item_price=item_price,
+        quantity=quantity,
+        shipping_fee=shipping_fee,
+        currency=currency,
+    )
