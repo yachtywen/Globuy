@@ -18,6 +18,7 @@
 
 更多实现状态与已知差距见 [docs/project-status.md](docs/project-status.md)，接口见
 [docs/globuy接口文档v1.md](docs/globuy接口文档v1.md)。
+当前项目优化部分已做和未做还有还需要做的内容详细看[docs/ToDo.md](docs/ToDo.md)。
 
 ## 快速开始：本地演示模式
 
