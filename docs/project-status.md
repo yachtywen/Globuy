@@ -1,5 +1,12 @@
 # globuy 项目状态
 
+## 2026-07-22：固化全品类按需商品搜索与 AG-UI 进度目标方案
+
+- 新增 `docs/商品搜索链路逻辑更新的具体实现方案.md`，将当前“主要检索耳机离线快照”的链路扩展为目标设计：Think/Planner 先形成结构化商品品类和搜索意图，ItemSearch 内部检查公共目录覆盖，不足时通过通用 Provider 适配层按需补充淘宝、京东和抖音候选，再经 MySQL、事务 Outbox、批量 Embedding 和 OpenSearch 执行现有 BM25 + BGE-M3 + 无权重 RRF 混合检索。
+- 目标候选策略固定为三平台有效去重总数 60 条可用下限、100 条软目标、120 条硬上限；三个平台可受控并发、单平台按页串行，抖音连续传递 `searchId`。缓存命中不调用 Provider，单平台失败时允许其他平台以 `partial` 返回，100 条不是每次对话的阻塞条件。
+- 方案保持九业务工具、MySQL 权威库、单一 OpenSearch 商品索引和既定向量模型不变；实时采集设计为 ItemSearch 下层应用服务，不让 LLM 直接写库或索引。新增目标包括 CatalogScope 新鲜度/覆盖、同范围 singleflight、Provider预算与幂等、`semantic_hash` 向量复用、批量写入及全路径取消传播。
+- AG-UI 目标增加意图识别、缓存检查、三平台采集、标准化、持久化、索引和混合检索等脱敏 `CUSTOM` 进度事件；继续使用当前 EventBroker sequence、缓冲、重放和标准终态。本文仅为目标设计，尚未修改运行代码、数据库结构、OpenSearch Mapping或前端 reducer，也未调用真实付费 API；实施前仍需确认 Just One API 实际单价、长期持久化和面向用户展示授权。
+
 ## 2026-07-22：重整 GitHub clone 后的 README 启动入口
 
 - README 现将可独立复现的“本地 MySQL 8 + mock 模型 + FastAPI + Vite”路径设为快速开始：包含 Conda/Node/Docker 前置条件、创建随机本地数据库账号、Alembic 迁移、双终端启动、健康检查、停止与清理命令。它不要求 DeepSeek、Tavily 或商品 Provider 密钥，适合登录、会话、任务与 WebSocket 链路演示。
@@ -502,6 +509,11 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-07-22：新增 `docs/商品搜索链路逻辑更新的具体实现方案.md`，固化“先识别品类、缓存优先、
+  三平台按需补充60～100条且最多120条、MySQL→Outbox→OpenSearch、语义哈希复用向量、全链路
+  AG-UI进度”的目标方案。当前仍是设计文档，未实施Provider主链路、Mapping或前端状态变更，
+  未调用真实付费服务。
 
 - 2026-07-22：重写面向 GitHub 使用者的 README。快速开始改为可在无付费密钥条件下使用本地 MySQL 8 与 mock 模型完成注册、登录、任务和事件链路；将 MySQL 的 3307 端口、独立 FastAPI 启动、Vite 代理 500 诊断、验证与清理步骤集中说明。完整商品检索改为明确依赖获准离线数据包、OpenSearch/Redis 和 BGE-M3 建库的可选路径，不再暗示普通 clone 包含商品数据或可直接复现当前索引。当前 MySQL ping 与临时 FastAPI `/healthz` 已验证；全新 checkout 演练仍待后续环境验证。
 
