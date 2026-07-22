@@ -1,5 +1,12 @@
 # globuy 项目状态
 
+## 2026-07-22：重整 GitHub clone 后的 README 启动入口
+
+- README 现将可独立复现的“本地 MySQL 8 + mock 模型 + FastAPI + Vite”路径设为快速开始：包含 Conda/Node/Docker 前置条件、创建随机本地数据库账号、Alembic 迁移、双终端启动、健康检查、停止与清理命令。它不要求 DeepSeek、Tavily 或商品 Provider 密钥，适合登录、会话、任务与 WebSocket 链路演示。
+- 明确 `npm run dev` 仅启动 Vite；其 `/healthz` 与 `/api/*` 会代理到 8000，因此必须单独启动 FastAPI。README 也明确当前 `compose.yaml` 只管理 OpenSearch/Redis，MySQL 需按快速开始单独创建或接入已有实例。
+- 纠正 clone 可复现范围：1000 条商品 Candidate 快照、索引、模型缓存与密钥均不随 Git 发布，完整 ItemSearch 不能仅靠 clone 重建；README 将其作为需要获准数据包、OpenSearch/Redis 和首次 BGE-M3 建库的进阶路径，避免把离线快照表述为实时数据。
+- 验证（未调用付费模型或外部商品 Provider）：在当前已配置 MySQL 上，`Database.ping()` 返回成功；临时启动 `python -m uvicorn app.api.server:app --host 127.0.0.1 --port 8000` 后，`GET /healthz` 返回 `status=ok` 与 `database=ok`，随后已停止该临时进程。Docker 状态确认现有 `mysql8` 映射 3307，项目 OpenSearch/Redis 均 healthy。尚未在全新机器完成端到端 clone 演练。
+
 ## 2026-07-21：修复推荐商品加入心愿库，并重构长期记忆中心
 
 - 推荐结果在返回与持久化前会按 `item_id` 补齐稳定的 `product_id` / `offer_id`，历史结果也会在读取时获得相同补全，因此前端“加入心愿库”按钮不再因缺少报价标识而被禁用。
@@ -8,7 +15,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-07-21
+> 最后更新时间：2026-07-22
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件
@@ -495,6 +502,8 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-07-22：重写面向 GitHub 使用者的 README。快速开始改为可在无付费密钥条件下使用本地 MySQL 8 与 mock 模型完成注册、登录、任务和事件链路；将 MySQL 的 3307 端口、独立 FastAPI 启动、Vite 代理 500 诊断、验证与清理步骤集中说明。完整商品检索改为明确依赖获准离线数据包、OpenSearch/Redis 和 BGE-M3 建库的可选路径，不再暗示普通 clone 包含商品数据或可直接复现当前索引。当前 MySQL ping 与临时 FastAPI `/healthz` 已验证；全新 checkout 演练仍待后续环境验证。
 
 - 2026-07-21：完成 MySQL 8 权威持久化首版：引入异步 SQLAlchemy 2、asyncmy 与 Alembic，建立用户、
   登录会话、thread/run/message/result/artifact、幂等键、Product/Offer/Snapshot/Observation、默认心愿库、
