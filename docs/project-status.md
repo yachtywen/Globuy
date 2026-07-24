@@ -7,6 +7,37 @@
 - 方案保持九业务工具、MySQL 权威库、单一 OpenSearch 商品索引和既定向量模型不变；实时采集设计为 ItemSearch 下层应用服务，不让 LLM 直接写库或索引。新增目标包括 CatalogScope 新鲜度/覆盖、同范围 singleflight、Provider预算与幂等、`semantic_hash` 向量复用、批量写入及全路径取消传播。
 - AG-UI 目标增加意图识别、缓存检查、三平台采集、标准化、持久化、索引和混合检索等脱敏 `CUSTOM` 进度事件；继续使用当前 EventBroker sequence、缓冲、重放和标准终态。本文仅为目标设计，尚未修改运行代码、数据库结构、OpenSearch Mapping或前端 reducer，也未调用真实付费 API；实施前仍需确认 Just One API 实际单价、长期持久化和面向用户展示授权。
 
+## 2026-07-23：Skill 化长期记忆与用户确认写入
+
+- 新增用户级 `memory_skills`：新注册用户预置通用偏好、数码设备、服饰穿搭、家居生活、美妆护肤、运动户外六个 Skill；历史未归类记忆会在首次访问时归入通用偏好。
+- 记忆支持 Skill 关联、编辑和候选批量确认。Agent 产出的候选偏好默认不会写入，用户在“查看并保存”弹窗中修改并确认后才以 `agent_confirmed` 来源持久化。
+- 记忆 OpenSearch 文档加入 `skill_id`；召回优先匹配启用 Skill 的关键词，未命中时回退至全部启用 Skill，黑名单仍全量生效。
+- 个人中心改为购物 Skill 与记忆管理入口；删除非通用 Skill 会保留记忆并迁回通用偏好。注册提交按钮修复为底部可见主按钮。
+- 验证：Python AST 与 SQLAlchemy 元数据导入通过；当前环境的 Conda/前端构建超过命令时限，需在本地复跑 `pytest -q`、`npm run build` 和 `alembic upgrade head`。
+- 修复 Skill 管理页中“删除 Skill”条件渲染遗漏 JSX 闭合符导致 Vite 无法编译的问题；Babel JSX 解析通过，当前环境的全量 TypeScript 检查仍在 120 秒命令时限后超时。
+- 修复注册页右侧表单在桌面端被外层 `overflow: hidden` 裁切的问题：认证栏现在拥有独立的 `100dvh` 垂直滚动区；移动端恢复为整页自然滚动，确保确认密码与提交按钮可达。
+- 偏好管理页面的用户文案统一为“偏好设置 / 偏好领域”，不再暴露内部 Skill 概念；合并为一个“添加偏好”主表单，保留“新建偏好领域”为按需打开的弹窗。领域下拉框改为受控组件，左侧领域卡片与右侧选择器会同步，因此六个默认领域均可直接切换和保存。
+- 实时商品闭环开始接入：`item_search` 在启用 Just One Provider 后先拉取实时标准化候选，缓存键为 `query + platform`，命中时立即返回并后台刷新；候选会送入既有 OpenSearch BM25 + BGE-M3 + RRF 链路，并在结果中明确 `source_kind`、`data_as_of` 与 `cache_hit`。Provider 未启用、令牌缺失、请求失败或混合检索失败均返回可区分状态，绝不把离线快照伪装为实时结果。
+- 心愿库新增单商品“刷新价格”调用入口，服务端只领取该用户拥有的目标商品交给既有 `PriceRefreshWorker`；Provider 详情能力未配置时会如实记录 `provider_unavailable`，保留旧价格与下次重试时间。
+- 验证：后端模块编译、API 导入与实时缓存到混合检索的替身烟雾检查通过；前端 TypeScript 检查通过。当前 `globuy` Conda 环境未安装 pytest，且 `.env` 没有配置实时 Provider 令牌，因此尚未进行付费 Provider 真烟雾调用或完整 pytest 回归。
+- 本机真实检索诊断：`api.justoneapi.com` 可解析但 TCP 443 不可连接，运行时表现为 `ConnectError`，请求尚未到达 Provider，因而与 Token 正误无关；同时 `127.0.0.1:9200` 未监听且本地 Candidate 数据包不存在，OpenSearch 离线索引无法构建。实时 Provider 网络失败时，`item_search` 现会显式降级到离线混合检索；若离线索引也未就绪，返回一条同时说明两层原因的 `not_configured`，不再只显示笼统“搜索失败”。
+- 实时检索首次写入 OpenSearch 时会自动创建固定的 `globuy-products` 读取别名，再进入 BM25 + BGE-M3 + RRF；因此仅验证 Just One 实时搜索时无需预先准备离线 Candidate 数据包，但仍需先启动 OpenSearch，并预留 BGE-M3 首次下载与建库时间。
+- 运行时校验发现 Compose 原标记为 `opensearch:3.7.0` 的容器实际报告 OpenSearch `2.16.0`，不支持商品 RRF 管道需要的 `score-ranker-processor`，会在创建管道时报 400。Compose 已固定为 `opensearchproject/opensearch:2.19.1`，保持 OpenSearch + BGE-M3 + 无权重 RRF 的既定选型，不以归一化加权融合替代。
+- README 已补充实时商品 Provider 的本地配置及真实 / 缓存 / 降级行为。以当前 `.env` 实测，`alembic current` 为 `20260723_0002 (head)`；FastAPI 在首次初始化 BGE/OpenSearch 客户端约 18 秒后可启动，`/healthz` 返回 `status=ok`、`model_provider=openai-compatible`、`database=ok`。前端 `tsc --noEmit` 通过，完整 `vite build` 在当前 60 秒工具时限内未完成，未将其误记为构建成功。
+
+## 2026-07-23：重写近期待办为可验收的产品任务
+
+- `docs/ToDo.md` 已将技术短语改写为按 P0/P1/P2 排序的用户体验、实现边界和验收条件。P0 固定为“实时商品候选 + 缓存混合检索”和“心愿单手动/每日刷新”，其中缓存是实时候选调用的性能与限流控制措施，不替代当前 OpenSearch 混合检索。
+
+## 2026-07-23：补齐个性化可追溯性与离线测评工具
+
+- 新增 `app.eval.shopping_benchmark`：读取真实运行的 JSONL 评测记录，生成平台成功率、平均/P95 延迟、缓存命中率、关键词/混合检索 Top-3 命中率、Skill 记忆召回、工具失败和取消成功率的 JSON/Markdown 报告；格式见 `docs/evaluation-format.md`。
+- ItemPicker 现将预算和评分排序依据写入商品推荐理由；Agent 在结果中注明本次已被读取并纳入决策上下文的确认 Skill 偏好，避免把内容平台观点或模型推测伪装为商品事实。
+
+## 2026-07-23：将待办改为队友可执行的交接清单
+
+- `docs/ToDo.md` 现为每个 P0/P1 任务列出实施顺序、完成标准和测试要求；P0 明确规定最终使用 `python -m app.eval.shopping_benchmark output/eval/records.jsonl` 生成报告，字段格式与报告位置见 `docs/evaluation-format.md`。
+
 ## 2026-07-22：重整 GitHub clone 后的 README 启动入口
 
 - README 现将可独立复现的“本地 MySQL 8 + mock 模型 + FastAPI + Vite”路径设为快速开始：包含 Conda/Node/Docker 前置条件、创建随机本地数据库账号、Alembic 迁移、双终端启动、健康检查、停止与清理命令。它不要求 DeepSeek、Tavily 或商品 Provider 密钥，适合登录、会话、任务与 WebSocket 链路演示。
@@ -22,7 +53,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-07-22
+> 最后更新时间：2026-07-23
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件

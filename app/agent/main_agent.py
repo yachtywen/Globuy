@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Annotated, Any, Literal, Self, TypedDict
 from uuid import uuid4
@@ -43,6 +45,59 @@ from app.utils.thread_ctx import (
 
 type Phase = Literal["think", "act", "observe", "reflect", "done"]
 
+_BUDGET_PREFERENCE = re.compile(
+    r"预算\s*(?:为|是|在)?\s*[￥¥]?\s*(\d+(?:\.\d+)?)\s*(?:元|块|RMB|rmb)?\s*(?:以内|以下|不超过|最多|上限)?"
+)
+_MEMORY_TRIGGER_WORDS = (
+    "预算", "不超过", "以内", "以下", "最多", "上限",
+    "喜欢", "偏好", "钟意", "更喜欢", "优先", "更看重", "在意",
+    "不喜欢", "讨厌", "拒绝", "不要", "排除", "避开", "不能接受",
+    "必须", "只要", "习惯", "常用", "常穿", "过敏", "敏感",
+    "尺码", "身高", "体重", "肤质", "肤色",
+)
+
+
+def _detected_preference_candidates(content: str) -> list[dict[str, Any]]:
+    """Extract explicit reusable preferences without writing any user data."""
+
+    candidates: list[dict[str, Any]] = []
+    match = _BUDGET_PREFERENCE.search(content)
+    if match is not None:
+        budget = float(match.group(1))
+        if 0 < budget <= 1_000_000:
+            candidates.append({
+                "key": "budget_max_cny",
+                "category": "preference",
+                "content": f"购物预算不超过 {budget:g} 元",
+                "confidence": 1.0,
+            })
+    normalized = " ".join(content.split()).strip()
+    triggered = [word for word in _MEMORY_TRIGGER_WORDS if word in normalized]
+    if triggered:
+        is_blacklist = any(word in normalized for word in ("不喜欢", "讨厌", "拒绝", "不要", "排除", "避开", "不能接受"))
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+        candidates.append({
+            "key": f"explicit_preference_{digest}",
+            "category": "blacklist" if is_blacklist else "preference",
+            "content": normalized[:500],
+            "confidence": 1.0,
+        })
+    return candidates
+
+
+def _merge_preference_candidates(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    keys: set[str] = set()
+    for group in groups:
+        for candidate in group:
+            if not isinstance(candidate, dict):
+                continue
+            key = str(candidate.get("key") or "").strip()
+            if key and key not in keys:
+                merged.append(candidate)
+                keys.add(key)
+    return merged
+
 
 class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
@@ -57,6 +112,7 @@ class AgentState(TypedDict, total=False):
     loop_detected: bool
     memory_context: str | None
     memory_status: str
+    recalled_memories: list[dict[str, str]]
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -278,6 +334,30 @@ class AgentLoop:
                 if payload and payload.get("terminal") is True:
                     terminal_result, terminal_name = payload, message.name
                     break
+            # ItemPicker is deterministic and already contains verified product
+            # facts. Do not let an indecisive model re-enter Think/Reflect after
+            # valid picks exist; it otherwise consumes the graph recursion budget.
+            if terminal_result is None:
+                for message in reversed(state["messages"]):
+                    if not isinstance(message, ToolMessage) or message.name != "item_picker":
+                        continue
+                    payload = _tool_payload(message)
+                    picks = payload.get("picks") if payload else None
+                    if isinstance(picks, list) and picks:
+                        terminal_result = {
+                            "status": "complete",
+                            "terminal": True,
+                            "final_text": "已根据你的条件筛选出可比较的商品。",
+                            "picks": picks,
+                            "unresolved": [],
+                            "learned_preferences": state.get("learned_preferences", []),
+                        }
+                        terminal_name = "item_picker"
+                        break
+            if terminal_result and terminal_name == "shopping_summary":
+                terminal_result = self._add_memory_reasons(
+                    terminal_result, state.get("recalled_memories", [])
+                )
             phase: Phase = "done" if terminal_result is not None else "reflect"
             await _report_phase("observe", started=False, iteration=iteration)
             return {
@@ -285,10 +365,11 @@ class AgentLoop:
                 "tool_history": recent,
                 "last_observation_digest": recent[-1]["result_digest"] if recent else None,
                 "terminal_result": terminal_result,
-                "learned_preferences": (
+                "learned_preferences": _merge_preference_candidates(
+                    state.get("learned_preferences", []),
                     terminal_result.get("learned_preferences", [])
                     if terminal_name == "shopping_summary" and terminal_result
-                    else state.get("learned_preferences", [])
+                    else [],
                 ),
                 "loop_detected": detected,
             }
@@ -354,10 +435,11 @@ class AgentLoop:
             "last_observation_digest": None,
             "terminal_result": None,
             "original_query": content,
-            "learned_preferences": [],
+            "learned_preferences": _detected_preference_candidates(content),
             "loop_detected": False,
             "memory_context": None,
             "memory_status": "not_configured" if self.store is None else "ready",
+            "recalled_memories": [],
         }
 
     async def _state_with_memory(self, content: str) -> AgentState:
@@ -370,16 +452,41 @@ class AgentLoop:
                 ("users", user_id, "memories"), query=content, limit=10
             )
             lines = []
+            recalled: list[dict[str, str]] = []
             for memory in memories:
                 category = str(memory.value.get("category") or "preference")
+                skill_name = str(memory.value.get("skill_name") or "通用偏好")
                 content_value = str(memory.value.get("content") or "").strip()
                 if content_value:
-                    lines.append(f"- [{category}] {memory.key}: {content_value}")
+                    lines.append(f"- [{skill_name}/{category}] {memory.key}: {content_value}")
+                    recalled.append({"key": memory.key, "skill_name": skill_name, "content": content_value})
             state["memory_context"] = "\n".join(lines) or None
+            state["recalled_memories"] = recalled
             state["memory_status"] = "ready"
         except Exception:
             state["memory_status"] = "partial"
         return state
+
+    @staticmethod
+    def _add_memory_reasons(result: dict[str, Any], memories: list[dict[str, str]]) -> dict[str, Any]:
+        """Expose confirmed preference influence without claiming unsupported item matches."""
+
+        if not memories or not isinstance(result.get("picks"), list):
+            return result
+        enriched = dict(result)
+        applied = [f"已纳入 {item['skill_name']} 偏好：{item['content']}" for item in memories[:2]]
+        picks: list[dict[str, Any]] = []
+        for raw in result["picks"]:
+            if not isinstance(raw, dict):
+                picks.append(raw)
+                continue
+            item = dict(raw)
+            reasons = [str(value) for value in item.get("reasons", []) if isinstance(value, str)]
+            item["reasons"] = [*reasons, *applied][:4]
+            picks.append(item)
+        enriched["picks"] = picks
+        enriched["recalled_memory_keys"] = [item["key"] for item in memories]
+        return enriched
 
     def _config(self, thread_id: str, *, child: bool = False) -> RunnableConfig:
         settings = get_settings()

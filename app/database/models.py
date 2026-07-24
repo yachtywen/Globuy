@@ -356,6 +356,9 @@ class MemoryEntry(Base):
     user_id: Mapped[str] = mapped_column(
         ForeignKey("users.user_id", ondelete="CASCADE"), index=True
     )
+    skill_id: Mapped[str | None] = mapped_column(
+        ForeignKey("memory_skills.skill_id", ondelete="SET NULL"), index=True
+    )
     category: Mapped[str] = mapped_column(String(32), index=True)
     key: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text)
@@ -373,6 +376,30 @@ class MemoryEntry(Base):
         CheckConstraint("category IN ('blacklist','preference','history')"),
         CheckConstraint("source IN ('user','agent_confirmed','import')"),
         UniqueConstraint("user_id", "key", name="uq_memory_user_key"),
+    )
+
+
+class MemorySkill(Base):
+    """A user-owned shopping memory domain (called a Skill in the product UI)."""
+
+    __tablename__ = "memory_skills"
+
+    skill_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(String(500))
+    trigger_keywords: Mapped[list[str]] = mapped_column(JSON)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    updated_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    deleted_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active','deleted')"),
+        UniqueConstraint("user_id", "name", name="uq_memory_skill_user_name"),
     )
 
 

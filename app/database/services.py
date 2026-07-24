@@ -8,13 +8,14 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.errors import ApiError
 from app.auth.service import utc_naive
 from app.database.models import (
     IdempotencyKey,
     MemoryEntry,
+    MemorySkill,
     MemoryVersion,
     Offer,
     OfferObservation,
@@ -43,6 +44,7 @@ def _memory_snapshot(item: MemoryEntry) -> dict[str, Any]:
     return {
         "memory_id": item.memory_id,
         "user_id": item.user_id,
+        "skill_id": item.skill_id,
         "category": item.category,
         "key": item.key,
         "content": item.content,
@@ -350,7 +352,96 @@ class MemoryService:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    DEFAULT_SKILLS = (
+        ("通用偏好", "适用于全部购物场景的预算、品牌、材质和排除项。", ["预算", "品牌", "性价比", "材质"]),
+        ("数码设备", "耳机、手机、电脑等数码产品的偏好。", ["耳机", "手机", "电脑", "数码"]),
+        ("服饰穿搭", "服装、鞋包、尺码、颜色和穿搭风格偏好。", ["衣服", "鞋", "尺码", "穿搭"]),
+        ("家居生活", "家居、厨房、收纳和日常用品偏好。", ["家居", "厨房", "收纳", "生活用品"]),
+        ("美妆护肤", "护肤、彩妆、香水和个人护理偏好。", ["护肤", "彩妆", "美妆", "香水"]),
+        ("运动户外", "运动装备、户外用品和功能性服饰偏好。", ["运动", "跑步", "健身", "户外"]),
+    )
+
+    async def _ensure_defaults(self, user_id: str) -> None:
+        async with self.database.sessions.begin() as session:
+            existing = set((await session.scalars(
+                select(MemorySkill.name).where(MemorySkill.user_id == user_id)
+            )).all())
+            now = utc_naive()
+            for name, description, keywords in self.DEFAULT_SKILLS:
+                if name not in existing:
+                    session.add(MemorySkill(skill_id=uuid4().hex, user_id=user_id, name=name,
+                        description=description, trigger_keywords=keywords, is_enabled=True,
+                        status="active", created_at=now, updated_at=now, deleted_at=None))
+            await session.flush()
+            general_id = await session.scalar(select(MemorySkill.skill_id).where(
+                MemorySkill.user_id == user_id, MemorySkill.name == "通用偏好", MemorySkill.status == "active"
+            ))
+            if general_id:
+                for memory in list((await session.scalars(select(MemoryEntry).where(
+                    MemoryEntry.user_id == user_id, MemoryEntry.skill_id.is_(None), MemoryEntry.status == "active"
+                ))).all()):
+                    memory.skill_id = general_id
+
+    @staticmethod
+    def _skill_snapshot(item: MemorySkill, memory_count: int = 0) -> dict[str, Any]:
+        return {"skill_id": item.skill_id, "name": item.name, "description": item.description,
+                "trigger_keywords": item.trigger_keywords, "is_enabled": item.is_enabled,
+                "status": item.status, "memory_count": memory_count,
+                "created_at": _iso(item.created_at), "updated_at": _iso(item.updated_at)}
+
+    async def list_skills(self, user_id: str) -> list[dict[str, Any]]:
+        await self._ensure_defaults(user_id)
+        async with self.database.sessions() as session:
+            skills = list((await session.scalars(select(MemorySkill).where(
+                MemorySkill.user_id == user_id, MemorySkill.status == "active"
+            ).order_by(MemorySkill.created_at))).all())
+            counts = dict((await session.execute(select(MemoryEntry.skill_id, func.count(MemoryEntry.memory_id)).where(
+                MemoryEntry.user_id == user_id, MemoryEntry.status == "active"
+            ).group_by(MemoryEntry.skill_id))).all())
+        return [self._skill_snapshot(item, int(counts.get(item.skill_id, 0))) for item in skills]
+
+    async def create_skill(self, user_id: str, *, name: str, description: str, trigger_keywords: list[str]) -> dict[str, Any]:
+        now = utc_naive()
+        item = MemorySkill(skill_id=uuid4().hex, user_id=user_id, name=name.strip(), description=description.strip(),
+            trigger_keywords=trigger_keywords, is_enabled=True, status="active", created_at=now, updated_at=now, deleted_at=None)
+        async with self.database.sessions.begin() as session:
+            session.add(item)
+        return self._skill_snapshot(item)
+
+    async def update_skill(self, user_id: str, skill_id: str, **changes: Any) -> dict[str, Any]:
+        async with self.database.sessions.begin() as session:
+            item = await session.scalar(select(MemorySkill).where(MemorySkill.skill_id == skill_id, MemorySkill.user_id == user_id).with_for_update())
+            if item is None or item.status != "active": raise ApiError(404, "MEMORY_SKILL_NOT_FOUND", "Skill 不存在")
+            for field in ("name", "description", "trigger_keywords", "is_enabled"):
+                value = changes.get(field)
+                if value is not None: setattr(item, field, value.strip() if isinstance(value, str) else value)
+            item.updated_at = utc_naive()
+            return self._skill_snapshot(item)
+
+    async def delete_skill(self, user_id: str, skill_id: str) -> None:
+        await self._ensure_defaults(user_id)
+        async with self.database.sessions.begin() as session:
+            item = await session.scalar(select(MemorySkill).where(MemorySkill.skill_id == skill_id, MemorySkill.user_id == user_id).with_for_update())
+            if item is None or item.status != "active": raise ApiError(404, "MEMORY_SKILL_NOT_FOUND", "Skill 不存在")
+            general = await session.scalar(select(MemorySkill).where(MemorySkill.user_id == user_id, MemorySkill.name == "通用偏好", MemorySkill.status == "active"))
+            if general is None or general.skill_id == item.skill_id: raise ApiError(409, "MEMORY_SKILL_PROTECTED", "通用偏好不能删除")
+            for memory in list((await session.scalars(select(MemoryEntry).where(MemoryEntry.user_id == user_id, MemoryEntry.skill_id == skill_id, MemoryEntry.status == "active"))).all()):
+                memory.skill_id = general.skill_id
+                memory.version += 1
+                memory.updated_at = utc_naive()
+                snapshot = _memory_snapshot(memory)
+                session.add(MemoryVersion(memory_version_id=uuid4().hex, memory_id=memory.memory_id, version=memory.version, operation="update", snapshot_json=snapshot, created_at=memory.updated_at))
+                session.add(self._outbox(memory, "memory.upserted", snapshot, memory.updated_at))
+            item.status, item.deleted_at, item.updated_at = "deleted", utc_naive(), utc_naive()
+
+    async def _assert_skill(self, session: Any, user_id: str, skill_id: str | None) -> str | None:
+        if skill_id is None: return None
+        found = await session.scalar(select(MemorySkill.skill_id).where(MemorySkill.skill_id == skill_id, MemorySkill.user_id == user_id, MemorySkill.status == "active"))
+        if found is None: raise ApiError(404, "MEMORY_SKILL_NOT_FOUND", "Skill 不存在或不可用")
+        return str(found)
+
     async def list(self, user_id: str) -> list[dict[str, Any]]:
+        await self._ensure_defaults(user_id)
         async with self.database.sessions() as session:
             items = list(
                 (
@@ -373,9 +464,12 @@ class MemoryService:
         confidence: Decimal,
         source_thread_id: str | None,
         source_run_id: str | None,
+        skill_id: str | None = None,
+        source: str = "user",
     ) -> dict[str, Any]:
         now = utc_naive()
         async with self.database.sessions.begin() as session:
+            skill_id = await self._assert_skill(session, user_id, skill_id)
             if source_thread_id:
                 owned_thread = await session.scalar(
                     select(Thread.thread_id).where(
@@ -407,11 +501,12 @@ class MemoryService:
             item = MemoryEntry(
                 memory_id=uuid4().hex,
                 user_id=user_id,
+                skill_id=skill_id,
                 category=category,
                 key=key,
                 content=content,
                 confidence=confidence,
-                source="user",
+                source=source,
                 status="active",
                 source_thread_id=source_thread_id,
                 source_run_id=source_run_id,
@@ -442,6 +537,8 @@ class MemoryService:
         category: str | None,
         content: str | None,
         confidence: Decimal | None,
+        skill_id: str | None = None,
+        key: str | None = None,
     ) -> dict[str, Any]:
         now = utc_naive()
         async with self.database.sessions.begin() as session:
@@ -454,6 +551,10 @@ class MemoryService:
                 raise ApiError(404, "MEMORY_NOT_FOUND", "长期记忆不存在")
             if category is not None:
                 item.category = category
+            if skill_id is not None:
+                item.skill_id = await self._assert_skill(session, user_id, skill_id)
+            if key is not None:
+                item.key = key
             if content is not None:
                 item.content = content
             if confidence is not None:

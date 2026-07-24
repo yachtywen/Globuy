@@ -34,6 +34,12 @@ class MemoryOutboxWorker:
                 index=self.settings.opensearch_memory_index,
                 body=memory_index_body(self.encoder.metadata.dimensions),
             )
+        else:
+            await asyncio.to_thread(
+                self.client.indices.put_mapping,
+                index=self.settings.opensearch_memory_index,
+                body={"properties": {"skill_id": {"type": "keyword"}}},
+            )
 
     async def run_once(self) -> dict[str, int]:
         await self.ensure_index()

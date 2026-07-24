@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     price_refresh_interval_hours: int = Field(default=24, ge=1, le=168)
     price_refresh_local_hour: int = Field(default=3, ge=0, le=23)
 
+    # Runtime commerce discovery. Leaving the token unset deliberately disables
+    # live retrieval instead of silently presenting the offline snapshot as live.
+    realtime_product_provider: Literal["none", "justone"] = "none"
+    justone_api_token: SecretStr | None = None
+    justone_base_url: str = "https://api.justoneapi.com"
+    realtime_search_timeout_seconds: float = Field(default=12.0, gt=0, le=60)
+    realtime_search_cache_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    realtime_search_candidate_limit: int = Field(default=20, ge=1, le=50)
+
     @field_validator("database_url", mode="before")
     @classmethod
     def empty_database_url_is_unconfigured(cls, value: object) -> object:

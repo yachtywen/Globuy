@@ -72,6 +72,12 @@ class PriceRefreshWorker:
         self.claim_lease_minutes = claim_lease_minutes
 
     async def run_once(self) -> dict[str, int | str]:
+        return await self._run(due_only=True)
+
+    async def refresh_item(self, wishlist_item_id: str) -> dict[str, int | str]:
+        return await self._run(due_only=False, wishlist_item_id=wishlist_item_id)
+
+    async def _run(self, *, due_only: bool, wishlist_item_id: str | None = None) -> dict[str, int | str]:
         now = utc_naive()
         refresh_run_id = uuid4().hex
         async with self.database.sessions.begin() as session:
@@ -91,11 +97,9 @@ class PriceRefreshWorker:
                     await session.execute(
                         select(WishlistItem, Offer)
                         .join(Offer, Offer.offer_id == WishlistItem.offer_id)
-                        .where(
-                            WishlistItem.status == "active",
-                            (WishlistItem.next_check_at.is_(None))
-                            | (WishlistItem.next_check_at <= now),
-                        )
+                        .where(WishlistItem.status == "active")
+                        .where(WishlistItem.wishlist_item_id == wishlist_item_id if wishlist_item_id else True)
+                        .where(True if not due_only else (WishlistItem.next_check_at.is_(None)) | (WishlistItem.next_check_at <= now))
                         .order_by(WishlistItem.next_check_at, WishlistItem.wishlist_item_id)
                         .limit(self.batch_size)
                         .with_for_update(skip_locked=True)

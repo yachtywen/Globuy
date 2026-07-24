@@ -22,7 +22,7 @@ from langgraph.store.base import (
 from opensearchpy import OpenSearch
 from sqlalchemy import select
 
-from app.database.models import MemoryEntry, User
+from app.database.models import MemoryEntry, MemorySkill, User
 from app.database.services import MemoryService
 from app.database.session import Database
 from app.search.encoder import EmbeddingEncoder
@@ -35,6 +35,7 @@ def memory_index_body(dimensions: int) -> dict[str, Any]:
             "properties": {
                 "memory_id": {"type": "keyword"},
                 "user_id": {"type": "keyword"},
+                "skill_id": {"type": "keyword"},
                 "category": {"type": "keyword"},
                 "key": {"type": "keyword"},
                 "content": {"type": "text", "analyzer": "cjk"},
@@ -119,6 +120,7 @@ class GlobuyMemoryStore(BaseStore):
             key=entry.key,
             value={
                 "memory_id": entry.memory_id,
+                "skill_id": entry.skill_id,
                 "category": entry.category,
                 "content": entry.content,
                 "confidence": float(entry.confidence),
@@ -177,6 +179,18 @@ class GlobuyMemoryStore(BaseStore):
                     )
                 ).all()
             )
+            skills = list((await session.scalars(select(MemorySkill).where(
+                MemorySkill.user_id == user_id, MemorySkill.status == "active"
+            ))).all())
+        selected_skill_ids = [item.skill_id for item in skills if item.is_enabled]
+        if op.query:
+            query_folded = op.query.casefold()
+            matched = [item.skill_id for item in skills if item.is_enabled and any(
+                keyword.casefold() in query_folded for keyword in item.trigger_keywords
+            )]
+            if matched:
+                selected_skill_ids = matched
+        skill_names = {item.skill_id: item.name for item in skills}
         entries: dict[str, tuple[MemoryEntry, float | None]] = {
             item.memory_id: (item, None) for item in hard_rules
         }
@@ -195,6 +209,7 @@ class GlobuyMemoryStore(BaseStore):
                                         "filter": [
                                             {"term": {"user_id": user_id}},
                                             {"term": {"status": "active"}},
+                                            {"terms": {"skill_id": selected_skill_ids}},
                                         ]
                                     }
                                 },
@@ -252,7 +267,7 @@ class GlobuyMemoryStore(BaseStore):
             SearchItem(
                 namespace=("users", item.user_id, "memories"),
                 key=item.key,
-                value=self._item(item).value,
+                value={**self._item(item).value, "skill_name": skill_names.get(item.skill_id, "通用偏好")},
                 created_at=item.created_at.replace(tzinfo=UTC),
                 updated_at=item.updated_at.replace(tzinfo=UTC),
                 score=score,

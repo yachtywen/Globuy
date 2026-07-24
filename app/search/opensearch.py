@@ -103,19 +103,28 @@ def hybrid_search_body(
         "query": {
             "hybrid": {
                 "queries": [
-                    {"match": {"title": {"query": query}}},
                     {
-                        "knn": {
-                            "content_vector": {
-                                "vector": vector,
-                                "k": pool_size,
-                            }
+                        "bool": {
+                            "must": [{"match": {"title": {"query": query}}}],
+                            "filter": [{"term": {"platform": platform}}],
+                        }
+                    },
+                    {
+                        "bool": {
+                            "must": [
+                                {
+                                    "knn": {
+                                        "content_vector": {
+                                            "vector": vector,
+                                            "k": pool_size,
+                                        }
+                                    }
+                                }
+                            ],
+                            "filter": [{"term": {"platform": platform}}],
                         }
                     },
                 ],
-                # Platform defines the single-platform recall domain and therefore
-                # constrains both BM25 and KNN before RRF fusion.
-                "filter": {"bool": {"filter": [{"term": {"platform": platform}}]}},
             }
         },
     }

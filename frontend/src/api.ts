@@ -1,4 +1,4 @@
-import type { MemoryEntry, PriceHistory, RunStatusResponse, ThreadDetail, ThreadSummary, Wishlist } from "./types";
+import type { MemoryCandidate, MemoryEntry, MemorySkill, PriceHistory, RunStatusResponse, ThreadDetail, ThreadSummary, Wishlist } from "./types";
 
 const API_ROOT = "/api/v1";
 
@@ -168,21 +168,39 @@ export const wishlistApi = {
   priceHistory(itemId: string) {
     return request<PriceHistory>(`/wishlists/default/items/${encodeURIComponent(itemId)}/price-history`);
   },
+  refreshPrice(itemId: string) {
+    return request<{ status: "succeeded" | "partial"; refresh_run_id: string; claimed: number; succeeded: number; failed: number }>(`/wishlists/default/items/${encodeURIComponent(itemId)}/refresh`, { method: "POST" });
+  },
 };
 
 export const memoryApi = {
   list() {
     return request<{ items: MemoryEntry[] }>("/memories");
   },
-  create(category: MemoryEntry["category"], key: string, content: string) {
+  create(category: MemoryEntry["category"], key: string, content: string, skillId?: string | null) {
     return request<MemoryEntry>("/memories", {
       method: "POST",
-      body: JSON.stringify({ category, key, content, confidence: 1 }),
+      body: JSON.stringify({ category, key, content, confidence: 1, skill_id: skillId || null }),
     });
   },
   remove(memoryId: string) {
     return request<void>(`/memories/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
   },
+  update(memoryId: string, changes: Partial<Pick<MemoryEntry, "category" | "key" | "content" | "confidence" | "skill_id">>) {
+    return request<MemoryEntry>(`/memories/${encodeURIComponent(memoryId)}`, { method: "PATCH", body: JSON.stringify(changes) });
+  },
+  confirm(items: MemoryCandidate[], sourceThreadId: string, sourceRunId: string) {
+    return request<{ items: MemoryEntry[]; conflicts: Array<{ key: string; code: string; message: string }> }>("/memories/confirm", {
+      method: "POST", body: JSON.stringify({ items, source_thread_id: sourceThreadId, source_run_id: sourceRunId }),
+    });
+  },
+};
+
+export const memorySkillApi = {
+  list: () => request<{ items: MemorySkill[] }>("/memory-skills"),
+  create: (name: string, description: string, triggerKeywords: string[]) => request<MemorySkill>("/memory-skills", { method: "POST", body: JSON.stringify({ name, description, trigger_keywords: triggerKeywords }) }),
+  update: (skillId: string, changes: Partial<Pick<MemorySkill, "name" | "description" | "trigger_keywords" | "is_enabled">>) => request<MemorySkill>(`/memory-skills/${encodeURIComponent(skillId)}`, { method: "PATCH", body: JSON.stringify(changes) }),
+  remove: (skillId: string) => request<void>(`/memory-skills/${encodeURIComponent(skillId)}`, { method: "DELETE" }),
 };
 
 export const systemApi = {

@@ -25,6 +25,24 @@ AgentStreamRunner = Callable[[str, str], AsyncIterator[dict[str, Any]]]
 logger = logging.getLogger(__name__)
 
 
+def _merged_preferences(*groups: object) -> list[dict[str, Any]]:
+    """Preserve deterministic candidates when a terminal tool returns an empty list."""
+
+    result: list[dict[str, Any]] = []
+    keys: set[str] = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for value in group:
+            if not isinstance(value, dict):
+                continue
+            key = str(value.get("key") or "").strip()
+            if key and key not in keys:
+                result.append(value)
+                keys.add(key)
+    return result
+
+
 @dataclass
 class RunHandle:
     thread_id: str
@@ -542,8 +560,10 @@ class RunRegistry:
                 if picks
                 else terminal.get("unresolved", [])
             ),
-            "learned_preferences": terminal.get(
-                "learned_preferences", metadata.get("learned_preferences", [])
+            "learned_preferences": _merged_preferences(
+                state.get("learned_preferences", []) if state else [],
+                metadata.get("learned_preferences", []),
+                terminal.get("learned_preferences", []),
             ),
             "memory_status": memory_status,
             "source_kind": "offline_snapshot",

@@ -153,8 +153,11 @@ def test_hybrid_query_prefilters_platform_and_postfilters_offer_constraints() ->
     hybrid = body["query"]["hybrid"]
 
     assert len(hybrid["queries"]) == 2
-    assert hybrid["queries"][1]["knn"]["content_vector"]["k"] == 60
-    assert hybrid["filter"]["bool"]["filter"] == [
+    assert hybrid["queries"][1]["bool"]["must"][0]["knn"]["content_vector"]["k"] == 60
+    assert hybrid["queries"][0]["bool"]["filter"] == [
+        {"term": {"platform": "jingdong"}}
+    ]
+    assert hybrid["queries"][1]["bool"]["filter"] == [
         {"term": {"platform": "jingdong"}}
     ]
     assert body["post_filter"]["bool"]["filter"] == [
@@ -174,9 +177,9 @@ def test_hybrid_query_omits_empty_post_filter() -> None:
     )
 
     assert "post_filter" not in body
-    assert body["query"]["hybrid"]["filter"] == {
-        "bool": {"filter": [{"term": {"platform": "taobao"}}]}
-    }
+    assert body["query"]["hybrid"]["queries"][0]["bool"]["filter"] == [
+        {"term": {"platform": "taobao"}}
+    ]
 
 
 def test_search_service_returns_ranked_candidates_and_pipeline_parameter() -> None:

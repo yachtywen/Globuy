@@ -5,6 +5,7 @@ specific vendor. More providers can be added without changing the AgentLoop.
 """
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
@@ -28,6 +29,12 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
     }
     if settings.llm_base_url:
         kwargs["base_url"] = settings.llm_base_url
+        hostname = (urlparse(settings.llm_base_url).hostname or "").lower()
+        if hostname == "api.deepseek.com" or hostname.endswith(".api.deepseek.com"):
+            # Agent tool loops do not preserve provider-specific reasoning_content
+            # between calls. Disable DeepSeek thinking so follow-up tool/reflect
+            # requests remain valid OpenAI-compatible chat completions.
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     return ChatOpenAI(**kwargs)
 
 

@@ -1,71 +1,49 @@
-# globuy
+# Globuy
 
-`globuy` 是一个用于学习 Agent 工程化的全栈购物助手项目。它提供 React 工作台、FastAPI
-后台任务、WebSocket 运行事件、MySQL 会话与用户数据、长期记忆和心愿库；Agent 主图按
-`Think → Act → Observe → Reflect` 组织。
+Globuy is a shopping assistant built with React, FastAPI, MySQL, OpenSearch,
+Redis, and an Agent workflow. It supports conversation-based product discovery,
+three-platform realtime candidate retrieval, preference confirmation, and a
+wishlist.
 
-真实商品检索依赖本地 OpenSearch 索引和单独提供的离线数据包，见“完整检索模式”。
+The application has two startup paths:
 
-## 当前能力与边界
+- **Demo mode**: registration, sessions, UI, and Agent workflow using the mock
+  model. No paid API calls are made.
+- **Realtime mode**: searches Taobao, JD, and Douyin through Just One, then
+  applies OpenSearch BM25 + BGE-M3 + RRF hybrid retrieval.
 
-- 前端：React + TypeScript + Vite，包含注册/登录、三栏工作台、历史会话、心愿库与长期记忆管理。
-- 后端：FastAPI、HTTP `202` 后台任务、只订阅 WebSocket、取消、事件重放与 MySQL 持久化。
-- 演示模式：内置 `mock` 模型；不调用 DeepSeek、Tavily 或商品 Provider。
-- 商品检索：固定使用 OpenSearch 的 BM25 + 冻结 BGE-M3 + 无权重 RRF；当前结果来自离线快照，
-  不是实时价格或库存。
-- 本仓库**不包含**商品快照、索引、模型缓存、`.env`、数据库卷或 API 密钥。普通 `git clone`
-  后可运行演示模式；若要使用商品检索，需要额外取得合规的数据包并完成索引构建。
+## Prerequisites
 
-更多实现状态与已知差距见 [docs/project-status.md](docs/project-status.md)，接口见
-[docs/globuy接口文档v1.md](docs/globuy接口文档v1.md)。
-当前项目优化部分已做和未做还有还需要做的内容详细看[docs/ToDo.md](docs/ToDo.md)。
+- Windows PowerShell
+- Docker Desktop running
+- Conda or Miniconda
+- Node.js 20.19 or newer
 
-## 快速开始：本地演示模式
-
-这条路径适合课程演示、前后端联调和同学第一次运行。它会启动一个本地 MySQL 8 容器，使用
-`mock` 模型，因此不需要任何第三方密钥，也不会产生付费调用。
-
-### 前置条件
-
-- Windows PowerShell（下方命令按 PowerShell 编写）
-- [Miniconda 或 Anaconda](https://docs.conda.io/projects/conda/en/latest/user-guide/install/)
-- Node.js **20.19+**（`frontend/package-lock.json` 锁定了前端依赖）
-- Docker Desktop 已启动，并可运行 Linux 容器
-
-确认版本：
+Run every command below from the repository root:
 
 ```powershell
-conda --version
-node --version
-docker version
+Set-Location "C:\Users\Lenovo\Desktop\模板例子\code\Globuy"
 ```
 
-### 1. 克隆并安装依赖
+## 1. Install dependencies
 
 ```powershell
-git clone <你的 GitHub 仓库地址> globuy
-Set-Location globuy
-
-# 首次创建 Conda 环境；environment.yml 会以可编辑方式安装项目和开发依赖。
 conda env create -f environment.yml
 conda activate globuy
-
 Push-Location frontend
 npm ci
 Pop-Location
 ```
 
-已存在 `globuy` 环境时，进入仓库后运行 `conda activate globuy` 即可；Python 依赖有更新时执行
-`python -m pip install -e ".[dev]"`。
+If the `globuy` environment already exists, use `conda activate globuy` and
+run `python -m pip install -e ".[dev]"` only when Python dependencies change.
 
-### 2. 创建仅供本机演示的 MySQL 8
+## 2. Create MySQL once
 
-项目的正式用户、会话和心愿库都依赖 MySQL；未配置数据库时 FastAPI 会拒绝启动，这是有意的
-安全约束。以下命令创建名为 `globuy-mysql` 的本地容器，并映射到宿主机 `3307`。
-请在**同一个 PowerShell 窗口**连续完成第 2、3 步：随机生成的本地密码只保存在该窗口的变量中。
+The FastAPI application requires MySQL. Skip this section when a working
+`globuy-mysql` container already exists.
 
 ```powershell
-# 生成仅保存在当前 PowerShell 会话中的本地随机密码。
 $rootPassword = python -c "import secrets; print(secrets.token_urlsafe(24))"
 $appPassword = python -c "import secrets; print(secrets.token_urlsafe(24))"
 
@@ -74,12 +52,10 @@ docker run -d --name globuy-mysql --restart unless-stopped `
   -p 3307:3306 `
   -v globuy-mysql-data:/var/lib/mysql `
   mysql:8.4
-
-# 等待 MySQL 就绪；首次拉取镜像和初始化通常需要几十秒。
-docker logs -f globuy-mysql
 ```
 
-当日志出现 `ready for connections` 后按 `Ctrl+C` 退出日志跟随（容器不会停止），再创建项目账号：
+Wait until `docker logs globuy-mysql` contains `ready for connections`, then
+create the application database:
 
 ```powershell
 $sql = @"
@@ -92,183 +68,134 @@ FLUSH PRIVILEGES;
 $sql | docker exec -i -e "MYSQL_PWD=$rootPassword" globuy-mysql mysql -uroot
 ```
 
-如果 `3307` 已被占用，请先停止占用该端口的 MySQL，或在以上命令和下面 `.env` 的连接串中同时改用
-另一个空闲端口。不要把本地 `.env` 或任何密码提交到 Git。
+## 3. Configure the local environment
 
-再次使用同一套本地数据时无需重新执行 `docker run`；使用 `docker start globuy-mysql` 后直接从第 3 步继续。
-
-### 3. 创建本地配置并迁移数据库
+Create `.env` only once:
 
 ```powershell
 Copy-Item .env.example .env
+```
 
+Set the MySQL connection string to the password generated above, then migrate:
+
+```powershell
 $databaseUrl = "mysql+asyncmy://globuy_app:$appPassword@127.0.0.1:3307/globuy?charset=utf8mb4"
 $envFile = Get-Content .env -Raw
 $envFile = $envFile -replace '(?m)^GLOBUY_DATABASE_URL=.*$', "GLOBUY_DATABASE_URL=$databaseUrl"
-$envFile = $envFile -replace '(?m)^GLOBUY_MODEL_PROVIDER=.*$', 'GLOBUY_MODEL_PROVIDER=mock'
-$envFile = $envFile -replace '(?m)^GLOBUY_WEB_SEARCH_PROVIDER=.*$', 'GLOBUY_WEB_SEARCH_PROVIDER=none'
 Set-Content .env $envFile -Encoding utf8
-
 alembic upgrade head
 ```
 
-`mock` 仅用于演示 Agent 任务和 WebSocket 生命周期，不会提供真实商品推荐。它不会读取或发送
-DeepSeek、Tavily 等第三方服务的凭据。
+For demo mode, retain `GLOBUY_MODEL_PROVIDER=mock` and leave the realtime
+provider disabled.
 
-### 4. 在两个终端启动服务
+## 4. Start OpenSearch and Redis
 
-终端 A（后端）：
+Realtime mode requires both services. Run this from the directory containing
+`compose.yaml`, not from `C:\Windows\System32`.
 
 ```powershell
-Set-Location <globuy 仓库目录>
+docker compose up -d --wait --wait-timeout 600 opensearch redis
+docker compose ps
+curl.exe http://127.0.0.1:9200
+```
+
+OpenSearch must report version `2.19.1` and Redis must be healthy. The host
+backend configuration must be:
+
+```env
+GLOBUY_OPENSEARCH_URL=http://127.0.0.1:9200
+```
+
+If OpenSearch fails after switching from the earlier 3.x image, its old data
+volume is incompatible. This removes only the local search index, not MySQL
+users or conversations:
+
+```powershell
+docker compose down
+docker volume rm globuy_opensearch-data
+docker compose up -d --wait --wait-timeout 600 opensearch redis
+```
+
+## 5. Enable realtime product search (optional)
+
+Add valid private credentials to `.env`. Never commit this file.
+
+```env
+GLOBUY_REALTIME_PRODUCT_PROVIDER=justone
+GLOBUY_JUSTONE_API_TOKEN=<your Just One token>
+
+GLOBUY_MODEL_PROVIDER=openai-compatible
+GLOBUY_LLM_MODEL=<model name>
+GLOBUY_LLM_API_KEY=<provider key>
+GLOBUY_LLM_BASE_URL=<OpenAI-compatible URL>
+```
+
+The first realtime query loads BGE-M3 locally and can take longer than later
+queries. Validate the three platform path before opening the UI:
+
+```powershell
+conda run -n globuy python scripts/check_realtime_product_search.py --query "降噪耳机"
+```
+
+Expected result: Taobao, JD, and Douyin each report `status=ok` with candidates.
+See [docs/realtime-search-check.md](docs/realtime-search-check.md) for output
+interpretation.
+
+## 6. Start backend and frontend
+
+Use two separate PowerShell windows and keep both running.
+
+Backend:
+
+```powershell
+Set-Location "C:\Users\Lenovo\Desktop\模板例子\code\Globuy"
 conda activate globuy
 python -m uvicorn app.api.server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-终端 B（前端）：
+Frontend:
 
 ```powershell
-Set-Location <globuy 仓库目录>\frontend
-npm run dev -- --host 127.0.0.1
+Set-Location "C:\Users\Lenovo\Desktop\模板例子\code\Globuy\frontend"
+cmd /c npm run dev -- --host 127.0.0.1
 ```
 
-浏览器打开 <http://127.0.0.1:5173>，注册一个本地测试账号后即可创建会话并提交消息。
+Open `http://127.0.0.1:5173`, register a local user, and start a conversation.
 
-> `npm run dev` **只启动 Vite**，不会启动 FastAPI。前端会把 `/healthz` 和 `/api/*` 代理到
-> `127.0.0.1:8000`；若 8000 未启动，页面会显示 500。这是代理连接失败，不是 Agent 返回的
-> `INTERNAL_ERROR`。
-
-### 5. 验证与停止
-
-在第三个 PowerShell 窗口执行：
+## Verify and troubleshoot
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/healthz
-Get-NetTCPConnection -LocalPort 5173,8000 -State Listen
-```
-
-`/healthz` 应至少返回 `status: ok`、`model_provider: mock` 和 `database: ok`。
-
-停止前端与后端时，在各自终端按 `Ctrl+C`。保留本地数据库以便下次使用：
-
-```powershell
-docker stop globuy-mysql
-```
-
-如需彻底删除**本地演示数据**（不可恢复），再执行：
-
-```powershell
-docker rm globuy-mysql
-docker volume rm globuy-mysql-data
-```
-
-## 完整检索模式（可选）
-
-完整购物检索还需要 OpenSearch、Redis、BGE-M3 模型缓存和商品 Candidate 数据包。商品数据包不随
-Git 仓库发布，原因是它来自离线采集快照；请向仓库维护者获取获准分发的数据，或使用你自己有权
-使用的数据源。不要将 API Token、原始响应或未获授权的商品数据提交到 GitHub。
-
-在已完成“快速开始”并拿到数据包后：
-
-```powershell
-Set-Location <globuy 仓库目录>
-conda activate globuy
-
-# 启动固定的 OpenSearch 与 Redis；不会启动 MySQL。
-docker compose up -d --wait --wait-timeout 300 opensearch redis
-docker compose ps
-
-# 数据包应提供以下 Candidate 文件；没有该文件时不要运行导入和建索引命令。
-Test-Path datasets/headphones_1000/structured/itemsearch_candidates.jsonl
-
-# 将 Candidate 导入 MySQL，然后构建商品索引。
-python -m app.products.import_snapshot
-python -m app.search.build_index
-
-# 可选：从已有 Candidate 数据生成确定性品类卡片索引。
-python -m app.category.build_index --deterministic
-```
-
-首次运行 `app.search.build_index` 会下载约 2.3 GB 的 `BAAI/bge-m3` 并构建向量；请预留磁盘空间
-并等待完成。商品检索结果是导入快照，不代表实时库存、价格或官方推荐。
-
-若要启用真实模型或网页搜索，复制 `.env.example` 中相应变量到本地 `.env` 并填写你自己的密钥。
-真实模型和 Tavily 调用可能产生费用；未配置时对应能力应返回 `not_configured`。详细的 MySQL 运维与
-Worker 启动方式见 [docs/mysql-persistence.md](docs/mysql-persistence.md)。
-
-## 常见问题
-
-### 页面立即显示 500
-
-先区分是 Vite 代理失败还是后端错误：
-
-```powershell
 Get-NetTCPConnection -LocalPort 5173,8000 -State Listen -ErrorAction SilentlyContinue
-Invoke-RestMethod http://127.0.0.1:8000/healthz
 ```
 
-- 5173 有监听而 8000 没有：按“终端 A”启动 FastAPI，并查看该终端的异常日志。
-- Uvicorn 报 MySQL 连接失败：确认 `globuy-mysql` 正在运行、端口为 3307，且 `.env` 中的
-  `GLOBUY_DATABASE_URL` 与创建的应用账号一致。
-- 8000 返回 200 而浏览器仍报 500：停止并重启 Vite，确认浏览器访问的是它实际输出的地址。
+- Vite `ECONNREFUSED 127.0.0.1:8000`: the FastAPI backend is not running.
+  Start it with the backend command above and inspect its terminal for errors.
+- `docker compose` says no configuration file: change directory to the project
+  root first.
+- A product image is unavailable: external marketplace CDNs can reject an
+  image. Globuy uses an allowlisted backend image proxy and falls back to a
+  placeholder when a source image is unavailable.
+- A realtime search result cannot yet be added to the wishlist: realtime
+  candidates still need to be persisted to MySQL as `Product` / `Offer` /
+  `OfferObservation`. This is tracked as P0 in [docs/ToDo.md](docs/ToDo.md).
 
-### `docker` 无法连接 Docker Desktop
-
-先打开 Docker Desktop，等待其状态变为 Running，再执行 `docker version`。项目的 `compose.yaml`
-只管理 OpenSearch 和 Redis；MySQL 由上面的 `globuy-mysql` 命令单独创建。
-
-### `npm ci` 或前端启动失败
-
-确认 `node --version` 至少为 20.19。删除 `frontend/node_modules` 后再次执行 `npm ci`；不要提交
-`node_modules` 或 `frontend/dist`。
-
-### 数据库迁移失败
-
-确认使用的是 Conda `globuy` 环境，并检查：
+## Tests
 
 ```powershell
-docker ps --filter name=globuy-mysql
-Get-NetTCPConnection -LocalPort 3307 -State Listen
-```
-
-迁移成功后可用 `alembic current` 查看当前版本。
-
-## 测试与代码质量
-
-后端测试使用 Fake/Mock，不应调用真实付费模型或商品 Provider：
-
-```powershell
-Set-Location <globuy 仓库目录>
 conda activate globuy
-python -m ruff check app datasets tests
-python -m compileall -q app datasets tests
+python -m compileall -q app tests scripts
 python -m pytest -q
+
+Set-Location frontend
+cmd /c npm run test
+cmd /c npm run build
 ```
 
-前端测试与生产构建：
+## Project status
 
-```powershell
-Set-Location <globuy 仓库目录>\frontend
-npm run test
-npm run build
-```
-
-## 项目结构
-
-```text
-app/                 FastAPI、AgentLoop、工具、数据库、检索与长期记忆
-frontend/            React + TypeScript + Vite 工作台
-alembic/             MySQL Schema 迁移
-datasets/            采集器、夹具和数据包说明（真实快照不提交）
-docs/                接口、MySQL 运维、实现状态和架构契约
-compose.yaml         OpenSearch 与 Redis 的本地基础服务
-```
-
-## 发布前检查
-
-推送到 GitHub 前请确认：
-
-- `.env`、数据库卷、`output/`、`uploaded/`、模型缓存和真实数据快照没有被加入暂存区。
-- `git status` 中的变更都确实属于本次提交；不要覆盖或删除他人的未提交文件。
-- 已在干净环境至少走完“快速开始”的数据库迁移、`/healthz` 与前端登录验证。
-- 若希望同学体验完整商品检索，提供经过授权的数据包及其校验说明；仅有 Git 仓库不足以重建当前索引。
+Read [docs/ToDo.md](docs/ToDo.md) for implementation handoff and priorities,
+and [docs/project-status.md](docs/project-status.md) for dated implementation
+notes. Secrets, database volumes, model caches, and provider responses must not
+be committed.

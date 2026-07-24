@@ -404,7 +404,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px sol
 }
 
 /* Landing authentication */
-.auth-entry { overflow-y: auto; }
+.auth-entry { height: 100dvh; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .auth-copy { margin: clamp(44px, 8vh, 88px) 0 22px; }
 .auth-copy h2 { margin: 10px 0 8px; font-size: clamp(2.1rem, 2.35vw, 3rem); font-weight: 430; line-height: 1; letter-spacing: -.04em; white-space: nowrap; }
 .auth-tabs { margin-bottom: 18px; display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--line); }
@@ -425,6 +425,18 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px sol
 .auth-error button { padding: 0; color: #934532; background: transparent; border: 0; text-decoration: underline; cursor: pointer; white-space: nowrap; }
 .auth-submit { width: 100%; margin-top: 2px; justify-content: center; border: 0; font-size: 14px; }
 .auth-submit:disabled { cursor: wait; opacity: .6; }
+.auth-landing .landing-auth-form { min-height: 0; padding-bottom: 38px; }
+.auth-landing .auth-copy { margin: clamp(24px, 5vh, 56px) 0 18px; }
+.auth-landing .auth-submit { position: static; margin-top: 10px; }
+
+.skill-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin: 20px 0; }
+.new-domain-button { min-height: 36px; padding: 0 12px; color: #173f36; background: transparent; border: 1px solid #b9c8bd; border-radius: 9px; cursor: pointer; font-size: 12px; font-weight: 700; }
+.new-domain-button:hover { background: #edf3ed; }
+.skill-list button { min-height: 64px; padding: 12px; display: grid; gap: 4px; text-align: left; border: 1px solid #ded4c6; border-radius: 13px; background: #fffdf9; cursor: pointer; }
+.skill-list button.selected { color: white; background: #173f36; border-color: #173f36; }.skill-list small { color: inherit; opacity: .72; }
+.skill-detail { margin: 14px 0 22px; padding: 15px; border-radius: 14px; background: #f8f2e9; }.skill-detail p { margin: 7px 0 10px; color: #62594f; line-height: 1.55; }.skill-detail .text-button + .text-button { margin-left: 14px; }.danger-text { color: #a34b3c; }
+.skill-form { margin-top: 30px; padding-top: 24px; border-top: 1px solid #ece4d9; }.memory-editor { width: min(560px, calc(100vw - 32px)); max-height: 88dvh; overflow: auto; padding: 28px; display: grid; gap: 13px; background: #fffdf9; border: 1px solid #ded4c6; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,.16); }.memory-editor h2 { margin: 0; }.memory-editor label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; color: #5d5852; }.memory-editor input, .memory-editor textarea, .memory-editor select { width: 100%; padding: 10px; border: 1px solid #d8cec0; border-radius: 9px; background: white; }.memory-editor textarea { min-height: 82px; }.memory-editor > div:last-child, .candidate-actions { display: flex; justify-content: flex-end; gap: 10px; }.memory-editor button { min-height: 38px; padding: 0 13px; border: 0; border-radius: 9px; background: #173f36; color: white; cursor: pointer; }.memory-editor button[type="button"] { background: #eee6dc; color: #504b45; }
+.candidate-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 0; border-top: 1px solid #ece4d9; }.candidate-row textarea, .candidate-row input, .candidate-row select { grid-column: span 1; }.candidate-row button { grid-column: 2; justify-self: end; }.preference-note button { margin-top: 8px; padding: 8px 12px; color: white; background: #173f36; border: 0; border-radius: 9px; cursor: pointer; }
 
 /* Wishlist */
 body.modal-open { overflow: hidden; }
@@ -468,7 +480,7 @@ body.modal-open { overflow: hidden; }
 }
 
 @media (max-width: 767px) {
-  .auth-landing .landing-art { min-height: 34dvh; }.auth-landing .landing-wordmark { display: none; }.auth-landing .landing-illustration-wrap { top: -1vh; }.auth-entry { min-height: 66dvh; overflow: visible; }.auth-copy { margin: 0 0 17px; }.auth-copy h2 { font-size: 34px; }.password-rules { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .auth-landing { height: auto; min-height: 100dvh; overflow: visible; }.auth-landing .landing-art { min-height: 34dvh; }.auth-landing .landing-wordmark { display: none; }.auth-landing .landing-illustration-wrap { top: -1vh; }.auth-entry { height: auto; min-height: 66dvh; overflow: visible; }.auth-copy { margin: 0 0 17px; }.auth-copy h2 { font-size: 34px; }.password-rules { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .wishlist-nav-button { width: 40px; padding: 0; justify-content: center; }.wishlist-nav-button span, .desktop-logout { display: none; }
   .wishlist-header { min-height: 64px; padding: 0 14px; }.wishlist-header .brand div, .wishlist-header nav > span { display: none; }.wishlist-header nav button { width: 42px; padding: 0; justify-content: center; font-size: 0; }.wishlist-main { width: min(100% - 24px, 620px); min-height: calc(100dvh - 64px); padding: 36px 0 60px; }.wishlist-intro { margin-bottom: 26px; }.wishlist-intro h1 { font-size: 46px; }.wishlist-intro > p { font-size: 12px; }
   .wishlist-card { padding: 12px; grid-template-columns: 1fr; gap: 14px; }.wishlist-media { aspect-ratio: 4 / 2.5; }.wishlist-actions { grid-column: auto; display: grid; grid-template-columns: 1fr; }.wishlist-button-row { grid-template-columns: 1fr 1fr 44px; }.wishlist-button-row > a, .wishlist-button-row > button, .more-wrap > button { min-height: 44px; }.wishlist-ip-left, .wishlist-ip-right { display: none; }

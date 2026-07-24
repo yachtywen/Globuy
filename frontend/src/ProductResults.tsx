@@ -1,9 +1,9 @@
 import { ArrowSquareOut, Check, Heart, Scales, X } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import fallbackImage from "./assets/product-fallback.webp";
-import { wishlistApi } from "./api";
+import { memoryApi, memorySkillApi, wishlistApi } from "./api";
 import { visibleResultStrings } from "./presentation";
-import type { Artifact, TaskResult } from "./types";
+import type { Artifact, MemoryCandidate, MemorySkill, TaskResult } from "./types";
 
 type Product = {
   id: string;
@@ -59,9 +59,28 @@ function platformLabel(value: string) {
   return ({ taobao: "淘宝", jingdong: "京东", douyin: "抖音" } as Record<string, string>)[value] || value;
 }
 
+function memoryKeyLabel(key: string) {
+  if (key === "budget_max_cny") return "预算上限";
+  if (key.startsWith("explicit_preference_")) return "本次偏好";
+  return key;
+}
+
+function suggestedSkillId(content: string, skills: MemorySkill[]) {
+  const rules: Array<[string, string[]]> = [
+    ["数码设备", ["耳机", "手机", "电脑", "平板", "键盘", "鼠标", "相机", "显示器", "数码"]],
+    ["服饰穿搭", ["衣服", "穿", "鞋", "裤", "裙", "尺码", "身高", "体重"]],
+    ["家居生活", ["家居", "家具", "床", "枕", "厨房", "清洁", "收纳"]],
+    ["美妆护肤", ["护肤", "美妆", "口红", "肤质", "肤色", "敏感"]],
+    ["运动户外", ["运动", "跑步", "健身", "露营", "户外"]],
+  ];
+  const target = rules.find(([, words]) => words.some((word) => content.includes(word)))?.[0] || "通用偏好";
+  return skills.find((skill) => skill.name === target)?.skill_id || skills.find((skill) => skill.name === "通用偏好")?.skill_id || skills[0]?.skill_id || null;
+}
+
 function ProductImage({ product }: { product: Product }) {
   const [failed, setFailed] = useState(false);
-  const source = failed || !product.imageUrl ? fallbackImage : product.imageUrl;
+  const rawSource = failed || !product.imageUrl ? fallbackImage : product.imageUrl;
+  const source = rawSource === fallbackImage ? rawSource : `/api/v1/product-image?image_url=${encodeURIComponent(rawSource)}`;
   return <img alt={failed || !product.imageUrl ? "商品图片暂缺，显示 Globuy 手绘占位图" : product.title} height="180" loading="lazy" onError={() => setFailed(true)} referrerPolicy="no-referrer" src={source} width="220" />;
 }
 
@@ -111,6 +130,19 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
   const [saved, setSaved] = useState<string[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
   const [wishlistError, setWishlistError] = useState<string | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [skills, setSkills] = useState<MemorySkill[]>([]);
+  const [candidates, setCandidates] = useState<MemoryCandidate[]>([]);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const openMemoryCandidates = async () => {
+    const items = (result?.learned_preferences || []).map((item, index) => {
+      const value = typeof item === "object" && item ? item as Record<string, unknown> : {};
+      const rawKey = String(value.key || `preference_${index + 1}`);
+      return { key: memoryKeyLabel(rawKey), category: (value.category === "blacklist" || value.category === "history" ? value.category : "preference") as MemoryCandidate["category"], content: String(value.content || item), confidence: typeof value.confidence === "number" ? value.confidence : 1 };
+    });
+    try { const response = await memorySkillApi.list(); setSkills(response.items); setCandidates(items.map((item) => ({ ...item, skill_id: suggestedSkillId(item.content, response.items) }))); setMemoryOpen(true); }
+    catch (reason) { setMemoryError(reason instanceof Error ? reason.message : "无法加载 Skill"); }
+  };
   if (!result && artifacts.length === 0) return null;
   const toggle = (id: string) => setSelected((items) => items.includes(id) ? items.filter((item) => item !== id) : items.length < 4 ? [...items, id] : items);
   const compared = products.filter((product) => selected.includes(product.id));
@@ -128,9 +160,10 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
       {selected.length > 0 && <div aria-live="polite" className="compare-bar"><span>已选 {selected.length} / 4 件</span><button disabled={selected.length < 2} onClick={() => setComparisonOpen(true)}><Scales size={17} />对比商品</button></div>}
       {wishlistError && <div className="result-note" role="alert"><strong>心愿库操作失败</strong><p>{wishlistError}</p></div>}
       {unresolved.length ? <div className="result-note"><strong>仍需确认</strong><p>{unresolved.join(" · ")}</p></div> : null}
-      {result?.learned_preferences?.length ? <div className="preference-note"><strong>本次识别的偏好</strong><p>{result.learned_preferences.map((item) => typeof item === "object" && item && "content" in item ? String((item as { content: unknown }).content) : String(item)).join(" · ")}</p><small>尚未持久化到长期记忆</small></div> : null}
+      {result?.learned_preferences?.length ? <div className="preference-note"><strong>发现 {result.learned_preferences.length} 条可长期保留的偏好</strong><p>查看、修改后再写入长期记忆。</p><button onClick={() => void openMemoryCandidates()} type="button">查看并保存</button>{memoryError && <small>{memoryError}</small>}</div> : null}
       <ArtifactList artifacts={artifacts} />
       {comparisonOpen && <Comparison onClose={() => setComparisonOpen(false)} products={compared} />}
+      {memoryOpen && <div className="comparison-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setMemoryOpen(false)}><section aria-labelledby="memory-candidate-title" aria-modal="true" className="memory-editor memory-candidate-dialog" role="dialog"><h2 id="memory-candidate-title">确认长期记忆</h2><p>可修改或移除不需要的内容，确认后才会保存。</p>{candidates.map((candidate, index) => <div className="candidate-row" key={`${candidate.key}-${index}`}><input aria-label="记忆名称" value={candidate.key} onChange={(event) => setCandidates((items) => items.map((item, current) => current === index ? { ...item, key: event.target.value } : item))}/><textarea aria-label="记忆内容" value={candidate.content} onChange={(event) => setCandidates((items) => items.map((item, current) => current === index ? { ...item, content: event.target.value } : item))}/><select value={candidate.category} onChange={(event) => setCandidates((items) => items.map((item, current) => current === index ? { ...item, category: event.target.value as MemoryCandidate["category"] } : item))}><option value="preference">偏好</option><option value="blacklist">排除项</option><option value="history">历史信息</option></select><select value={candidate.skill_id || ""} onChange={(event) => setCandidates((items) => items.map((item, current) => current === index ? { ...item, skill_id: event.target.value } : item))}>{skills.map((skill) => <option key={skill.skill_id} value={skill.skill_id}>{skill.name}</option>)}</select><button onClick={() => setCandidates((items) => items.filter((_, current) => current !== index))} type="button">不保存</button></div>)}<div className="candidate-actions"><button onClick={() => setMemoryOpen(false)} type="button">取消</button><button disabled={!candidates.length || !sourceThreadId || !sourceRunId} onClick={async () => { try { const response = await memoryApi.confirm(candidates, sourceThreadId || "", sourceRunId || ""); if (response.conflicts.length) setMemoryError(`以下名称已存在：${response.conflicts.map((item) => item.key).join("、")}`); else setMemoryOpen(false); } catch (reason) { setMemoryError(reason instanceof Error ? reason.message : "保存失败"); } }} type="button">确认保存</button></div></section></div>}
     </section>
   );
 }

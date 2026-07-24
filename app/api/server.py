@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from urllib.parse import urlparse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from fastapi import (
     Header,
     Query,
     Request,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -41,6 +43,8 @@ from app.api.domain_routes import (
 from app.api.domain_routes import (
     wishlist_service as wishlist_service_dependency,
 )
+import httpx
+from app.api.domain_routes import price_refresh_worker as price_refresh_worker_dependency
 from app.api.errors import (
     ApiError,
     api_error_handler,
@@ -62,6 +66,7 @@ from app.api.storage import SessionStore
 from app.auth.service import AuthService
 from app.config import Settings, get_settings
 from app.database.services import MemoryService, WishlistService
+from app.products.price_worker import PriceRefreshWorker, ProviderRegistry
 from app.database.session import Database
 from app.database.session_store import MySQLSessionStore
 from app.infrastructure.opensearch import build_opensearch_client
@@ -71,6 +76,19 @@ from app.search.encoder import get_embedding_encoder
 from app.utils.path_utils import session_path, upload_path
 
 _THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_PRODUCT_IMAGE_HOST_SUFFIXES = (
+    "alicdn.com", "taobao.com", "tmall.com", "360buyimg.com", "jd.com",
+    "byteimg.com", "douyinpic.com", "douyin.com", "jinritemai.com", "pstatp.com",
+)
+
+
+def _allowed_product_image_url(value: str) -> bool:
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").casefold()
+    return parsed.scheme == "https" and any(
+        host == suffix or host.endswith(f".{suffix}")
+        for suffix in _PRODUCT_IMAGE_HOST_SUFFIXES
+    )
 
 
 def _safe_thread_id(value: str | None) -> str:
@@ -121,6 +139,7 @@ def create_app(
     auth_service: AuthService | None = None
     wishlist_service: WishlistService | None = None
     memory_service: MemoryService | None = None
+    price_refresh_worker: PriceRefreshWorker | None = None
     if settings.database_url is not None:
         database = Database(
             settings.database_url.get_secret_value(),
@@ -136,6 +155,7 @@ def create_app(
             refresh_local_hour=settings.price_refresh_local_hour,
         )
         memory_service = MemoryService(database)
+        price_refresh_worker = PriceRefreshWorker(database, ProviderRegistry(), refresh_hours=settings.price_refresh_interval_hours, refresh_local_hour=settings.price_refresh_local_hour)
         if agent_runner is run_agent:
             main_agent.store = GlobuyMemoryStore(
                 database,
@@ -205,6 +225,30 @@ def create_app(
         allow_headers=["*"],
     )
     router = APIRouter(prefix="/api/v1")
+
+    @router.get("/product-image", tags=["products"])
+    async def product_image_proxy(image_url: str = Query(min_length=12, max_length=2048)) -> Response:
+        """Proxy only approved marketplace CDNs to avoid browser hotlink blocking."""
+
+        if not _allowed_product_image_url(image_url):
+            raise ApiError(422, "INVALID_IMAGE_URL", "商品图片来源不受支持")
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                upstream = await client.get(
+                    image_url,
+                    headers={"User-Agent": "Mozilla/5.0 Globuy/1.0", "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"},
+                )
+                upstream.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ApiError(502, "PRODUCT_IMAGE_UNAVAILABLE", "商品图片暂不可用") from exc
+        content_type = upstream.headers.get("content-type", "").split(";", 1)[0].lower()
+        if not content_type.startswith("image/") or len(upstream.content) > 5 * 1024 * 1024:
+            raise ApiError(502, "PRODUCT_IMAGE_UNAVAILABLE", "商品图片响应无效")
+        return Response(
+            content=upstream.content,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     async def request_user_id(
         request: Request,
@@ -488,6 +532,7 @@ def create_app(
     if wishlist_service is not None and memory_service is not None:
         app.dependency_overrides[wishlist_service_dependency] = lambda: wishlist_service
         app.dependency_overrides[memory_service_dependency] = lambda: memory_service
+        app.dependency_overrides[price_refresh_worker_dependency] = lambda: price_refresh_worker
         router.include_router(domain_router)
     app.include_router(router)
     return app

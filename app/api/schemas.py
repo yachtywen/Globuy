@@ -111,6 +111,14 @@ class UpdateWishlistItemRequest(StrictModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+class RefreshWishlistItemResponse(BaseModel):
+    status: Literal["succeeded", "partial"]
+    refresh_run_id: str
+    claimed: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+
+
 class CreateMemoryRequest(StrictModel):
     category: Literal["blacklist", "preference", "history"]
     key: str = Field(min_length=1, max_length=128)
@@ -118,9 +126,39 @@ class CreateMemoryRequest(StrictModel):
     confidence: Decimal = Field(default=Decimal("1"), ge=0, le=1)
     source_thread_id: str | None = Field(default=None, pattern=ID_PATTERN)
     source_run_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    skill_id: str | None = Field(default=None, pattern=ID_PATTERN)
 
 
 class UpdateMemoryRequest(StrictModel):
     category: Literal["blacklist", "preference", "history"] | None = None
     content: str | None = Field(default=None, min_length=1, max_length=4000)
     confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    key: str | None = Field(default=None, min_length=1, max_length=128)
+    skill_id: str | None = Field(default=None, pattern=ID_PATTERN)
+
+
+class CreateMemorySkillRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=1, max_length=500)
+    trigger_keywords: list[str] = Field(min_length=1, max_length=20)
+
+
+class UpdateMemorySkillRequest(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    trigger_keywords: list[str] | None = Field(default=None, min_length=1, max_length=20)
+    is_enabled: bool | None = None
+
+
+class ConfirmMemoryCandidate(StrictModel):
+    key: str = Field(min_length=1, max_length=128)
+    category: Literal["blacklist", "preference", "history"]
+    content: str = Field(min_length=1, max_length=4000)
+    skill_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    confidence: Decimal = Field(default=Decimal("1"), ge=0, le=1)
+
+
+class ConfirmMemoryCandidatesRequest(StrictModel):
+    source_thread_id: str = Field(pattern=ID_PATTERN)
+    source_run_id: str = Field(pattern=ID_PATTERN)
+    items: list[ConfirmMemoryCandidate] = Field(min_length=1, max_length=20)

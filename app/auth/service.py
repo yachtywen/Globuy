@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.errors import ApiError
 from app.config import Settings
-from app.database.models import AuthSession, IdempotencyKey, User, Wishlist
+from app.database.models import AuthSession, IdempotencyKey, MemorySkill, User, Wishlist
 from app.database.session import Database
 
 
@@ -131,6 +131,28 @@ class AuthService:
                             response_status=201,
                             created_at=now,
                         ),
+                        *[
+                            MemorySkill(
+                                skill_id=uuid4().hex,
+                                user_id=user.user_id,
+                                name=name,
+                                description=description,
+                                trigger_keywords=keywords,
+                                is_enabled=True,
+                                status="active",
+                                created_at=now,
+                                updated_at=now,
+                                deleted_at=None,
+                            )
+                            for name, description, keywords in (
+                                ("通用偏好", "适用于全部购物场景的预算、品牌、材质和排除项。", ["预算", "品牌", "性价比", "材质"]),
+                                ("数码设备", "耳机、手机、电脑等数码产品的偏好。", ["耳机", "手机", "电脑", "数码"]),
+                                ("服饰穿搭", "服装、鞋包、尺码、颜色和穿搭风格偏好。", ["衣服", "鞋", "尺码", "穿搭"]),
+                                ("家居生活", "家居、厨房、收纳和日常用品偏好。", ["家居", "厨房", "收纳", "生活用品"]),
+                                ("美妆护肤", "护肤、彩妆、香水和个人护理偏好。", ["护肤", "彩妆", "美妆", "香水"]),
+                                ("运动户外", "运动装备、户外用品和功能性服饰偏好。", ["运动", "跑步", "健身", "户外"]),
+                            )
+                        ],
                     ]
                 )
         except IntegrityError as exc:

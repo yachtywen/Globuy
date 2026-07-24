@@ -24,7 +24,10 @@ afterEach(cleanup);
 describe("商品结果", () => {
   it("优先渲染接口返回的真实商品图片 URL", () => {
     render(<ProductResults artifacts={[]} result={result} />);
-    expect(screen.getByRole("img", { name: "候选耳机 A" })).toHaveAttribute("src", "https://img.example.com/a.jpg");
+    expect(screen.getByRole("img", { name: "候选耳机 A" })).toHaveAttribute(
+      "src",
+      "/api/v1/product-image?image_url=https%3A%2F%2Fimg.example.com%2Fa.jpg",
+    );
   });
 
   it("仅展示有值的评分和销量，且不展示运费", () => {
@@ -48,5 +51,30 @@ describe("商品结果", () => {
     expect(screen.getByRole("dialog", { name: "商品对比" })).toBeInTheDocument();
     expect(screen.getAllByText("候选耳机 A")).toHaveLength(2);
     expect(screen.getAllByText("¥ 299.00")).toHaveLength(2);
+  });
+
+  it("发现候选偏好时只显示保存入口，不自动打开确认弹窗", () => {
+    render(
+      <ProductResults
+        artifacts={[]}
+        result={{
+          ...result,
+          learned_preferences: [
+            {
+              key: "budget_max_cny",
+              category: "preference",
+              content: "购物预算不超过 500 元",
+              confidence: 1,
+            },
+          ],
+        }}
+        sourceRunId="run-1"
+        sourceThreadId="thread-1"
+      />,
+    );
+
+    expect(screen.getByText("发现 1 条可长期保留的偏好")).toBeVisible();
+    expect(screen.getByRole("button", { name: "查看并保存" })).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "确认长期记忆" })).not.toBeInTheDocument();
   });
 });

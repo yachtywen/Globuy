@@ -102,6 +102,27 @@ export interface MemoryEntry {
   version: number;
   created_at: string;
   updated_at: string;
+  skill_id: string | null;
+}
+
+export interface MemorySkill {
+  skill_id: string;
+  name: string;
+  description: string;
+  trigger_keywords: string[];
+  is_enabled: boolean;
+  status: "active" | "deleted";
+  memory_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryCandidate {
+  key: string;
+  category: MemoryEntry["category"];
+  content: string;
+  confidence?: number;
+  skill_id?: string | null;
 }
 
 export interface TaskResult {

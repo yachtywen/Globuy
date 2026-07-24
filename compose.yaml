@@ -75,7 +75,9 @@ services:
       retries: 10
 
   opensearch:
-    image: opensearchproject/opensearch:3.7.0
+    # 2.19+ includes the score-ranker RRF pipeline processor used by ItemSearch.
+    # The previously tagged 3.7.0 image reported an incompatible 2.16 runtime.
+    image: opensearchproject/opensearch:2.19.1
     environment:
       discovery.type: single-node
       DISABLE_INSTALL_DEMO_CONFIG: "true"

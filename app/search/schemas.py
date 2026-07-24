@@ -48,6 +48,8 @@ class Candidate(BaseModel):
     product_url: str | None = None
     shipping_fee: float | None = Field(default=None, ge=0)
     retrieval_rank: int = Field(ge=1)
+    source_kind: str = "offline_snapshot"
+    data_as_of: str | None = None
 
 
 class ItemSearchOutput(BaseModel):
@@ -59,3 +61,6 @@ class ItemSearchOutput(BaseModel):
     total_recall: int = Field(default=0, ge=0)
     truncated: bool = False
     message: str | None = None
+    cache_hit: bool = False
+    data_as_of: str | None = None
+    source_kind: str = "offline_snapshot"

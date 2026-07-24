@@ -174,10 +174,33 @@ def item_picker(
             continue
         accepted.append((position, candidate))
 
+    ranked_accepted = sorted(accepted, key=_rank)
+    # Preserve one eligible candidate per platform before filling remaining
+    # positions. This prevents a low-latency platform from hiding an equally
+    # valid Douyin/JD candidate solely because all ranks start at one.
+    selected_candidates: list[PickerCandidate] = []
+    selected_platforms: set[str] = set()
+    for _, candidate in ranked_accepted:
+        if candidate.platform not in selected_platforms:
+            selected_candidates.append(candidate)
+            selected_platforms.add(candidate.platform)
+        if len(selected_candidates) == bounded_limit:
+            break
+    if len(selected_candidates) < bounded_limit:
+        selected_ids = {candidate.item_id for candidate in selected_candidates}
+        selected_candidates.extend(
+            candidate for _, candidate in ranked_accepted
+            if candidate.item_id not in selected_ids
+        )
+
     picks: list[PickedItem] = []
-    for _, candidate in sorted(accepted, key=_rank)[:bounded_limit]:
+    for candidate in selected_candidates[:bounded_limit]:
         annotations = _category_annotations(candidate, category_context)
         reasons = [f"检索顺位 {candidate.retrieval_rank}"] if candidate.retrieval_rank else []
+        if active_constraints.max_price is not None:
+            reasons.append(f"符合预算 ≤ {active_constraints.max_price:g} CNY")
+        if candidate.rating is not None:
+            reasons.append(f"评分 {candidate.rating:g}（同检索顺位下优先）")
         if annotations.price_tier:
             reasons.append(f"品类价格档位：{annotations.price_tier}")
         if annotations.matched_typical_attributes:
