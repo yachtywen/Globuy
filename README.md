@@ -149,7 +149,7 @@ Use two separate PowerShell windows and keep both running.
 Backend:
 
 ```powershell
-Set-Location "C:\Users\Lenovo\Desktop\模板例子\code\Globuy"
+Set-Location "C:\Users\Lenovo\Desktop\Globuy"
 conda activate globuy
 python -m uvicorn app.api.server:app --host 127.0.0.1 --port 8000 --reload
 ```
@@ -157,7 +157,7 @@ python -m uvicorn app.api.server:app --host 127.0.0.1 --port 8000 --reload
 Frontend:
 
 ```powershell
-Set-Location "C:\Users\Lenovo\Desktop\模板例子\code\Globuy\frontend"
+Set-Location "C:\Users\Lenovo\Desktop\Globuy\frontend"
 cmd /c npm run dev -- --host 127.0.0.1
 ```
 
@@ -177,9 +177,10 @@ Get-NetTCPConnection -LocalPort 5173,8000 -State Listen -ErrorAction SilentlyCon
 - A product image is unavailable: external marketplace CDNs can reject an
   image. Globuy uses an allowlisted backend image proxy and falls back to a
   placeholder when a source image is unavailable.
-- A realtime search result cannot yet be added to the wishlist: realtime
-  candidates still need to be persisted to MySQL as `Product` / `Offer` /
-  `OfferObservation`. This is tracked as P0 in [docs/ToDo.md](docs/ToDo.md).
+- A realtime result can be added to the wishlist only after its `Product`,
+  `Offer`, snapshot, and observation transaction commits. If persistence is
+  unavailable, the card remains usable for comparison/source navigation but
+  its wishlist button stays disabled instead of returning `OFFER_NOT_FOUND`.
 
 ## Tests
 

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { memoryApi, memorySkillApi } from "./api";
 import { ProductResults } from "./ProductResults";
 import type { TaskResult } from "./types";
 
@@ -19,7 +20,10 @@ const result: TaskResult = {
   artifacts: [],
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("商品结果", () => {
   it("优先渲染接口返回的真实商品图片 URL", () => {
@@ -53,7 +57,20 @@ describe("商品结果", () => {
     expect(screen.getAllByText("¥ 299.00")).toHaveLength(2);
   });
 
-  it("发现候选偏好时只显示保存入口，不自动打开确认弹窗", () => {
+  it("实时报价未持久化时禁用加入心愿库", () => {
+    render(<ProductResults artifacts={[]} result={{ ...result, picks: [{ ...result.picks[0], offer_id: "offer-live", wishlist_eligible: false }] }} />);
+    expect(screen.getByRole("button", { name: "加入心愿库" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "加入心愿库" })).toHaveAttribute("title", "商品报价尚未保存，暂时无法加入心愿库。");
+  });
+
+  it("成功结果会自动打开候选偏好弹窗，取消时不会写入", async () => {
+    vi.spyOn(memorySkillApi, "list").mockResolvedValue({
+      items: [
+        { skill_id: "general", name: "通用偏好", description: "", trigger_keywords: [], is_enabled: true, status: "active", memory_count: 0, created_at: "2026-07-25T00:00:00Z", updated_at: "2026-07-25T00:00:00Z" },
+        { skill_id: "digital", name: "数码设备", description: "", trigger_keywords: ["耳机"], is_enabled: true, status: "active", memory_count: 0, created_at: "2026-07-25T00:00:00Z", updated_at: "2026-07-25T00:00:00Z" },
+      ],
+    });
+    const confirm = vi.spyOn(memoryApi, "confirm").mockResolvedValue({ items: [], conflicts: [] });
     render(
       <ProductResults
         artifacts={[]}
@@ -74,7 +91,45 @@ describe("商品结果", () => {
     );
 
     expect(screen.getByText("发现 1 条可长期保留的偏好")).toBeVisible();
-    expect(screen.getByRole("button", { name: "查看并保存" })).toBeVisible();
+    expect(await screen.findByRole("dialog", { name: "确认长期记忆" })).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.queryByRole("dialog", { name: "确认长期记忆" })).not.toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("允许编辑候选、选择领域并只在确认后持久化", async () => {
+    vi.spyOn(memorySkillApi, "list").mockResolvedValue({
+      items: [
+        { skill_id: "general", name: "通用偏好", description: "", trigger_keywords: [], is_enabled: true, status: "active", memory_count: 0, created_at: "2026-07-25T00:00:00Z", updated_at: "2026-07-25T00:00:00Z" },
+        { skill_id: "digital", name: "数码设备", description: "", trigger_keywords: ["耳机"], is_enabled: true, status: "active", memory_count: 0, created_at: "2026-07-25T00:00:00Z", updated_at: "2026-07-25T00:00:00Z" },
+      ],
+    });
+    const confirm = vi.spyOn(memoryApi, "confirm").mockResolvedValue({ items: [], conflicts: [] });
+    render(<ProductResults artifacts={[]} result={{ ...result, learned_preferences: [{ key: "wearing", category: "preference", content: "喜欢头戴式耳机", confidence: 1 }] }} sourceRunId="run-2" sourceThreadId="thread-2" />);
+    await screen.findByRole("dialog", { name: "确认长期记忆" });
+    fireEvent.change(screen.getByRole("textbox", { name: "记忆内容" }), { target: { value: "优先头戴式降噪耳机" } });
+    const selectors = screen.getAllByRole("combobox");
+    fireEvent.change(selectors[1], { target: { value: "digital" } });
+    expect(confirm).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+    expect(confirm).toHaveBeenCalledWith(
+      [expect.objectContaining({ content: "优先头戴式降噪耳机", skill_id: "digital" })],
+      "thread-2",
+      "run-2",
+    );
+  });
+
+  it("成功的抖音候选会显示平台来源和商品卡片", () => {
+    render(<ProductResults artifacts={[]} result={{ ...result, picks: [{ ...result.picks[0], item_id: "douyin:3", platform: "douyin", title: "抖音降噪耳机" }], platform_outcomes: [{ platform: "douyin", status: "ok", candidate_count: 1 }] }} />);
+    expect(screen.getByRole("heading", { name: "抖音降噪耳机" })).toBeVisible();
+    expect(screen.getByText("抖音")).toBeVisible();
+    expect(screen.getByText("抖音 1 件候选")).toBeVisible();
+  });
+
+  it("图片加载失败时切换为本地占位图", () => {
+    render(<ProductResults artifacts={[]} result={result} />);
+    fireEvent.error(screen.getByRole("img", { name: "候选耳机 A" }));
+    expect(screen.getAllByRole("img", { name: /商品图片暂缺/ })[0].getAttribute("src")).toMatch(/product-fallback/);
   });
 });

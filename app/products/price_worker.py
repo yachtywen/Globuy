@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
-from typing import Protocol
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -24,33 +21,14 @@ from app.database.models import (
     WishlistItem,
 )
 from app.database.session import Database
+from app.products.detail_provider import (
+    ProviderDetailError,
+    ProviderNotConfigured,
+    ProviderRegistry,
+    build_provider_registry,
+)
 from app.products.identity import stable_id
 from app.products.schedule import current_beijing_day_start, next_daily_refresh
-
-
-@dataclass(frozen=True)
-class ProductDetail:
-    price: Decimal
-    currency: str
-
-
-class ProductProvider(Protocol):
-    async def get_detail(self, platform: str, source_item_id: str) -> ProductDetail: ...
-
-
-class ProviderNotConfigured(RuntimeError):
-    pass
-
-
-class ProviderRegistry:
-    def __init__(self, providers: dict[str, ProductProvider] | None = None) -> None:
-        self.providers = providers or {}
-
-    async def get_detail(self, platform: str, source_item_id: str) -> ProductDetail:
-        provider = self.providers.get(platform)
-        if provider is None:
-            raise ProviderNotConfigured(f"{platform} detail provider is not configured")
-        return await provider.get_detail(platform, source_item_id)
 
 
 class PriceRefreshWorker:
@@ -77,7 +55,9 @@ class PriceRefreshWorker:
     async def refresh_item(self, wishlist_item_id: str) -> dict[str, int | str]:
         return await self._run(due_only=False, wishlist_item_id=wishlist_item_id)
 
-    async def _run(self, *, due_only: bool, wishlist_item_id: str | None = None) -> dict[str, int | str]:
+    async def _run(
+        self, *, due_only: bool, wishlist_item_id: str | None = None
+    ) -> dict[str, int | str]:
         now = utc_naive()
         refresh_run_id = uuid4().hex
         async with self.database.sessions.begin() as session:
@@ -98,8 +78,17 @@ class PriceRefreshWorker:
                         select(WishlistItem, Offer)
                         .join(Offer, Offer.offer_id == WishlistItem.offer_id)
                         .where(WishlistItem.status == "active")
-                        .where(WishlistItem.wishlist_item_id == wishlist_item_id if wishlist_item_id else True)
-                        .where(True if not due_only else (WishlistItem.next_check_at.is_(None)) | (WishlistItem.next_check_at <= now))
+                        .where(
+                            WishlistItem.wishlist_item_id == wishlist_item_id
+                            if wishlist_item_id
+                            else True
+                        )
+                        .where(
+                            True
+                            if not due_only
+                            else (WishlistItem.next_check_at.is_(None))
+                            | (WishlistItem.next_check_at <= now)
+                        )
                         .order_by(WishlistItem.next_check_at, WishlistItem.wishlist_item_id)
                         .limit(self.batch_size)
                         .with_for_update(skip_locked=True)
@@ -189,6 +178,10 @@ class PriceRefreshWorker:
                 pass
             except ProviderNotConfigured:
                 error_code = "provider_unavailable"
+                completed_observation_id = None
+                failure += 1
+            except ProviderDetailError as exc:
+                error_code = exc.error_code
                 completed_observation_id = None
                 failure += 1
             except Exception:
@@ -318,7 +311,7 @@ async def _main(serve: bool, poll_seconds: int) -> None:
     )
     worker = PriceRefreshWorker(
         database,
-        ProviderRegistry(),
+        build_provider_registry(settings),
         refresh_hours=settings.price_refresh_interval_hours,
         refresh_local_hour=settings.price_refresh_local_hour,
     )

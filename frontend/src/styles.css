@@ -350,6 +350,11 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px sol
 .modal, .error-banner, .result-note, .preference-note { border-radius: var(--radius-md); }
 
 /* Product shortlist and comparison */
+.platform-outcomes { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: -8px 0 18px; color: var(--muted); font-size: 11px; }
+.platform-outcome { display: inline-flex; align-items: center; gap: 6px; }
+.platform-outcome::before { width: 7px; height: 7px; border-radius: 50%; background: #b7b1a5; content: ""; }
+.platform-outcome.ok::before { background: #3f8066; }
+.platform-outcome.error::before { background: #b74f3f; }
 .product-list { display: grid; gap: 12px; }
 .product-card { min-height: 190px; padding: 14px; display: grid; grid-template-columns: 172px minmax(0,1fr) 140px; gap: 18px; align-items: stretch; background: var(--surface-muted); border: 1px solid var(--line-soft); border-radius: 18px; }
 .product-card:hover { background: white; border-color: rgba(23,23,22,.14); box-shadow: 0 2px 8px rgba(0,0,0,.04); }

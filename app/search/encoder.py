@@ -35,6 +35,24 @@ def _load_local_first(factory, model_name: str, **model_kwargs):
         return factory(model_name, **model_kwargs)
 
 
+def _load_bge_m3_compat(factory, model_name: str, *, device: str, revision: str):
+    """Load BGE-M3 when sentence-transformers 5.6 cannot read its legacy Pooling config."""
+
+    from sentence_transformers.sentence_transformer.modules import Normalize, Pooling, Transformer
+
+    local = {"local_files_only": True, "revision": revision}
+    transformer = Transformer(
+        model_name,
+        model_kwargs=local,
+        config_kwargs=local,
+        processor_kwargs=local,
+    )
+    # BAAI's published bge-m3 1_Pooling/config.json fixes CLS pooling at 1024 dimensions.
+    dimension = transformer.get_embedding_dimension()
+    pooling = Pooling(dimension, pooling_mode="cls")
+    return factory(modules=[transformer, pooling, Normalize()], device=device)
+
+
 class BgeM3Encoder:
     """Lazy local inference for the frozen BAAI/bge-m3 model."""
 
@@ -69,11 +87,24 @@ class BgeM3Encoder:
         # A built index must remain queryable without Hugging Face network access.
         # The first index build falls back to the normal download path when the
         # requested snapshot is not present in the local cache yet.
-        model = _load_local_first(
-            SentenceTransformer,
-            self.settings.embedding_model_name,
-            **model_kwargs,
-        )
+        try:
+            model = _load_local_first(
+                SentenceTransformer,
+                self.settings.embedding_model_name,
+                **model_kwargs,
+            )
+        except TypeError as exc:
+            if (
+                self.settings.embedding_model_name != "BAAI/bge-m3"
+                or "Pooling.__init__() missing" not in str(exc)
+            ):
+                raise
+            model = _load_bge_m3_compat(
+                SentenceTransformer,
+                self.settings.embedding_model_name,
+                device=device,
+                revision=self.settings.embedding_model_revision,
+            )
         model.max_seq_length = self.settings.embedding_max_length
         if device == "cuda":
             model.half()

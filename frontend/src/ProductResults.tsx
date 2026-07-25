@@ -1,5 +1,5 @@
 import { ArrowSquareOut, Check, Heart, Scales, X } from "@phosphor-icons/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import fallbackImage from "./assets/product-fallback.webp";
 import { memoryApi, memorySkillApi, wishlistApi } from "./api";
 import { visibleResultStrings } from "./presentation";
@@ -8,6 +8,7 @@ import type { Artifact, MemoryCandidate, MemorySkill, TaskResult } from "./types
 type Product = {
   id: string;
   offerId: string | null;
+  wishlistEligible: boolean;
   title: string;
   imageUrl: string | null;
   productUrl: string | null;
@@ -41,6 +42,7 @@ function normalizeProduct(raw: Record<string, unknown>, index: number): Product 
   return {
     id: stringValue(raw, ["item_id", "id"]) || `candidate-${index}`,
     offerId: stringValue(raw, ["offer_id"]),
+    wishlistEligible: raw.wishlist_eligible !== false,
     title: stringValue(raw, ["title", "name", "product_name"]) || `候选商品 ${index + 1}`,
     imageUrl: stringValue(raw, ["image_url", "imageUrl"]),
     productUrl: stringValue(raw, ["product_url", "url", "link"]),
@@ -124,6 +126,7 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
   sourceRunId?: string | null;
 }) {
   const products = useMemo(() => (result?.picks || []).map((pick, index) => normalizeProduct(pick, index)), [result]);
+  const platformOutcomes = result?.platform_outcomes || [];
   const unresolved = useMemo(() => visibleResultStrings(result?.unresolved), [result]);
   const [selected, setSelected] = useState<string[]>([]);
   const [comparisonOpen, setComparisonOpen] = useState(false);
@@ -134,7 +137,8 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
   const [skills, setSkills] = useState<MemorySkill[]>([]);
   const [candidates, setCandidates] = useState<MemoryCandidate[]>([]);
   const [memoryError, setMemoryError] = useState<string | null>(null);
-  const openMemoryCandidates = async () => {
+  const autoOpenedMemoryKey = useRef<string | null>(null);
+  const openMemoryCandidates = useCallback(async () => {
     const items = (result?.learned_preferences || []).map((item, index) => {
       const value = typeof item === "object" && item ? item as Record<string, unknown> : {};
       const rawKey = String(value.key || `preference_${index + 1}`);
@@ -142,19 +146,30 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
     });
     try { const response = await memorySkillApi.list(); setSkills(response.items); setCandidates(items.map((item) => ({ ...item, skill_id: suggestedSkillId(item.content, response.items) }))); setMemoryOpen(true); }
     catch (reason) { setMemoryError(reason instanceof Error ? reason.message : "无法加载 Skill"); }
-  };
+  }, [result]);
+  useEffect(() => {
+    if (result?.status !== "complete" || !result.learned_preferences?.length) return;
+    const key = `${sourceRunId || "no-run"}:${result.learned_preferences.map((item) => {
+      const value = typeof item === "object" && item ? item as Record<string, unknown> : {};
+      return String(value.key || value.content || item);
+    }).join("|")}`;
+    if (autoOpenedMemoryKey.current === key) return;
+    autoOpenedMemoryKey.current = key;
+    void openMemoryCandidates();
+  }, [openMemoryCandidates, result, sourceRunId]);
   if (!result && artifacts.length === 0) return null;
   const toggle = (id: string) => setSelected((items) => items.includes(id) ? items.filter((item) => item !== id) : items.length < 4 ? [...items, id] : items);
   const compared = products.filter((product) => selected.includes(product.id));
   return (
     <section className="result-panel" aria-labelledby="result-heading">
       <div className="result-heading-row"><div><span className="section-label">SHORTLIST</span><h2 id="result-heading">为你筛出的商品</h2></div></div>
+      {platformOutcomes.length > 0 && <div aria-label="平台检索状态" className="platform-outcomes">{platformOutcomes.map((outcome) => <span className={`platform-outcome ${outcome.status}`} key={outcome.platform}>{platformLabel(outcome.platform)} {outcome.status === "ok" ? `${outcome.candidate_count} 件候选` : outcome.status === "not_configured" ? "未配置" : "检索失败"}</span>)}</div>}
       {products.length ? <div className="product-list">{products.map((product, index) => {
         const checked = selected.includes(product.id);
         return <article className="product-card" key={product.id}>
           <div className="product-media"><span className="product-rank">#{String(index + 1).padStart(2, "0")}</span><ProductImage product={product} /></div>
           <div className="product-copy"><div className="product-meta"><span>{platformLabel(product.platform)}</span>{product.rating !== null && <span>评分 {product.rating.toFixed(1)}</span>}{product.sales !== null && <span>销量 {product.sales.toLocaleString("zh-CN")}</span>}</div><h3>{product.title}</h3><ul>{(product.reasons.length ? product.reasons : ["按检索顺位与已知约束筛选"]).map((reason) => <li key={reason}><Check size={14} weight="bold" />{reason}</li>)}</ul>{product.warnings.length > 0 && <p className="product-warning">{product.warnings.join(" · ")}</p>}</div>
-          <div className="product-actions"><div><small>快照价格</small><strong>{product.price === null ? "待核验" : `${product.currency === "CNY" ? "¥" : product.currency} ${product.price.toFixed(2)}`}</strong></div><button aria-pressed={checked} className={`compare-toggle ${checked ? "selected" : ""}`} onClick={() => toggle(product.id)}>{checked ? <Check size={15} weight="bold" /> : <Scales size={15} />} {checked ? "已加入对比" : "加入对比"}</button><button className={`wishlist-toggle ${saved.includes(product.id) ? "selected" : ""}`} disabled={!product.offerId || saving === product.id || saved.includes(product.id)} onClick={async () => { if (!product.offerId) return; const clientRequestId = `wishlist_${crypto.randomUUID()}`; setSaving(product.id); setWishlistError(null); try { await wishlistApi.add(product.offerId, sourceThreadId, sourceRunId, clientRequestId); setSaved((items) => [...items, product.id]); } catch (reason) { setWishlistError(reason instanceof Error ? reason.message : "加入心愿库失败"); } finally { setSaving(null); } }} title={!product.offerId ? "当前商品缺少稳定报价标识，暂时无法加入心愿库。" : undefined}><Heart size={15} weight={saved.includes(product.id) ? "fill" : "regular"} />{saved.includes(product.id) ? "已加入心愿库" : saving === product.id ? "正在加入…" : "加入心愿库"}</button>{product.productUrl && /^https?:\/\//i.test(product.productUrl) ? <a href={product.productUrl} rel="noopener noreferrer" target="_blank">前往来源 <ArrowSquareOut size={15} /></a> : <span className="source-unavailable">来源链接未提供</span>}</div>
+          <div className="product-actions"><div><small>快照价格</small><strong>{product.price === null ? "待核验" : `${product.currency === "CNY" ? "¥" : product.currency} ${product.price.toFixed(2)}`}</strong></div><button aria-pressed={checked} className={`compare-toggle ${checked ? "selected" : ""}`} onClick={() => toggle(product.id)}>{checked ? <Check size={15} weight="bold" /> : <Scales size={15} />} {checked ? "已加入对比" : "加入对比"}</button><button className={`wishlist-toggle ${saved.includes(product.id) ? "selected" : ""}`} disabled={!product.offerId || !product.wishlistEligible || saving === product.id || saved.includes(product.id)} onClick={async () => { if (!product.offerId || !product.wishlistEligible) return; const clientRequestId = `wishlist_${crypto.randomUUID()}`; setSaving(product.id); setWishlistError(null); try { await wishlistApi.add(product.offerId, sourceThreadId, sourceRunId, clientRequestId); setSaved((items) => [...items, product.id]); } catch (reason) { setWishlistError(reason instanceof Error ? reason.message : "加入心愿库失败"); } finally { setSaving(null); } }} title={!product.offerId || !product.wishlistEligible ? "商品报价尚未保存，暂时无法加入心愿库。" : undefined}><Heart size={15} weight={saved.includes(product.id) ? "fill" : "regular"} />{saved.includes(product.id) ? "已加入心愿库" : saving === product.id ? "正在加入…" : "加入心愿库"}</button>{product.productUrl && /^https?:\/\//i.test(product.productUrl) ? <a href={product.productUrl} rel="noopener noreferrer" target="_blank">前往来源 <ArrowSquareOut size={15} /></a> : <span className="source-unavailable">来源链接未提供</span>}</div>
         </article>;
       })}</div> : result && <div className="result-empty"><strong>暂未形成结构化商品清单</strong><span>完整建议仍保留在上方回答中。</span></div>}
       {selected.length > 0 && <div aria-live="polite" className="compare-bar"><span>已选 {selected.length} / 4 件</span><button disabled={selected.length < 2} onClick={() => setComparisonOpen(true)}><Scales size={17} />对比商品</button></div>}

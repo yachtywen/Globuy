@@ -196,9 +196,7 @@ class ProductSearchService:
 
 def load_catalog(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -237,6 +235,7 @@ def catalog_item(product: Product, offer: Offer) -> dict[str, Any]:
         "image_url": offer.image_url,
         "attributes": product.attributes_json or {},
         "product_url": offer.product_url,
+        "wishlist_eligible": True,
     }
 
 

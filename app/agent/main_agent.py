@@ -20,6 +20,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.store.base import BaseStore
@@ -49,11 +50,38 @@ _BUDGET_PREFERENCE = re.compile(
     r"预算\s*(?:为|是|在)?\s*[￥¥]?\s*(\d+(?:\.\d+)?)\s*(?:元|块|RMB|rmb)?\s*(?:以内|以下|不超过|最多|上限)?"
 )
 _MEMORY_TRIGGER_WORDS = (
-    "预算", "不超过", "以内", "以下", "最多", "上限",
-    "喜欢", "偏好", "钟意", "更喜欢", "优先", "更看重", "在意",
-    "不喜欢", "讨厌", "拒绝", "不要", "排除", "避开", "不能接受",
-    "必须", "只要", "习惯", "常用", "常穿", "过敏", "敏感",
-    "尺码", "身高", "体重", "肤质", "肤色",
+    "预算",
+    "不超过",
+    "以内",
+    "以下",
+    "最多",
+    "上限",
+    "喜欢",
+    "偏好",
+    "钟意",
+    "更喜欢",
+    "优先",
+    "更看重",
+    "在意",
+    "不喜欢",
+    "讨厌",
+    "拒绝",
+    "不要",
+    "排除",
+    "避开",
+    "不能接受",
+    "必须",
+    "只要",
+    "习惯",
+    "常用",
+    "常穿",
+    "过敏",
+    "敏感",
+    "尺码",
+    "身高",
+    "体重",
+    "肤质",
+    "肤色",
 )
 
 
@@ -65,23 +93,30 @@ def _detected_preference_candidates(content: str) -> list[dict[str, Any]]:
     if match is not None:
         budget = float(match.group(1))
         if 0 < budget <= 1_000_000:
-            candidates.append({
-                "key": "budget_max_cny",
-                "category": "preference",
-                "content": f"购物预算不超过 {budget:g} 元",
-                "confidence": 1.0,
-            })
+            candidates.append(
+                {
+                    "key": "budget_max_cny",
+                    "category": "preference",
+                    "content": f"购物预算不超过 {budget:g} 元",
+                    "confidence": 1.0,
+                }
+            )
     normalized = " ".join(content.split()).strip()
     triggered = [word for word in _MEMORY_TRIGGER_WORDS if word in normalized]
     if triggered:
-        is_blacklist = any(word in normalized for word in ("不喜欢", "讨厌", "拒绝", "不要", "排除", "避开", "不能接受"))
+        is_blacklist = any(
+            word in normalized
+            for word in ("不喜欢", "讨厌", "拒绝", "不要", "排除", "避开", "不能接受")
+        )
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-        candidates.append({
-            "key": f"explicit_preference_{digest}",
-            "category": "blacklist" if is_blacklist else "preference",
-            "content": normalized[:500],
-            "confidence": 1.0,
-        })
+        candidates.append(
+            {
+                "key": f"explicit_preference_{digest}",
+                "category": "blacklist" if is_blacklist else "preference",
+                "content": normalized[:500],
+                "confidence": 1.0,
+            }
+        )
     return candidates
 
 
@@ -126,6 +161,113 @@ def _message_text(message: BaseMessage) -> str:
         elif isinstance(block, dict) and isinstance(block.get("text"), str):
             parts.append(block["text"])
     return "".join(parts)
+
+
+_CANDIDATE_FACT_FIELDS = (
+    "product_id",
+    "offer_id",
+    "platform",
+    "title",
+    "price",
+    "currency",
+    "rating",
+    "sales",
+    "image_url",
+    "attributes",
+    "product_url",
+    "retrieval_rank",
+    "source_kind",
+    "data_as_of",
+    "wishlist_eligible",
+)
+
+
+def _collect_candidate_evidence(value: Any, evidence: dict[str, dict[str, Any]]) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _collect_candidate_evidence(item, evidence)
+        return
+    if not isinstance(value, dict):
+        return
+    item_id = value.get("item_id")
+    if isinstance(item_id, str) and item_id.strip():
+        evidence[item_id.strip()] = value
+    for child in value.values():
+        if isinstance(child, (dict, list)):
+            _collect_candidate_evidence(child, evidence)
+
+
+def _hydrate_picker_picks(picks: list[Any], messages: Sequence[BaseMessage]) -> list[Any]:
+    """Restore verified candidate facts that the model omitted from ItemPicker args."""
+
+    evidence: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        if not isinstance(message, ToolMessage) or message.name not in {
+            "item_search",
+            "dispatch_tool",
+        }:
+            continue
+        payload = _tool_payload(message)
+        if payload is not None:
+            _collect_candidate_evidence(payload, evidence)
+
+    hydrated: list[Any] = []
+    for raw in picks:
+        if not isinstance(raw, dict):
+            hydrated.append(raw)
+            continue
+        item_id = raw.get("item_id")
+        source = evidence.get(str(item_id).strip()) if item_id is not None else None
+        if source is None:
+            hydrated.append(raw)
+            continue
+        item = dict(raw)
+        for field in _CANDIDATE_FACT_FIELDS:
+            if field in source:
+                item[field] = source[field]
+        hydrated.append(item)
+    return hydrated
+
+
+def _platform_outcomes(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
+    """Summarize the latest truthful ItemSearch outcome for each platform."""
+
+    outcomes: dict[str, dict[str, Any]] = {}
+
+    def collect(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+            return
+        if not isinstance(value, dict):
+            return
+        platform = value.get("platform")
+        status = value.get("status")
+        candidates = value.get("candidates")
+        if platform in {"taobao", "jingdong", "douyin"} and status in {
+            "ok",
+            "not_configured",
+            "error",
+        }:
+            outcome: dict[str, Any] = {
+                "platform": platform,
+                "status": status,
+                "candidate_count": len(candidates) if isinstance(candidates, list) else 0,
+            }
+            for field in ("source_kind", "cache_hit", "message"):
+                if field in value:
+                    outcome[field] = value[field]
+            outcomes[platform] = outcome
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                collect(child)
+
+    for message in messages:
+        if isinstance(message, ToolMessage) and message.name in {"item_search", "dispatch_tool"}:
+            payload = _tool_payload(message)
+            if payload is not None:
+                collect(payload)
+    return [outcomes[name] for name in ("taobao", "jingdong", "douyin") if name in outcomes]
 
 
 def _last_user_text(messages: Sequence[BaseMessage]) -> str:
@@ -185,9 +327,7 @@ class AgentLoop:
         self.model = model
         # Reads confirmed user memories before runs; Agent-originated writes stay disabled.
         self.store = store
-        self.business_tools = list(
-            tools if tools is not None else get_core_tools(model=self.model)
-        )
+        self.business_tools = list(tools if tools is not None else get_core_tools(model=self.model))
         self.enable_dispatch = enable_dispatch
         self.tools = list(self.business_tools)
         if enable_dispatch:
@@ -198,14 +338,10 @@ class AgentLoop:
         self.active_children: dict[str, AgentLoop] = {}
         self._by_name = {registered.name: registered for registered in self.tools}
         self.think_tools = [
-            registered
-            for registered in self.tools
-            if registered.name in TOOL_PHASES["think"]
+            registered for registered in self.tools if registered.name in TOOL_PHASES["think"]
         ]
         self.reflect_tools = [
-            registered
-            for registered in self.tools
-            if registered.name in TOOL_PHASES["reflect"]
+            registered for registered in self.tools if registered.name in TOOL_PHASES["reflect"]
         ]
         self.graph = self._build_graph()
 
@@ -276,8 +412,7 @@ class AgentLoop:
                     "当前为 Reflect 阶段。检查现有观察，只允许选择："
                     + "、".join(sorted(TOOL_PHASES["reflect"]))
                     + "。信息不足且需要继续检索时不调用工具，系统会返回 Think。"
-                    "shopping_summary 成功后必须结束。"
-                    + guard
+                    "shopping_summary 成功后必须结束。" + guard
                 )
             )
             prompt = self.system_prompt
@@ -344,6 +479,7 @@ class AgentLoop:
                     payload = _tool_payload(message)
                     picks = payload.get("picks") if payload else None
                     if isinstance(picks, list) and picks:
+                        picks = _hydrate_picker_picks(picks, state["messages"])
                         terminal_result = {
                             "status": "complete",
                             "terminal": True,
@@ -358,6 +494,9 @@ class AgentLoop:
                 terminal_result = self._add_memory_reasons(
                     terminal_result, state.get("recalled_memories", [])
                 )
+            if terminal_result is not None:
+                terminal_result = dict(terminal_result)
+                terminal_result["platform_outcomes"] = _platform_outcomes(state["messages"])
             phase: Phase = "done" if terminal_result is not None else "reflect"
             await _report_phase("observe", started=False, iteration=iteration)
             return {
@@ -459,7 +598,9 @@ class AgentLoop:
                 content_value = str(memory.value.get("content") or "").strip()
                 if content_value:
                     lines.append(f"- [{skill_name}/{category}] {memory.key}: {content_value}")
-                    recalled.append({"key": memory.key, "skill_name": skill_name, "content": content_value})
+                    recalled.append(
+                        {"key": memory.key, "skill_name": skill_name, "content": content_value}
+                    )
             state["memory_context"] = "\n".join(lines) or None
             state["recalled_memories"] = recalled
             state["memory_status"] = "ready"
@@ -468,7 +609,9 @@ class AgentLoop:
         return state
 
     @staticmethod
-    def _add_memory_reasons(result: dict[str, Any], memories: list[dict[str, str]]) -> dict[str, Any]:
+    def _add_memory_reasons(
+        result: dict[str, Any], memories: list[dict[str, str]]
+    ) -> dict[str, Any]:
         """Expose confirmed preference influence without claiming unsupported item matches."""
 
         if not memories or not isinstance(result.get("picks"), list):
@@ -493,20 +636,14 @@ class AgentLoop:
         return {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": (
-                settings.fork_recursion_limit
-                if child
-                else settings.main_agent_recursion_limit
+                settings.fork_recursion_limit if child else settings.main_agent_recursion_limit
             ),
             "metadata": {"model_role": "coordinator"},
         }
 
-    async def _invoke(
-        self, content: str, thread_id: str, *, child: bool = False
-    ) -> AgentState:
+    async def _invoke(self, content: str, thread_id: str, *, child: bool = False) -> AgentState:
         settings = get_settings()
-        timeout = (
-            settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
-        )
+        timeout = settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
         async with asyncio.timeout(timeout):
             return await self.graph.ainvoke(
                 await self._state_with_memory(content),
@@ -519,16 +656,41 @@ class AgentLoop:
         """Yield LangGraph v2 events, including nested ShoppingSummary model events."""
 
         settings = get_settings()
-        timeout = (
-            settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
-        )
-        async with asyncio.timeout(timeout):
-            async for graph_event in self.graph.astream_events(
-                await self._state_with_memory(content),
-                config=self._config(thread_id, child=child),
-                version="v2",
-            ):
-                yield graph_event
+        timeout = settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
+        try:
+            async with asyncio.timeout(timeout):
+                async for graph_event in self.graph.astream_events(
+                    await self._state_with_memory(content),
+                    config=self._config(thread_id, child=child),
+                    version="v2",
+                ):
+                    yield graph_event
+        except GraphRecursionError:
+            fallback = {
+                "messages": [
+                    AIMessage(content="检索步骤已达到本次运行上限，请缩小条件后重试。")
+                ],
+                "phase": "done",
+                "iteration": settings.fork_recursion_limit
+                if child
+                else settings.main_agent_recursion_limit,
+                "learned_preferences": _detected_preference_candidates(content),
+                "terminal_result": {
+                    "status": "incomplete",
+                    "terminal": True,
+                    "final_text": "检索步骤已达到本次运行上限，请缩小条件后重试。",
+                    "picks": [],
+                    "unresolved": ["本次检索未能在步骤上限内收敛"],
+                    "platform_outcomes": [],
+                },
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "globuy_recursion_fallback",
+                "data": {"output": fallback},
+                "parent_ids": [],
+                "metadata": {"model_role": "coordinator"},
+            }
 
     @staticmethod
     def _compact_tool_results(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
@@ -576,9 +738,7 @@ class AgentLoop:
                 "answer": _message_text(final_message),
                 "tool_results": tool_results,
                 "search_results": [
-                    item["result"]
-                    for item in tool_results
-                    if item["tool"] == "item_search"
+                    item["result"] for item in tool_results if item["tool"] == "item_search"
                 ],
             }
         except TimeoutError:
@@ -618,6 +778,13 @@ class AgentLoop:
             return "主任务执行超时。", {
                 "status": "timeout",
                 "memory_status": "not_configured" if self.store is None else "partial",
+            }
+        except GraphRecursionError:
+            return "检索步骤已达到本次运行上限，请缩小条件后重试。", {
+                "status": "incomplete",
+                "phase": "done",
+                "memory_status": "not_configured" if self.store is None else "partial",
+                "learned_preferences": _detected_preference_candidates(content),
             }
         answer, message = self._answer(state)
         metadata = {

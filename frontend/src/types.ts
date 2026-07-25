@@ -44,6 +44,7 @@ export type ProductPick = Record<string, unknown> & {
   currency: string;
   rating: number | null;
   sales: number | null;
+  wishlist_eligible?: boolean;
 };
 
 export interface WishlistItem {
@@ -133,6 +134,14 @@ export interface TaskResult {
   learned_preferences: Array<unknown>;
   memory_status: string;
   source_kind: "offline_snapshot" | string;
+  platform_outcomes?: Array<{
+    platform: string;
+    status: "ok" | "not_configured" | "error";
+    candidate_count: number;
+    source_kind?: string;
+    cache_hit?: boolean;
+    message?: string;
+  }>;
   artifacts: Artifact[];
 }
 

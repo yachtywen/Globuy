@@ -7,9 +7,18 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
+from langgraph.errors import GraphRecursionError
 from pydantic import ValidationError
 
-from app.agent.main_agent import AgentLoop, _normalize_phase_tool_calls
+from app.agent.main_agent import (
+    AgentLoop,
+    _detected_preference_candidates,
+    _hydrate_picker_picks,
+    _merge_preference_candidates,
+    _normalize_phase_tool_calls,
+    _platform_outcomes,
+)
 from app.agent.middleware import (
     cache_breakpoint_update,
     compact_tool_content,
@@ -45,6 +54,31 @@ def test_cross_phase_tool_calls_are_removed_before_history() -> None:
 
     assert had_invalid is True
     assert [call["name"] for call in normalized.tool_calls] == ["category_insight"]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_key", "expected_category"),
+    [
+        ("预算 500 元以内买耳机", "budget_max_cny", "preference"),
+        ("我更喜欢头戴式耳机", "explicit_preference_", "preference"),
+        ("不要入耳式耳机", "explicit_preference_", "blacklist"),
+        ("我身高 180，必须选择合适尺码", "explicit_preference_", "preference"),
+    ],
+)
+def test_explicit_memory_candidate_triggers(
+    query: str, expected_key: str, expected_category: str
+) -> None:
+    candidates = _detected_preference_candidates(query)
+    assert any(
+        item["key"].startswith(expected_key) and item["category"] == expected_category
+        for item in candidates
+    )
+
+
+def test_memory_candidate_merge_keeps_first_value_for_duplicate_key() -> None:
+    first = {"key": "budget_max_cny", "category": "preference", "content": "不超过 500 元"}
+    duplicate = {**first, "content": "不超过 800 元"}
+    assert _merge_preference_candidates([first], [duplicate]) == [first]
 
 
 def candidate(
@@ -164,14 +198,94 @@ def test_item_picker_rejects_missing_hard_constraint_evidence() -> None:
     assert "缺少硬约束属性证据" in result["rejected_brief"][0]
 
 
+def test_picker_terminal_restores_verified_source_links_from_dispatch() -> None:
+    messages = [
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "status": "ok",
+                    "search_results": [
+                        {
+                            "status": "ok",
+                            "platform": "douyin",
+                            "candidates": [
+                                {
+                                    "item_id": "douyin:30001",
+                                    "product_id": "product-30001",
+                                    "offer_id": "offer-30001",
+                                    "platform": "douyin",
+                                    "title": "抖音降噪耳机",
+                                    "price": 159,
+                                    "currency": "CNY",
+                                    "rating": None,
+                                    "sales": 5000,
+                                    "image_url": "https://example.com/item.jpg",
+                                    "attributes": {},
+                                    "product_url": "https://haohuo.jinritemai.com/item/30001",
+                                    "retrieval_rank": 1,
+                                    "source_kind": "realtime_provider",
+                                    "data_as_of": "2026-07-25T08:00:00Z",
+                                    "wishlist_eligible": True,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            name="dispatch_tool",
+            tool_call_id="dispatch-1",
+        ),
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "status": "ok",
+                    "picks": [
+                        {
+                            **candidate("douyin:30001", rank=1, price=159),
+                            "platform": "douyin",
+                            "product_url": None,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            name="item_picker",
+            tool_call_id="picker-1",
+        ),
+    ]
+
+    hydrated = _hydrate_picker_picks(json.loads(messages[-1].content)["picks"], messages)
+
+    assert hydrated[0]["product_url"] == "https://haohuo.jinritemai.com/item/30001"
+    assert hydrated[0]["offer_id"] == "offer-30001"
+    assert hydrated[0]["wishlist_eligible"] is True
+    assert _platform_outcomes(messages) == [
+        {"platform": "douyin", "status": "ok", "candidate_count": 1}
+    ]
+
+
+def test_item_picker_retains_successful_douyin_candidate_across_platforms() -> None:
+    items = [
+        {**candidate("taobao:1", rank=1, price=199), "platform": "taobao"},
+        {**candidate("jingdong:2", rank=2, price=209), "platform": "jingdong"},
+        {**candidate("douyin:3", rank=3, price=219), "platform": "douyin"},
+    ]
+    result = item_picker.invoke({"items": items, "constraints": {}, "limit": 3})
+    assert {item["platform"] for item in result["picks"]} == {
+        "taobao",
+        "jingdong",
+        "douyin",
+    }
+
+
 @pytest.mark.asyncio
 async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
     tmp_path: Path,
 ) -> None:
     model = ScriptedModel()
     model.summary_text = (
-        "## 精选清单\n\n| 价格 | ¥199 |\n| 运费 | 待确认 |"
-        "\n\n> 数据说明：来自离线快照。"
+        "## 精选清单\n\n| 价格 | ¥199 |\n| 运费 | 待确认 |\n\n> 数据说明：来自离线快照。"
     )
     summary = build_shopping_summary_tool(model)
     picked = {
@@ -475,13 +589,118 @@ async def test_explicit_phase_graph_runs_nested_summary_once(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_provider_failure_and_empty_picker_converge_to_fallback(tmp_path: Path) -> None:
+    @tool("item_search")
+    async def failed_item_search(query: str, platform: str) -> dict[str, Any]:
+        """Return a deterministic provider failure for loop testing."""
+
+        return {
+            "status": "error",
+            "platform": platform,
+            "candidates": [],
+            "message": f"{query} provider failed",
+        }
+
+    from app.tools.chat_fallback import chat_fallback
+
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "item_search",
+                        "args": {"query": "耳机", "platform": "douyin"},
+                        "id": "search-failed",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "item_picker",
+                        "args": {"items": [], "constraints": {}, "limit": 3},
+                        "id": "picker-empty",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "chat_fallback",
+                        "args": {"message": "暂未取得可验证商品，请稍后重试"},
+                        "id": "fallback-after-failure",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+    loop = AgentLoop(
+        model,
+        tools=[failed_item_search, item_picker, chat_fallback],
+        enable_dispatch=False,
+    )
+    with thread_scope("provider-failure", tmp_path, run_id="provider-failure-run"):
+        state = await loop._invoke("买耳机", "provider-failure")
+    assert state["phase"] == "done"
+    assert state["terminal_result"]["status"] == "needs_clarification"
+    assert state["terminal_result"]["platform_outcomes"] == [
+        {
+            "platform": "douyin",
+            "status": "error",
+            "candidate_count": 0,
+            "message": "耳机 provider failed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agentloop_astream_exposes_v2_graph_events(tmp_path: Path) -> None:
     loop = AgentLoop(None)
     with thread_scope("stream-thread", tmp_path, run_id="stream-run"):
         events = [event async for event in loop.astream("测试流式", "stream-thread")]
     assert events
     assert all("event" in event for event in events)
-    assert any(
-        event["event"] == "on_chain_end" and not event.get("parent_ids")
-        for event in events
-    )
+    assert any(event["event"] == "on_chain_end" and not event.get("parent_ids") for event in events)
+
+
+@pytest.mark.asyncio
+async def test_agentloop_returns_graceful_result_at_recursion_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = AgentLoop(None)
+
+    async def exhausted(*_args, **_kwargs):
+        raise GraphRecursionError("test limit")
+
+    monkeypatch.setattr(loop, "_invoke", exhausted)
+    answer, metadata = await loop.run("预算 500 元以内买耳机", "limit-thread")
+    assert "达到本次运行上限" in answer
+    assert metadata["status"] == "incomplete"
+    assert metadata["phase"] == "done"
+    assert metadata["learned_preferences"][0]["key"] == "budget_max_cny"
+
+
+@pytest.mark.asyncio
+async def test_agentloop_stream_emits_terminal_fallback_at_recursion_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = AgentLoop(None)
+
+    class ExhaustedGraph:
+        async def astream_events(self, *_args, **_kwargs):
+            if False:
+                yield {}
+            raise GraphRecursionError("test limit")
+
+    monkeypatch.setattr(loop, "graph", ExhaustedGraph())
+    events = [event async for event in loop.astream("买耳机", "stream-limit")]
+    output = events[-1]["data"]["output"]
+    assert events[-1]["event"] == "on_chain_end"
+    assert output["terminal_result"]["status"] == "incomplete"
+    assert output["terminal_result"]["picks"] == []

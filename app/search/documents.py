@@ -89,6 +89,7 @@ def index_document(item: Mapping[str, Any], vector: list[float]) -> dict[str, An
         "attributes": json.loads(json.dumps(attributes, ensure_ascii=False)),
         "attribute_terms": flatten_attribute_terms(attributes),
         "product_url": item.get("product_url"),
+        "wishlist_eligible": bool(item.get("wishlist_eligible", True)),
         "semantic_text": semantic_text(item),
         "content_vector": vector,
     }

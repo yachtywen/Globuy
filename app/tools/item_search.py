@@ -10,13 +10,14 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from app.config import get_settings
+from app.infrastructure.opensearch import build_opensearch_client
 from app.products.realtime import (
     RealtimeCandidateCache,
     RealtimeProviderError,
     RealtimeProviderNotConfigured,
     build_realtime_provider,
 )
-from app.infrastructure.opensearch import build_opensearch_client
+from app.products.realtime_catalog import persist_with_runtime_database
 from app.search.encoder import get_embedding_encoder
 from app.search.schemas import Candidate, ItemSearchOutput, Platform, SearchFilters
 from app.search.service import ProductIndexManager, ProductSearchService, SearchNotConfiguredError
@@ -53,8 +54,7 @@ def _matches_realtime_filters(candidate: Candidate, filters: SearchFilters | Non
     ):
         return False
     return not filters.attribute_equals or all(
-        candidate.attributes.get(key) == value
-        for key, value in filters.attribute_equals.items()
+        candidate.attributes.get(key) == value for key, value in filters.attribute_equals.items()
     )
 
 
@@ -96,6 +96,7 @@ async def _refresh_realtime_cache(query: str, platform: Platform) -> None:
         candidates = await build_realtime_provider(settings).search(
             query, platform, settings.realtime_search_candidate_limit
         )
+        candidates, _ = await persist_with_runtime_database(query, platform, candidates)
         _realtime_cache.put(query, platform, candidates, settings.realtime_search_cache_ttl_seconds)
     except RealtimeProviderError:
         return
@@ -122,7 +123,9 @@ async def _hybridize_realtime_candidates(
     if not alias_exists:
         await asyncio.to_thread(
             manager.client.indices.update_aliases,
-            body={"actions": [{"add": {"index": settings.opensearch_product_index, "alias": alias}}]},
+            body={
+                "actions": [{"add": {"index": settings.opensearch_product_index, "alias": alias}}]
+            },
         )
     await asyncio.to_thread(manager.index_items, documents)
     output = await asyncio.to_thread(service.search, query, platform, top_k, filters)
@@ -130,7 +133,9 @@ async def _hybridize_realtime_candidates(
     ranked = [
         candidate.model_copy(
             update={
-                "source_kind": "realtime_provider" if candidate.item_id in live_ids else "offline_snapshot",
+                "source_kind": "realtime_provider"
+                if candidate.item_id in live_ids
+                else "offline_snapshot",
                 "data_as_of": data_as_of if candidate.item_id in live_ids else None,
             }
         )
@@ -210,6 +215,9 @@ async def item_search(
         try:
             candidates = await build_realtime_provider(settings).search(
                 normalized_query, platform, min(top_k, settings.realtime_search_candidate_limit)
+            )
+            candidates, _ = await persist_with_runtime_database(
+                normalized_query, platform, candidates
             )
             cached = _realtime_cache.put(
                 normalized_query, platform, candidates, settings.realtime_search_cache_ttl_seconds

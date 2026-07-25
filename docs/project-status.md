@@ -1,5 +1,48 @@
 # globuy 项目状态
 
+## 2026-07-25：完成 P2 本地检索、跨运行个性化与取消验收
+
+- 在本机无 Docker 环境下使用官方 OpenSearch 2.19.1 Windows 发行包启动单节点服务；压缩包、数据和日志均位于 Git 忽略的 `output/infrastructure`。当前 `http://127.0.0.1:9200` 健康状态为 yellow（单节点副本未分配），主分片可用。
+- 从当前 MySQL 真实报价构建商品索引 96 条：抖音 40、京东 36、淘宝 20。`BAAI/bge-m3` 仍固定为 1024 维归一化向量；针对 sentence-transformers 5.6 无法读取该模型旧 Pooling 配置的特定 `TypeError`，新增仅限 BGE-M3 的 Transformer + 1024 维 CLS Pooling + Normalize 兼容回退，并补充聚焦测试，未替换模型或向量空间。
+- 新增可复现的 `app.eval.collect_retrieval_records`：10 个中文查询族分别在淘宝、京东、抖音索引域运行 BM25 与现有 BGE-M3 + 无权重 RRF，共 30 条真实本地检索记录；相关项完全由显式标题锚点规则生成，30/30 均有标签，不填造 `provider_attempts`。
+- 新增跨运行个性化证据：临时 MySQL QA 用户确认预算 500 元、索尼偏好和拒绝入耳式三条记忆，经真实 Memory Outbox 3/3 发布到独立 OpenSearch 记忆索引；下一运行召回由空变为三条全部命中，确定性 Picker Top-3 在预算和标题证据佩戴方式硬约束下发生变化。品牌只记录为已召回软偏好，不声称当前 Picker 已实现品牌加权；脚本清理索引和 QA 用户并验证删除成功。
+- 新增真实本地取消证据：`SessionStore + EventBroker + RunRegistry` 启动受控长任务后调用正式取消入口，37.86 ms 内持久化为 `cancelled`。最终 Git 忽略报告共 33 例：平均 671.28 ms、P95 147.12 ms、缓存命中率 0、BM25 Top-3 命中率 1.0、Hybrid Top-3 命中率 0.9、记忆召回率 1.0、误召回 0、工具失败率 0、取消成功率 1.0；三平台各 10 次 OpenSearch 检索成功率均为 1.0。
+- 平均时延高于 P95 是真实冷启动离群值所致，原始时延未平滑。报告把“平台 OpenSearch 检索”与“实时 Provider 尝试”分开；后者仍为空，因为最新三平台付费执行在到达 Provider 前被支付层以余额不足以覆盖预授权拒绝，未绕过或伪造。
+- P0 仍未完整验收：需余额可覆盖预授权后完成三平台实时搜索、收藏、刷新与 MySQL/OpenSearch 核对；抖音详情价格还须等待 Just One SKU 上游返回至少一次业务成功响应。P2 的本地检索、个性化和取消证据已完成。
+- 验证：新增/相关重点回归 57 项通过；排除仓库缺失的历史 `datasets.onebound_headphones` 测试文件后，后端其余 162 项全部通过；Ruff、Python 编译与 `git diff --check` 通过。生成记录和报告保持 Git 忽略，自动测试未调用付费模型或商品 Provider。
+
+## 2026-07-25：补齐推荐可观测性、偏好确认与收敛回归
+
+- Agent 终态现在从可信 `item_search` / `dispatch_tool` 结果递归提取最新的三平台执行结果，并通过任务结果的 `platform_outcomes` 传给前端；商品结果区显示各平台状态和候选数量，平台来源继续贯穿 ItemPicker 与最终卡片。确定性测试证明满足约束的抖音候选可成为展示结果。
+- 成功结果包含 `learned_preferences` 时，前端会按 run/候选组合去重并自动打开确认弹窗；取消不会写入，用户编辑内容、选择偏好领域并确认后才持久化。预算、正向偏好、黑名单、个人约束、候选合并及确认交互均有测试。
+- AgentLoop 的阻塞与流式入口现在都将 LangGraph 递归上限转换为如实的 `incomplete` 终态；Provider 失败且 ItemPicker 无结果时可经 ChatFallback 收敛，不再只暴露通用任务失败。
+- 新增价格刷新 Worker 离线测试：详情成功会更新 `Offer.current_price` 并追加观测，Provider 失败会保留旧价、记录可重试错误与下次执行时间，手动和每日入口会复用同日观测且不重复请求。测试使用 SQLite 和假 Provider，不调用外部服务。
+- Just One 官方文档已确认淘宝详情、京东价格、抖音详情及抖音 SKU 端点均使用 `token + itemId`；OpenAPI 的成功 `data` 为空 Schema，因此本轮只实现了真实成功响应已验证的淘宝和京东价格映射，没有猜测抖音字段。
+- 经用户许可各执行一次最小真实请求：三平台均为 HTTP 200、业务码 0；淘宝确认优惠后/促销/商品/SKU 价格路径，京东确认 `data.data[0].price`，抖音商品详情只出现销量相关字段、没有价格字段。官方目录另确认抖音 SKU 接口 `/api/douyin-ec/get-item-sku-info/v1`；两个真实商品共三次获准 SKU 探测均为 HTTP 200、业务码 301、`data=null`。官方指南将 301 定义为“采集失败，请重试”，且参数、认证、速率、配额和余额分别使用 400/100/302/303/601，因此当前证据指向 Just One 抖音 SKU 上游采集故障，不是本项目请求格式或 Token 配置问题。
+- 新增共享详情 Provider 契约、结构化错误和 Just One 适配器；淘宝与京东按上述真实路径解析 CNY 价格，API 启动及独立 Worker CLI 均不再构造永久为空的 Provider 注册表。抖音在获得一次成功 SKU 响应并验证价格字段前不注册详情 Provider，手动/每日刷新会保留旧价并记录 `provider_unavailable`，避免持续产生无效请求。
+- 实时抖音候选现在保留搜索响应的 `promotion_id` 到商品属性，供上游恢复后的身份核验；稳定商品身份仍使用官方详情已验证可接受的 `product_id`，不擅自把推广 ID 替换成商品 ID。
+- Just One 适配器、价格 Worker 和实时身份共 13 项离线测试通过，覆盖真实路径对应的假响应、请求参数、业务错误、缺价、成功更新、失败保价重试、同日去重与抖音推广身份保留；测试未调用付费服务。
+- 验证：扩展后端重点套件 60 项通过，前端 ProductResults 8 项、全前端 18 项与生产构建通过；本轮新增价格 Worker 3 项通过。最新一次排除仓库缺失的历史 `datasets.onebound_headphones` 实现包后，后端全量 155 项通过；更早一次运行中的既有 WebSocket 多订阅关闭测试曾偶发失败、立即单测复跑通过。上述自动测试均未调用付费服务。
+- 剩余：P0 需要三平台实时收藏验收；抖音价格刷新须等待 Just One SKU 上游恢复并取得一次成功响应后再补映射与验收。P2 后续已按本文顶部记录完成本地真实检索、跨 run 个性化与取消证据；实时 Provider 指标仍从属于 P0 的付费验收。
+
+## 2026-07-25：修复 ItemPicker 直接终结时来源链接丢失
+
+- 根因是模型调用 `item_picker` 时可能省略可选 `product_url`，而“有效 picks 直接终结”兜底会绕过 ShoppingSummary 的链接完整性检查；最终图片补全只恢复图片和稳定身份，因此前端如实显示“来源链接未提供”。
+- 主图现在按最终 pick 的 `item_id`，只从本轮可信 `item_search` 或 `dispatch_tool` 工具结果中递归查找原始候选，并确定性恢复 `product_id`、`offer_id`、平台、标题、价格、图片、`product_url`、数据来源时间和 `wishlist_eligible` 等事实；ItemPicker 的理由与标注继续保留，不从模型常识或外部猜测补链接。
+- Ruff 与来源链接/dispatch/实时持久化相关的 28 项后端测试通过，未调用模型或付费 Provider。旧会话结果不会被自动改写；需要重新搜索以获得本轮工具证据。
+
+## 2026-07-25：完成实时候选写库与心愿库门禁
+
+- `item_search` 的 Just One 首次响应与后台缓存刷新现在会先把候选按稳定平台商品身份 upsert 到 MySQL `Product` / `Offer`，再创建幂等 `SourceSnapshot`、`OfferObservation` 和商品 Outbox 事件；候选使用同一稳定 `product_id/offer_id` 进入直接实时结果或 OpenSearch 混合检索。
+- 候选契约新增 `wishlist_eligible`。Just One 原始候选默认不可收藏，只有数据库事务提交成功后才改为可收藏；该字段贯穿 OpenSearch、ItemPicker、ShoppingSummary 和最终卡片。前端在持久化缺失或失败时禁用心愿库按钮，离线已入库报价保持原行为。
+- 验证未调用付费 Provider：相关后端 24 项测试通过；排除仓库缺失的历史 `datasets.onebound_headphones` 包后，后端 129 项测试通过；前端 ProductResults 5 项测试与 TypeScript/Vite 生产构建通过。全量 `pytest -q` 仍会在收集历史 OneBound 测试时因该本地数据包缺失而失败。
+- P0 真实验收仍需在 MySQL、OpenSearch 和 Provider 网络可用时，对淘宝、京东、抖音各搜索并收藏一项后刷新页面核对。Just One 三平台详情端点尚未在仓库或已读资料中得到验证，因此价格详情刷新适配器未使用猜测 URL 实现。
+
+## 2026-07-25：本机启用 Just One 与 Tavily 配置
+
+- 本机 Git 忽略的 `.env` 已启用 Just One 实时商品 Provider，并确认 Just One 与 Tavily 两项凭据均可被应用 `Settings` 读取；Just One 基址保持为 `https://api.justoneapi.com`，Tavily Provider 保持为 `tavily`。本文不记录任何凭据内容。
+- 本轮只完成无网络的配置加载验证，未调用付费商品 Provider、Tavily 或模型。检查时 FastAPI、前端、OpenSearch、Redis 与 MySQL 均未监听，因此实时商品、网页搜索及 OpenSearch 混合检索的端到端可用性仍未验证。
+
 ## 2026-07-22：固化全品类按需商品搜索与 AG-UI 进度目标方案
 
 - 新增 `docs/商品搜索链路逻辑更新的具体实现方案.md`，将当前“主要检索耳机离线快照”的链路扩展为目标设计：Think/Planner 先形成结构化商品品类和搜索意图，ItemSearch 内部检查公共目录覆盖，不足时通过通用 Provider 适配层按需补充淘宝、京东和抖音候选，再经 MySQL、事务 Outbox、批量 Embedding 和 OpenSearch 执行现有 BM25 + BGE-M3 + 无权重 RRF 混合检索。
@@ -53,7 +96,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-07-23
+> 最后更新时间：2026-07-25
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件
@@ -540,6 +583,12 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-07-25：修复 ItemPicker 直接终结导致 `product_url` 丢失；按 `item_id` 从本轮 ItemSearch/dispatch 可信结果恢复全部候选事实，新增抖音 dispatch 链接回归测试，相关 28 项通过。
+
+- 2026-07-25：完成 Just One 实时候选的 MySQL 商品/报价/快照/观测/Outbox 幂等持久化，并新增 `wishlist_eligible` 全链路门禁；更新 README 与 ToDo。相关后端 24 项、排除缺失历史 OneBound 包后的 129 项、前端 5 项及生产构建通过，未调用付费 Provider。
+
+- 2026-07-25：在本机 Git 忽略的 `.env` 中启用 Just One 实时商品 Provider，并确认 Just One/Tavily 凭据可由应用配置层读取；未记录密钥、未执行付费或联网真调用。当前相关服务未启动，端到端检索仍待启动基础设施后验收。
 
 - 2026-07-22：新增 `docs/商品搜索链路逻辑更新的具体实现方案.md`，固化“先识别品类、缓存优先、
   三平台按需补充60～100条且最多120条、MySQL→Outbox→OpenSearch、语义哈希复用向量、全链路

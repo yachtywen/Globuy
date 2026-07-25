@@ -541,7 +541,7 @@ class RunRegistry:
                 value = getattr(messages[-1], "content", "")
                 if isinstance(value, str):
                     final_text = value
-        raw_status = terminal.get("status")
+        raw_status = terminal.get("status") or metadata.get("status")
         status = (
             raw_status
             if raw_status in {"complete", "incomplete", "not_configured", "error"}
@@ -567,6 +567,7 @@ class RunRegistry:
             ),
             "memory_status": memory_status,
             "source_kind": "offline_snapshot",
+            "platform_outcomes": terminal.get("platform_outcomes", []),
             "artifacts": [],
         }
         result = enrich_task_result(

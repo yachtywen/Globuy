@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from urllib.parse import urlparse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
 from fastapi import (
     APIRouter,
     FastAPI,
@@ -37,14 +38,13 @@ from app.api.context import bind_context
 from app.api.domain_routes import (
     memory_service as memory_service_dependency,
 )
+from app.api.domain_routes import price_refresh_worker as price_refresh_worker_dependency
 from app.api.domain_routes import (
     router as domain_router,
 )
 from app.api.domain_routes import (
     wishlist_service as wishlist_service_dependency,
 )
-import httpx
-from app.api.domain_routes import price_refresh_worker as price_refresh_worker_dependency
 from app.api.errors import (
     ApiError,
     api_error_handler,
@@ -66,11 +66,12 @@ from app.api.storage import SessionStore
 from app.auth.service import AuthService
 from app.config import Settings, get_settings
 from app.database.services import MemoryService, WishlistService
-from app.products.price_worker import PriceRefreshWorker, ProviderRegistry
 from app.database.session import Database
 from app.database.session_store import MySQLSessionStore
 from app.infrastructure.opensearch import build_opensearch_client
 from app.memory.opensearch_store import GlobuyMemoryStore
+from app.products.detail_provider import build_provider_registry
+from app.products.price_worker import PriceRefreshWorker
 from app.search.catalog_images import enrich_task_result
 from app.search.encoder import get_embedding_encoder
 from app.utils.path_utils import session_path, upload_path
@@ -155,7 +156,12 @@ def create_app(
             refresh_local_hour=settings.price_refresh_local_hour,
         )
         memory_service = MemoryService(database)
-        price_refresh_worker = PriceRefreshWorker(database, ProviderRegistry(), refresh_hours=settings.price_refresh_interval_hours, refresh_local_hour=settings.price_refresh_local_hour)
+        price_refresh_worker = PriceRefreshWorker(
+            database,
+            build_provider_registry(settings),
+            refresh_hours=settings.price_refresh_interval_hours,
+            refresh_local_hour=settings.price_refresh_local_hour,
+        )
         if agent_runner is run_agent:
             main_agent.store = GlobuyMemoryStore(
                 database,
@@ -227,7 +233,9 @@ def create_app(
     router = APIRouter(prefix="/api/v1")
 
     @router.get("/product-image", tags=["products"])
-    async def product_image_proxy(image_url: str = Query(min_length=12, max_length=2048)) -> Response:
+    async def product_image_proxy(
+        image_url: str = Query(min_length=12, max_length=2048),
+    ) -> Response:
         """Proxy only approved marketplace CDNs to avoid browser hotlink blocking."""
 
         if not _allowed_product_image_url(image_url):
@@ -236,7 +244,10 @@ def create_app(
             async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
                 upstream = await client.get(
                     image_url,
-                    headers={"User-Agent": "Mozilla/5.0 Globuy/1.0", "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"},
+                    headers={
+                        "User-Agent": "Mozilla/5.0 Globuy/1.0",
+                        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                    },
                 )
                 upstream.raise_for_status()
         except httpx.HTTPError as exc:

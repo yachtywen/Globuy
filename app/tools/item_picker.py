@@ -32,6 +32,7 @@ class PickerCandidate(BaseModel):
     shipping_fee: float | None = Field(default=None, ge=0)
     total_cost: float | None = Field(default=None, ge=0)
     retrieval_rank: int | None = Field(default=None, ge=1)
+    wishlist_eligible: bool = True
 
 
 class PickerConstraints(BaseModel):
@@ -189,8 +190,7 @@ def item_picker(
     if len(selected_candidates) < bounded_limit:
         selected_ids = {candidate.item_id for candidate in selected_candidates}
         selected_candidates.extend(
-            candidate for _, candidate in ranked_accepted
-            if candidate.item_id not in selected_ids
+            candidate for _, candidate in ranked_accepted if candidate.item_id not in selected_ids
         )
 
     picks: list[PickedItem] = []

@@ -13,11 +13,7 @@ def search_pipeline_body() -> dict[str, Any]:
     return {
         "description": "globuy product BM25 + dense-vector RRF",
         "phase_results_processors": [
-            {
-                "score-ranker-processor": {
-                    "combination": {"technique": "rrf"}
-                }
-            }
+            {"score-ranker-processor": {"combination": {"technique": "rrf"}}}
         ],
     }
 
@@ -53,6 +49,7 @@ def product_index_body(metadata: EmbeddingMetadata) -> dict[str, Any]:
                 "attributes": {"type": "object", "enabled": False},
                 "attribute_terms": {"type": "keyword"},
                 "product_url": {"type": "keyword", "index": False},
+                "wishlist_eligible": {"type": "boolean"},
                 "semantic_text": {"type": "text", "index": False},
                 "content_vector": {
                     "type": "knn_vector",

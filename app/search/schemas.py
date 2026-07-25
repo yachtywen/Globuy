@@ -50,6 +50,7 @@ class Candidate(BaseModel):
     retrieval_rank: int = Field(ge=1)
     source_kind: str = "offline_snapshot"
     data_as_of: str | None = None
+    wishlist_eligible: bool = True
 
 
 class ItemSearchOutput(BaseModel):
