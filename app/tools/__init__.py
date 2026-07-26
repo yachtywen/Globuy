@@ -49,7 +49,7 @@ TOOL_PHASES: dict[str, frozenset[str]] = {
         }
     ),
 }
-TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback"})
+TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback", "web_search"})
 
 
 def build_core_tools(model: BaseChatModel | None = None) -> tuple[BaseTool, ...]:

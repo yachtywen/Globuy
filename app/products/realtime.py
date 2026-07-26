@@ -97,6 +97,8 @@ def _candidate(row: dict[str, Any], platform: Platform, data_as_of: str) -> Cand
             for key, value in {
                 "shop_name": row.get("shopName"),
                 "shop_id": row.get("shopId"),
+                "comment_count": _integer(row.get("commentCount")),
+                "rating_type": "average_rating_5" if row.get("itemGradeAvg") is not None else None,
             }.items()
             if value not in (None, "")
         }
@@ -117,6 +119,8 @@ def _candidate(row: dict[str, Any], platform: Platform, data_as_of: str) -> Cand
                 "shop_name": row.get("shopName"),
                 "shop_id": row.get("shopId"),
                 "is_self_operated": row.get("zy"),
+                "comment_count": _integer(row.get("commentCount") or row.get("comments")),
+                "rating_type": "average_rating_5" if row.get("itemGradeAvg") is not None else None,
             }.items()
             if value not in (None, "")
         }
@@ -148,11 +152,15 @@ def _candidate(row: dict[str, Any], platform: Platform, data_as_of: str) -> Cand
                 "shop_name": shop.get("shop_name"),
                 "shop_id": shop.get("shop_id"),
                 "promotion_id": row.get("promotion_id"),
+                "rating_type": (
+                    "good_ratio_percent" if product.get("good_ratio") is not None else None
+                ),
             }.items()
             if value not in (None, "")
         }
+        good_ratio = product.get("good_ratio")
         rating, sales = (
-            None,
+            _number(good_ratio.get("origin") if isinstance(good_ratio, dict) else good_ratio),
             _integer(
                 product.get("month_sale", {}).get("origin")
                 if isinstance(product.get("month_sale"), dict)

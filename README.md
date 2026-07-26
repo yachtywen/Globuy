@@ -163,6 +163,26 @@ cmd /c npm run dev -- --host 127.0.0.1
 
 Open `http://127.0.0.1:5173`, register a local user, and start a conversation.
 
+## Product review lookup (optional)
+
+To answer requests such as `了解 Sony WH-1000XM6` or `看看这个型号的口碑和测评`, configure
+Tavily in the private `.env` file:
+
+```env
+GLOBUY_WEB_SEARCH_PROVIDER=tavily
+GLOBUY_TAVILY_API_KEY=<your Tavily key>
+```
+
+The Agent routes product-review intent to `web_search(search_mode=product_reviews)`. This mode
+searches only Xiaohongshu and Zhihu, removes duplicate or off-domain links, and returns at most
+three cited results. Every retained title or snippet must also match the requested product phrase,
+model identifier, or required generation number. If Tavily can retrieve fewer than three relevant
+target-platform pages, Globuy
+returns the smaller verified set instead of filling it with other websites. These snippets are
+external content evidence, not realtime product prices or inventory.
+
+如果小红书和知乎没有相关页面，且当前会话之前已经检索到带有可信评分、好评率或评论数的淘宝、京东、抖音候选，系统会补充这些购物平台的聚合消费者反馈。它们会标记为“聚合信号”，不会伪装成消费者评价原文；没有可验证字段时仍会如实提示未找到。后续继续对话或刷新历史时，最新回答会更新，但最近一次非空商品推荐仍保留在商品卡片中，收藏来源继续使用原推荐 run。
+
 ## Verify and troubleshoot
 
 ```powershell

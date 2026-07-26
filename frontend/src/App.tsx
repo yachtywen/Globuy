@@ -449,7 +449,7 @@ function WorkbenchPage({ navigate, routeThreadId, user, onLogout }: {
             ) : (
               <div className="message-list">{state.messages.map((message) => <MessageBubble key={message.message_id} message={message} placeholder={message.streaming ? state.initializationMessage ?? undefined : undefined} />)}<div ref={conversationEnd} /></div>
             )}
-            <ProductResults artifacts={state.artifacts} result={state.result} sourceRunId={state.currentRunId} sourceThreadId={state.viewingThreadId} />
+            <ProductResults artifacts={state.artifacts} result={state.result} sourceRunId={state.recommendationRunId ?? state.currentRunId} sourceThreadId={state.viewingThreadId} />
           </section>
           {state.viewMode === "active" ? (
             <Composer disabled={state.threadLoading || state.archiveCreating} busy={isBusy} onCancel={() => void task.cancelTask()} onSend={(query) => void task.startTask(query)} />

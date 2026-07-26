@@ -25,6 +25,7 @@ export interface WorkbenchState {
   connectionStatus: ConnectionStatus;
   taskStatus: RunStatus | "idle";
   currentRunId: string | null;
+  recommendationRunId: string | null;
   lastSequence: number;
   messages: ChatMessage[];
   toolCalls: ToolCall[];
@@ -48,6 +49,7 @@ export const initialState: WorkbenchState = {
   connectionStatus: "idle",
   taskStatus: "idle",
   currentRunId: null,
+  recommendationRunId: null,
   lastSequence: 0,
   messages: [],
   toolCalls: [],
@@ -74,12 +76,20 @@ export type WorkbenchAction =
   | { type: "RUN_SYNC"; status: RunStatus; result: TaskResult | null; artifacts: Artifact[]; error?: string | null }
   | { type: "ERROR"; message: string | null };
 
-function currentResult(detail: ThreadDetail): { status: RunStatus | "idle"; runId: string | null; result: TaskResult | null; artifacts: Artifact[] } {
+function mergeRecommendations(result: TaskResult | null, previous: TaskResult | null): TaskResult | null {
+  if (!result) return previous;
+  if (result.picks.length || !previous?.picks.length) return result;
+  return { ...result, picks: previous.picks };
+}
+
+function currentResult(detail: ThreadDetail): { status: RunStatus | "idle"; runId: string | null; recommendationRunId: string | null; result: TaskResult | null; artifacts: Artifact[] } {
   const run = detail.runs.at(-1);
+  const recommendationRun = [...detail.runs].reverse().find((item) => item.result?.picks?.length);
   return {
     status: run?.status ?? "idle",
     runId: run?.run_id ?? null,
-    result: run?.result ?? null,
+    recommendationRunId: recommendationRun?.run_id ?? null,
+    result: mergeRecommendations(run?.result ?? null, recommendationRun?.result ?? null),
     artifacts: run?.artifacts ?? [],
   };
 }
@@ -194,7 +204,13 @@ function eventState(state: WorkbenchState, event: MonitorEvent): WorkbenchState 
     return { ...state, lastSequence, initializationMessage: message };
   }
   if (event.event === "CUSTOM" && data.name === "task_result") {
-    return { ...state, lastSequence, result: (data.result as TaskResult) ?? null };
+    const incoming = (data.result as TaskResult) ?? null;
+    return {
+      ...state,
+      lastSequence,
+      result: mergeRecommendations(incoming, state.result),
+      recommendationRunId: incoming?.picks?.length ? event.run_id : state.recommendationRunId,
+    };
   }
   if (event.event === "RUN_FINISHED") return { ...state, lastSequence, initializationMessage: null, taskStatus: "succeeded", connectionStatus: "idle" };
   if (event.event === "TASK_CANCELLED") return { ...state, lastSequence, initializationMessage: null, taskStatus: "cancelled", connectionStatus: "idle" };
@@ -240,6 +256,7 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
         threadLoading: false,
         taskStatus: latest.status,
         currentRunId: latest.runId,
+        recommendationRunId: latest.recommendationRunId,
         messages: action.detail.messages,
         result: latest.result,
         artifacts: latest.artifacts,
@@ -259,6 +276,7 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
         messages: action.detail.messages,
         taskStatus: latest.status,
         currentRunId: latest.runId,
+        recommendationRunId: latest.recommendationRunId,
         result: latest.result,
         artifacts: latest.artifacts,
       };
@@ -286,7 +304,7 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
         steps: [],
         forks: [],
         initializationMessage: null,
-        result: null,
+        result: state.result,
         artifacts: [],
         error: null,
       };
@@ -298,13 +316,17 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
     case "EVENT":
       return eventState(state, action.event);
     case "RUN_SYNC":
-      return {
-        ...state,
-        taskStatus: action.status,
-        result: action.result,
-        artifacts: action.artifacts,
-        error: action.error ?? state.error,
-      };
+      {
+        const result = mergeRecommendations(action.result, state.result);
+        return {
+          ...state,
+          taskStatus: action.status,
+          result,
+          recommendationRunId: action.result?.picks?.length ? state.currentRunId : state.recommendationRunId,
+          artifacts: action.artifacts,
+          error: action.error ?? state.error,
+        };
+      }
     case "ERROR":
       return { ...state, error: action.message, threadLoading: false, archiveCreating: false };
   }

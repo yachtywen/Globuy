@@ -1,5 +1,28 @@
 # globuy 项目状态
 
+## 2026-07-26：购物平台评价回退与跨轮次推荐保留
+
+- `product_reviews` 在小红书/知乎相关结果为零时，会从同一线程历史中已观察的 `item_search`、`item_picker`、`shopping_summary` 或 dispatch 候选读取可验证字段，补充淘宝、京东、抖音的评分、好评率、评论数和商品链接。结果单独标记 `source_kind=platform_feedback`、`aggregate_only=true`，明确这是聚合消费者反馈而非评价原文；没有评分或评论数时返回不完整，不生成占位评价。Tavily 未配置/失败仍保持相应状态，只有存在既有可信聚合字段时才提供降级说明。
+- 实时候选现在保留淘宝评论数、平均评分类型、京东可用评论字段和抖音好评率类型，RunRegistry/API/TypeScript 结果契约透传 `platform_feedback`。
+- 前端新增推荐结果来源 run。新任务接收、测评结果和历史详情恢复时，最新回答与最近一次非空 `picks` 合并展示；新一轮确实返回商品时才替换旧卡片，收藏操作仍使用产生推荐的 run_id。
+- 验证：后端 WebSearch/AgentLoop/RunRegistry 聚焦 43 项通过；相关 Python Ruff、`compileall` 通过；前端全量 21 项测试与 TypeScript/Vite 生产构建通过。测试使用模拟 Tavily/候选，不调用付费服务。购物平台仍只展示已核验的聚合字段，真实评价正文接口尚未接入。
+
+## 2026-07-26：修复商品测评结果与提问无关
+
+- 根因确认：首版 `product_reviews` 只在请求和响应两层限制小红书/知乎域名并做 URL 去重，没有验证标题或摘要是否提及用户询问的商品，因此 Tavily 返回的目标站内热门无关页面也会进入 Top-3。
+- 搜索请求现在对完整商品短语加引号；响应增加确定性相关性门禁，优先要求型号及其紧凑别名命中，同时校验必要数字代际，普通商品名则要求完整紧凑短语或多个有效品牌/名称词命中。规则只用于丢弃无关测评，不计算或伪装学习型综合排序，保留 Tavily 原始顺序。
+- 每条保留结果新增 `relevance_evidence`，任务结果记录 `discarded_irrelevant_count`。即使链接来自小红书或知乎，只要没有商品名/型号证据也会被丢弃；全部不相关时返回 0 条和“为避免答非所问，已过滤不相关页面”，不再展示无关内容。
+- Prompt 进一步要求原样保留用户写出的品牌与型号，不得把具体商品泛化成品类词；商品身份不明确时先澄清。
+- 验证未调用真实 Tavily、付费模型或商品 Provider：新增目标域无关页面和中文紧凑商品名回归，WebSearch、AgentLoop、RunRegistry 与 API 共 57 项通过；相关 Python Ruff、`compileall` 和前端 TypeScript/Vite 生产构建通过。
+
+## 2026-07-26：新增小红书 / 知乎商品测评 Top-3 检索
+
+- `web_search` 新增 `product_reviews` 模式。用户只想了解具体商品、询问口碑、测评、评价、使用体验或优缺点时，Prompt 指示 Think 直接调用该模式，不同时进入 ItemSearch、CategoryInsight 或跨平台 dispatch。
+- 该模式继续复用既有 Tavily 异步适配器，但强制 `include_domains=xiaohongshu.com,zhihu.com`，以商品名/品牌/型号加测评语义扩展查询；响应再次按真实 hostname 过滤、URL 去重并截取 Top-3，非目标网站不能补位。
+- WebSearch 测评结果现在可作为 AgentLoop 终结结果进入既有 Observe、RunRegistry 和 AG-UI 流式生命周期；任务结果新增 `source_kind=content_review` 与结构化 `review_results`，最终 Markdown 提供可点击标题、平台和来源摘要。
+- 少于 3 条目标平台结果时返回 `incomplete` 和实际条数；Tavily 未配置或失败时分别返回 `not_configured` / `error`，不伪造测评或改用其他网站静默补齐。网页摘要仍是不可信外部内容，只供本轮引用，不写入 Category 索引，也不冒充商品价格或库存。
+- 验证未调用真实 Tavily、付费模型或商品 Provider：WebSearch、AgentLoop 终结、RunRegistry 与 API 聚焦测试共 55 项通过；相关文件 Ruff、Python `compileall` 和前端 TypeScript/Vite 生产构建通过。全仓 Ruff 仍被本轮修改范围外的既有 `domain_routes.py`、`auth/service.py`、`database/services.py`、`memory/opensearch_store.py` 和历史 OneBound 测试格式问题阻塞，本轮未改写这些用户代码。
+
 ## 2026-07-25：完成 P2 本地检索、跨运行个性化与取消验收
 
 - 在本机无 Docker 环境下使用官方 OpenSearch 2.19.1 Windows 发行包启动单节点服务；压缩包、数据和日志均位于 Git 忽略的 `output/infrastructure`。当前 `http://127.0.0.1:9200` 健康状态为 yellow（单节点副本未分配），主分片可用。
@@ -96,7 +119,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-07-25
+> 最后更新时间：2026-07-26
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件
@@ -196,7 +219,7 @@ React 彩铅品牌封面 + 三栏购物工作台
 |---|---|---|---|
 | Planner | Think / 内部 | 确定性需求拆解，可直接调用 | 尚未建立显式 Think 状态与动态计划状态 |
 | ChatFallback | Think / 内部 | 返回澄清问题 | 尚未完成购物意图分类路由 |
-| WebSearch | Think / 外部 | Tavily 异步 `POST /search`；返回 URL/摘要/相关度/检索时间/request ID/credit，用量与错误脱敏；真实 `basic` 搜索已通过 | 不负责实时商品报价；对话中暴露过的本地 key 应在验收后轮换 |
+| WebSearch | Think / 外部 | Tavily 异步 `POST /search`；通用模式返回 URL/摘要/相关度/检索时间/request ID/credit；`product_reviews` 模式限定小红书/知乎、域名复核去重并终结返回 Top-3；用量与错误脱敏 | 不负责实时商品报价；目标平台可检索结果不足时如实少返；对话中暴露过的本地 key 应在验收后轮换 |
 | CategoryInsight | Think / 外部 | 独立 CategoryCard RAG：别名归一、Hybrid 召回、可降级精排、Redis 缓存和严格 JSON 提炼 | 首期仅覆盖耳机快照；本机 Reranker 端点未配置，DeepSeek 最终制卡发布需单独允许聚合数据外发 |
 | ItemSearch | Think / 外部 | 异步单平台 BM25 + BGE-M3 + RRF，支持结构化过滤和 monitor | 数据为离线快照，尚未接实时 Provider |
 | ItemPicker | Reflect / 内部 | 严格 Schema；有证据硬约束后按 retrieval rank、rating、price、输入顺序选择，最多 3 项；运行前会读取当前用户已确认的长期记忆并注入 Prompt | 偏好仍需用户通过记忆 CRUD 明确确认，不自动持久化 Agent 推断 |
@@ -583,6 +606,10 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-07-26：修复小红书/知乎测评答非所问。为查询增加带引号商品短语，并在返回端按商品型号别名、必要数字代际、完整短语或多个名称词执行确定性相关性门禁；无证据页面即使来自目标域也被丢弃。57 项聚焦后端/API 测试、相关 Ruff、Python 编译和前端构建通过，未调用真实 Tavily 或付费服务。
+
+- 2026-07-26：为既有 WebSearch 增加小红书/知乎商品测评 `product_reviews` 模式，固定目标域、二次 hostname 过滤、URL 去重和 Top-3 终结结果；RunRegistry/前端契约保留结构化 `review_results`。55 项聚焦后端/API 测试、相关文件 Ruff、Python 编译和前端生产构建通过，未调用真实 Tavily 或付费服务；全仓 Ruff 仍有本轮范围外的既有格式错误。
 
 - 2026-07-25：修复 ItemPicker 直接终结导致 `product_url` 丢失；按 `item_id` 从本轮 ItemSearch/dispatch 可信结果恢复全部候选事实，新增抖音 dispatch 链接回归测试，相关 28 项通过。
 

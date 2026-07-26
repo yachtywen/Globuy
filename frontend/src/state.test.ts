@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { initialState, workbenchReducer } from "./state";
-import type { MonitorEvent } from "./types";
+import type { MonitorEvent, TaskResult, ThreadDetail } from "./types";
 
 function event(sequence: number, name: MonitorEvent["event"], data: Record<string, unknown>): MonitorEvent {
   return {
@@ -15,6 +15,17 @@ function event(sequence: number, name: MonitorEvent["event"], data: Record<strin
     data,
   };
 }
+
+const recommendation: TaskResult = {
+  status: "complete",
+  final_text: "推荐 Sony 耳机",
+  picks: [{ item_id: "taobao:1", platform: "taobao", title: "Sony 耳机", price: 999, currency: "CNY", rating: 4.8, sales: 2000 }],
+  unresolved: [],
+  learned_preferences: [],
+  memory_status: "not_configured",
+  source_kind: "realtime_provider",
+  artifacts: [],
+};
 
 describe("workbenchReducer", () => {
   it("按 message_id 拼接文本，并用 sequence 去重", () => {
@@ -77,5 +88,42 @@ describe("workbenchReducer", () => {
     expect(end.toolCalls).toHaveLength(1);
     expect(end.toolCalls[0]).toMatchObject({ name: "web_search", status: "succeeded", durationMs: 18 });
     expect(end.toolCalls[0].arguments).toEqual({ query: "耳机" });
+  });
+
+  it("新一轮对话开始时保留上一轮商品卡片", () => {
+    const state = { ...initialState, result: recommendation, recommendationRunId: "run-previous" };
+    const next = workbenchReducer(state, { type: "TASK_ACCEPTED", runId: "run-review", query: "了解 Sony 耳机口碑", createdAt: "2026-07-20T00:00:00Z" });
+    expect(next.result?.picks).toEqual(recommendation.picks);
+    expect(next.recommendationRunId).toBe("run-previous");
+  });
+
+  it("测评结果更新回答但不清空上一轮推荐", () => {
+    const state = { ...initialState, result: recommendation, recommendationRunId: "run-previous" };
+    const next = workbenchReducer(state, {
+      type: "EVENT",
+      event: event(1, "CUSTOM", {
+        name: "task_result",
+        result: { ...recommendation, status: "incomplete", final_text: "未找到相关测评", picks: [], source_kind: "content_review" },
+      }),
+    });
+    expect(next.result?.final_text).toBe("未找到相关测评");
+    expect(next.result?.picks).toEqual(recommendation.picks);
+    expect(next.recommendationRunId).toBe("run-previous");
+  });
+
+  it("历史详情最新一轮无商品时恢复最近一次推荐及其来源 run", () => {
+    const detail: ThreadDetail = {
+      thread_id: "thread-1", title: "测试", status: "active", created_at: "", updated_at: "", archived_at: null, read_only: false,
+      messages: [],
+      runs: [
+        { run_id: "run-previous", status: "succeeded", query: "推荐耳机", created_at: "2026-07-20T00:00:00Z", started_at: null, finished_at: null, result: recommendation, artifacts: [] },
+        { run_id: "run-review", status: "succeeded", query: "了解口碑", created_at: "2026-07-21T00:00:00Z", started_at: null, finished_at: null, result: { ...recommendation, picks: [], final_text: "测评回答", source_kind: "content_review" }, artifacts: [] },
+      ],
+    };
+    const next = workbenchReducer(initialState, { type: "OPEN_DETAIL", detail, mode: "active" });
+    expect(next.result?.final_text).toBe("测评回答");
+    expect(next.result?.picks).toEqual(recommendation.picks);
+    expect(next.recommendationRunId).toBe("run-previous");
+    expect(next.currentRunId).toBe("run-review");
   });
 });

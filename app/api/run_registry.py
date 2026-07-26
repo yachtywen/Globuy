@@ -566,7 +566,10 @@ class RunRegistry:
                 terminal.get("learned_preferences", []),
             ),
             "memory_status": memory_status,
-            "source_kind": "offline_snapshot",
+            "source_kind": terminal.get("source_kind", "offline_snapshot"),
+            "review_results": terminal.get("review_results", []),
+            "platform_feedback": terminal.get("platform_feedback", []),
+            "discarded_irrelevant_count": terminal.get("discarded_irrelevant_count", 0),
             "platform_outcomes": terminal.get("platform_outcomes", []),
             "artifacts": [],
         }

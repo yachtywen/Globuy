@@ -134,6 +134,31 @@ export interface TaskResult {
   learned_preferences: Array<unknown>;
   memory_status: string;
   source_kind: "offline_snapshot" | string;
+  discarded_irrelevant_count?: number;
+  review_results?: Array<{
+    rank: number;
+    source: "小红书" | "知乎" | string;
+    title: string;
+    url: string;
+    content: string;
+    score: number | null;
+    published_date: string | null;
+    relevance_evidence: string[];
+  }>;
+  platform_feedback?: Array<{
+    rank: number;
+    platform: string;
+    platform_name: string;
+    item_id: string;
+    title: string;
+    rating: number | null;
+    rating_scale: number;
+    rating_type: string;
+    comment_count: number | null;
+    product_url: string | null;
+    data_as_of: string | null;
+    aggregate_only: true;
+  }>;
   platform_outcomes?: Array<{
     platform: string;
     status: "ok" | "not_configured" | "error";

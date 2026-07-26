@@ -416,7 +416,7 @@ def test_registry_has_nine_business_tools_and_phase_contracts() -> None:
     assert tuple(tool.name for tool in tools) == CORE_TOOL_NAMES
     assert len(tools) == 9
     assert "dispatch_tool" not in CORE_TOOL_NAMES
-    assert TERMINAL_TOOLS == {"shopping_summary", "chat_fallback"}
+    assert TERMINAL_TOOLS == {"shopping_summary", "chat_fallback", "web_search"}
     assert "dispatch_tool" in TOOL_PHASES["think"]
     assert "shopping_summary" in TOOL_PHASES["reflect"]
 
@@ -657,6 +657,64 @@ async def test_provider_failure_and_empty_picker_converge_to_fallback(tmp_path: 
             "message": "耳机 provider failed",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_product_review_web_search_terminates_without_shopping_tools(tmp_path: Path) -> None:
+    @tool("web_search")
+    async def review_web_search(query: str, search_mode: str = "general") -> dict[str, Any]:
+        """Return a deterministic review result for loop testing."""
+
+        assert query == "Sony WH-1000XM6"
+        assert search_mode == "product_reviews"
+        review = {
+            "rank": 1,
+            "source": "知乎",
+            "title": "真实体验",
+            "url": "https://www.zhihu.com/question/1",
+            "content": "长期使用感受",
+            "score": 0.9,
+            "published_date": None,
+        }
+        return {
+            "status": "incomplete",
+            "terminal": True,
+            "source_kind": "content_review",
+            "final_text": (
+                "## 小红书 / 知乎测评 Top 3\n\n"
+                "1. [真实体验](https://www.zhihu.com/question/1) · 知乎"
+            ),
+            "review_results": [review],
+            "picks": [],
+            "unresolved": ["仅检索到 1 条目标平台有效结果"],
+        }
+
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "web_search",
+                        "args": {
+                            "query": "Sony WH-1000XM6",
+                            "search_mode": "product_reviews",
+                        },
+                        "id": "review-search-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    loop = AgentLoop(model, tools=[review_web_search], enable_dispatch=False)
+    with thread_scope("review-thread", tmp_path, run_id="review-run"):
+        state = await loop._invoke("了解 Sony WH-1000XM6", "review-thread")
+
+    assert state["phase"] == "done"
+    assert state["iteration"] == 1
+    assert state["terminal_result"]["source_kind"] == "content_review"
+    assert state["terminal_result"]["review_results"][0]["source"] == "知乎"
 
 
 @pytest.mark.asyncio
