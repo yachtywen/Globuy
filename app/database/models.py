@@ -187,6 +187,9 @@ class Product(Base):
     brand: Mapped[str | None] = mapped_column(String(255), index=True)
     model: Mapped[str | None] = mapped_column(String(255))
     category: Mapped[str | None] = mapped_column(String(255), index=True)
+    category_key: Mapped[str | None] = mapped_column(String(128), index=True)
+    category_path: Mapped[list[str] | None] = mapped_column(JSON)
+    semantic_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     description_summary: Mapped[str | None] = mapped_column(Text)
     attributes_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
@@ -204,6 +207,11 @@ class SourceSnapshot(Base):
     platform: Mapped[str] = mapped_column(String(64), index=True)
     captured_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
     request_key: Mapped[str] = mapped_column(String(255))
+    provider_query: Mapped[str | None] = mapped_column(String(255))
+    scope_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    page_number: Mapped[int | None] = mapped_column(Integer)
+    cursor_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    response_sha256: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24))
     raw_payload_path: Mapped[str | None] = mapped_column(String(1024))
     raw_payload_sha256: Mapped[str | None] = mapped_column(String(64))
@@ -234,6 +242,9 @@ class Offer(Base):
     last_seen_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     last_observation_id: Mapped[str | None] = mapped_column(String(128))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    inactive_reason: Mapped[str | None] = mapped_column(String(100))
+    projection_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    projected_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
 
     __table_args__ = (
         UniqueConstraint(
@@ -268,6 +279,86 @@ class OfferObservation(Base):
             "offer_id", "snapshot_id", "provider_record_key", name="uq_observation_source"
         ),
     )
+
+
+class CatalogScope(Base):
+    __tablename__ = "catalog_scopes"
+
+    scope_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    category_key: Mapped[str] = mapped_column(String(128), index=True)
+    platform: Mapped[str] = mapped_column(String(64), index=True)
+    currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    scope_version: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="missing", index=True)
+    newest_captured_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    updated_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "category_key",
+            "platform",
+            "currency",
+            "provider",
+            "scope_version",
+            name="uq_catalog_scope_identity",
+        ),
+    )
+
+
+class CatalogScopeOffer(Base):
+    __tablename__ = "catalog_scope_offers"
+
+    scope_id: Mapped[str] = mapped_column(
+        ForeignKey("catalog_scopes.scope_id", ondelete="CASCADE"), primary_key=True
+    )
+    offer_id: Mapped[str] = mapped_column(
+        ForeignKey("offers.offer_id", ondelete="CASCADE"), primary_key=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    expires_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
+
+
+class CatalogHydrationRun(Base):
+    __tablename__ = "catalog_hydration_runs"
+
+    hydration_run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    group_key: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    intent_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    thresholds_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    platform_counts_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    stop_reason: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    started_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+    finished_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+
+
+class ProviderRequestLedger(Base):
+    __tablename__ = "provider_request_ledger"
+
+    request_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    hydration_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("catalog_hydration_runs.hydration_run_id", ondelete="SET NULL"), index=True
+    )
+    scope_id: Mapped[str] = mapped_column(
+        ForeignKey("catalog_scopes.scope_id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(64))
+    platform: Mapped[str] = mapped_column(String(64), index=True)
+    normalized_query: Mapped[str] = mapped_column(String(255))
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    provider_request_id: Mapped[str | None] = mapped_column(String(255))
+    response_sha256: Mapped[str | None] = mapped_column(String(64))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    completed_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
 
 
 class Wishlist(Base):
@@ -404,3 +495,6 @@ class OutboxEvent(Base):
     published_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error_code: Mapped[str | None] = mapped_column(String(100))
+    available_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    claim_token: Mapped[str | None] = mapped_column(String(128), index=True)

@@ -201,6 +201,23 @@ export interface ForkTrace {
   timestamp: string;
 }
 
+export type CatalogStage = "intent" | "cache" | "fetch" | "normalize" | "persist" | "index" | "retrieve";
+
+export interface CatalogPlatformProgress {
+  status: string;
+  accepted: number;
+}
+
+export interface CatalogProgress {
+  stage: CatalogStage;
+  message: string;
+  total: number;
+  target: number;
+  status: string;
+  partialPlatforms: string[];
+  platforms: Record<string, CatalogPlatformProgress>;
+}
+
 export interface RunStatusResponse {
   thread_id: string;
   run_id: string;

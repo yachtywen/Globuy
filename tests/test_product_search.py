@@ -74,6 +74,9 @@ class FakeClient:
                             "image_url": "https://example.test/image.jpg",
                             "attributes": {"is_self_operated": True},
                             "product_url": "https://item.jd.com/1.html",
+                            "category_key": "headphones",
+                            "captured_at": "2026-08-19T00:00:00Z",
+                            "semantic_hash": "not-a-public-candidate-field",
                         }
                     }
                 ]
@@ -155,7 +158,8 @@ def test_hybrid_query_prefilters_platform_and_postfilters_offer_constraints() ->
     assert len(hybrid["queries"]) == 2
     assert hybrid["queries"][1]["knn"]["content_vector"]["k"] == 60
     assert hybrid["filter"]["bool"]["filter"] == [
-        {"term": {"platform": "jingdong"}}
+        {"term": {"platform": "jingdong"}},
+        {"term": {"is_active": True}},
     ]
     assert body["post_filter"]["bool"]["filter"] == [
         {"range": {"price": {"gte": 100.0, "lte": 500.0}}},
@@ -175,7 +179,12 @@ def test_hybrid_query_omits_empty_post_filter() -> None:
 
     assert "post_filter" not in body
     assert body["query"]["hybrid"]["filter"] == {
-        "bool": {"filter": [{"term": {"platform": "taobao"}}]}
+        "bool": {
+            "filter": [
+                {"term": {"platform": "taobao"}},
+                {"term": {"is_active": True}},
+            ]
+        }
     }
 
 
@@ -188,6 +197,7 @@ def test_search_service_returns_ranked_candidates_and_pipeline_parameter() -> No
     assert result.status == "ok"
     assert result.candidates[0].retrieval_rank == 1
     assert result.candidates[0].product_url == "https://item.jd.com/1.html"
+    assert "category_key" not in result.candidates[0].model_dump()
     assert client.last_search["params"] == {"search_pipeline": "globuy-products-rrf"}
     assert client.last_search["body"]["size"] == 3
 

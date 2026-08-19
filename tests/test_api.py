@@ -89,7 +89,13 @@ def wait_for_status(
 def test_health(client: TestClient) -> None:
     response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "model_provider": "mock"}
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["model_provider"] == "mock"
+    assert isinstance(payload["product_provider_configured"], bool)
+    assert isinstance(payload["web_search_configured"], bool)
+    assert isinstance(payload["category_cache_enabled"], bool)
+    assert all("key" not in key and "token" not in key for key in payload)
 
 
 def test_http_chat_uses_mock_graph(client: TestClient) -> None:

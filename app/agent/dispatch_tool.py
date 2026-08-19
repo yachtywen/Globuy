@@ -10,6 +10,8 @@ from langgraph.graph import END, MessagesState
 from langgraph.prebuilt import ToolNode
 
 from app.agent.middleware import guarded_tool_call
+from app.products.catalog.intent import ShoppingIntent
+from app.search.schemas import Platform
 from app.tools import build_core_tools
 from app.utils.thread_ctx import current_fork_depth, current_thread_id
 
@@ -42,10 +44,19 @@ def build_dispatch_node(tools: Iterable[BaseTool]) -> ToolNode:
 
 def build_dispatch_tool(owner: AgentLoop) -> BaseTool:
     @tool("dispatch_tool")
-    async def dispatch_tool(demand: str) -> dict:
+    async def dispatch_tool(
+        demand: str,
+        shopping_intent: ShoppingIntent | None = None,
+        target_platform: Platform | None = None,
+    ) -> dict:
         """Run one independent demand in a homogeneous child Agent."""
 
-        return await owner.dispatch(demand.strip())
+        options = {}
+        if shopping_intent is not None:
+            options["shopping_intent"] = shopping_intent
+        if target_platform is not None:
+            options["target_platform"] = target_platform
+        return await owner.dispatch(demand.strip(), **options)
 
     return dispatch_tool
 

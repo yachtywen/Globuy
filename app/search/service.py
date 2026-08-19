@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from app.config import Settings, get_settings
 from app.database.models import Offer, OutboxEvent, Product
 from app.database.session import Database
 from app.infrastructure.opensearch import build_opensearch_client
-from app.search.documents import index_document, semantic_text
+from app.search.documents import index_document, projection_hash, semantic_hash, semantic_text
 from app.search.encoder import EmbeddingEncoder, EmbeddingMetadata, get_embedding_encoder
 from app.search.opensearch import hybrid_search_body, product_index_body, search_pipeline_body
 from app.search.schemas import Candidate, ItemSearchOutput, Platform, SearchFilters
@@ -68,22 +69,144 @@ class ProductIndexManager:
             self.client.indices.create(index=index, body=product_index_body(self.encoder.metadata))
 
     def index_items(self, items: list[dict[str, Any]]) -> int:
-        texts = [semantic_text(item) for item in items]
-        vectors = self.encoder.encode_documents(texts)
+        return int(self.index_items_reusing(items)["indexed"])
+
+    def index_items_reusing(
+        self, items: list[dict[str, Any]], source_index: str | None = None
+    ) -> dict[str, int]:
+        reused: dict[str, list[float]] = {}
+        if source_index and source_index != self.settings.opensearch_product_index:
+            try:
+                mapping = self.client.indices.get_mapping(index=source_index)
+                if _metadata_matches(_mapping_metadata(mapping), self.encoder.metadata):
+                    response = self.client.mget(
+                        index=source_index,
+                        body={"ids": [str(item["offer_id"]) for item in items]},
+                    )
+                    reused = {
+                        str(row["_id"]): row["_source"]["content_vector"]
+                        for row in response.get("docs", [])
+                        if row.get("found") and row.get("_source", {}).get("content_vector")
+                    }
+            except Exception:
+                reused = {}
+        missing = [item for item in items if str(item["offer_id"]) not in reused]
+        encoded = self.encoder.encode_documents([semantic_text(item) for item in missing])
+        vectors = {
+            **reused,
+            **{
+                str(item["offer_id"]): vector
+                for item, vector in zip(missing, encoded, strict=True)
+            },
+        }
         actions = [
             {
                 "_op_type": "index",
                 "_index": self.settings.opensearch_product_index,
-                "_id": item["item_id"],
-                "_source": index_document(item, vector),
+                "_id": item.get("offer_id") or item["item_id"],
+                "_source": index_document(item, vectors[str(item["offer_id"])]),
             }
-            for item, vector in zip(items, vectors, strict=True)
+            for item in items
         ]
-        succeeded, _ = helpers.bulk(self.client, actions, raise_on_error=True)
-        self.client.indices.refresh(index=self.settings.opensearch_product_index)
-        return succeeded
+        succeeded = 0
+        if actions:
+            succeeded, _ = helpers.bulk(self.client, actions, raise_on_error=True)
+            self.client.indices.refresh(index=self.settings.opensearch_product_index)
+        return {"indexed": succeeded, "reused_vectors": len(reused), "embedded": len(missing)}
 
-    def verify_and_publish(self, expected_counts: dict[str, int]) -> None:
+    def project_items(
+        self, items: list[dict[str, Any]], delete_ids: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Project one true bulk, re-encoding only semantic changes."""
+
+        delete_ids = delete_ids or []
+        ids = [str(item["offer_id"]) for item in items]
+        existing: dict[str, dict[str, Any]] = {}
+        if ids:
+            try:
+                response = self.client.mget(
+                    index=self.settings.opensearch_product_alias,
+                    body={"ids": ids},
+                )
+                existing = {
+                    str(row["_id"]): row.get("_source", {})
+                    for row in response.get("docs", [])
+                    if row.get("found")
+                }
+            except Exception:
+                existing = {}
+        changed = [
+            item
+            for item in items
+            if existing.get(str(item["offer_id"]), {}).get("semantic_hash")
+            != semantic_hash(item, self.encoder.metadata.semantic_text_version)
+        ]
+        vectors = (
+            self.encoder.encode_documents([semantic_text(item) for item in changed])
+            if changed
+            else []
+        )
+        new_vectors = {
+            str(item["offer_id"]): vector for item, vector in zip(changed, vectors, strict=True)
+        }
+        actions: list[dict[str, Any]] = []
+        hashes: dict[str, tuple[str, str]] = {}
+        noops: list[str] = []
+        for item in items:
+            oid = str(item["offer_id"])
+            old = existing.get(oid, {})
+            vector = new_vectors.get(oid) or old.get("content_vector")
+            if vector is None:
+                vector = self.encoder.encode_documents([semantic_text(item)])[0]
+            document = index_document(item, vector)
+            document["semantic_hash"] = semantic_hash(
+                item, self.encoder.metadata.semantic_text_version
+            )
+            document["projection_hash"] = projection_hash(document)
+            hashes[oid] = (document["semantic_hash"], document["projection_hash"])
+            if old.get("projection_hash") == document["projection_hash"]:
+                noops.append(oid)
+                continue
+            if old and oid not in new_vectors:
+                update = {key: value for key, value in document.items() if key != "content_vector"}
+                actions.append(
+                    {
+                        "_op_type": "update",
+                        "_index": self.settings.opensearch_product_alias,
+                        "_id": oid,
+                        "doc": update,
+                    }
+                )
+            else:
+                actions.append(
+                    {
+                        "_op_type": "index",
+                        "_index": self.settings.opensearch_product_alias,
+                        "_id": oid,
+                        "_source": document,
+                    }
+                )
+        actions.extend(
+            {"_op_type": "delete", "_index": self.settings.opensearch_product_alias, "_id": oid}
+            for oid in delete_ids
+        )
+        succeeded = 0
+        errors: list[Any] = []
+        if actions:
+            succeeded, errors = helpers.bulk(
+                self.client, actions, raise_on_error=False, raise_on_exception=False
+            )
+            self.client.indices.refresh(index=self.settings.opensearch_product_alias)
+        return {
+            "succeeded": succeeded,
+            "errors": errors,
+            "noops": noops,
+            "embedded": len(new_vectors),
+            "reused_vectors": len(items) - len(new_vectors),
+            "hashes": hashes,
+        }
+
+    def verify_and_publish(self, expected_counts: dict[str, int]) -> dict[str, Any]:
         index = self.settings.opensearch_product_index
         count = self.client.count(index=index)["count"]
         if count != sum(expected_counts.values()):
@@ -103,6 +226,42 @@ class ProductIndexManager:
         if actual_counts != expected_counts:
             raise ValueError(f"平台数量错误: expected={expected_counts}, actual={actual_counts}")
 
+        validation: dict[str, Any] = {"query_p95_ms": 0, "smoke_queries": 0}
+        if count:
+            sample = self.client.search(index=index, body={"size": 1, "query": {"match_all": {}}})
+            source = sample["hits"]["hits"][0].get("_source", {})
+            required = {"offer_id", "platform", "price", "category_key", "is_active"}
+            missing = sorted(required - source.keys())
+            if missing:
+                raise ValueError(f"商品索引抽样字段缺失: {', '.join(missing)}")
+            vector = self.encoder.encode_query("商品")
+            bodies = [
+                {"size": 1, "query": {"match": {"title": "商品"}}},
+                {
+                    "size": 1,
+                    "query": {"knn": {"content_vector": {"vector": vector, "k": 1}}},
+                },
+                hybrid_search_body(
+                    "商品", vector, str(source["platform"]), 3, category_key=source["category_key"]
+                ),
+            ]
+            timings: list[float] = []
+            for position, body in enumerate(bodies):
+                started = time.perf_counter()
+                kwargs: dict[str, Any] = {"index": index, "body": body}
+                if position == 2:
+                    kwargs["params"] = {
+                        "search_pipeline": self.settings.opensearch_product_pipeline
+                    }
+                response = self.client.search(**kwargs)
+                if "hits" not in response:
+                    raise ValueError("商品索引冒烟查询未返回 hits")
+                timings.append((time.perf_counter() - started) * 1000)
+            validation = {
+                "query_p95_ms": round(max(timings), 2),
+                "smoke_queries": len(timings),
+            }
+
         alias = self.settings.opensearch_product_alias
         actions: list[dict[str, Any]] = []
         try:
@@ -116,14 +275,15 @@ class ProductIndexManager:
             actions.append({"add": {"index": index, "alias": alias}})
         if actions:
             self.client.indices.update_aliases(body={"actions": actions})
+        return validation
 
     def build(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         counts = dict(sorted(Counter(item["platform"] for item in items).items()))
         self.ensure_pipeline()
         self.ensure_index()
         indexed = self.index_items(items)
-        self.verify_and_publish(counts)
-        return {"indexed": indexed, "platform_counts": counts}
+        validation = self.verify_and_publish(counts)
+        return {"indexed": indexed, "platform_counts": counts, **validation}
 
 
 class ProductSearchService:
@@ -162,6 +322,14 @@ class ProductSearchService:
         platform: Platform,
         top_k: int = 20,
         filters: SearchFilters | None = None,
+        *,
+        category_key: str | None = None,
+        offer_ids: list[str] | None = None,
+        fresh_after: str | None = None,
+        catalog_status: str | None = None,
+        catalog_candidate_count: int = 0,
+        captured_at: str | None = None,
+        provider_status: str | None = None,
     ) -> ItemSearchOutput:
         self._ensure_ready()
         pool_size = min(
@@ -174,6 +342,9 @@ class ProductSearchService:
             platform,
             pool_size,
             filters,
+            category_key=category_key,
+            offer_ids=offer_ids,
+            fresh_after=fresh_after,
         )
         response = self.client.search(
             index=self.settings.opensearch_product_alias,
@@ -181,8 +352,18 @@ class ProductSearchService:
             body=body,
         )
         hits = response.get("hits", {}).get("hits", [])
+        candidate_fields = set(Candidate.model_fields) - {"retrieval_rank"}
         candidates = [
-            Candidate.model_validate({**hit["_source"], "retrieval_rank": rank})
+            Candidate.model_validate(
+                {
+                    **{
+                        key: value
+                        for key, value in hit["_source"].items()
+                        if key in candidate_fields
+                    },
+                    "retrieval_rank": rank,
+                }
+            )
             for rank, hit in enumerate(hits[:top_k], start=1)
         ]
         return ItemSearchOutput(
@@ -191,14 +372,16 @@ class ProductSearchService:
             candidates=candidates,
             total_recall=len(hits),
             truncated=len(hits) > len(candidates),
+            catalog_status=catalog_status or "fresh",
+            catalog_candidate_count=catalog_candidate_count or len(hits),
+            captured_at=captured_at,
+            provider_status=provider_status,
         )
 
 
 def load_catalog(path: Path) -> list[dict[str, Any]]:
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
 
 
@@ -237,6 +420,11 @@ def catalog_item(product: Product, offer: Offer) -> dict[str, Any]:
         "image_url": offer.image_url,
         "attributes": product.attributes_json or {},
         "product_url": offer.product_url,
+        "category_key": product.category_key,
+        "category_path": product.category_path or [],
+        "captured_at": offer.last_seen_at,
+        "last_seen_at": offer.last_seen_at,
+        "is_active": offer.is_active,
     }
 
 

@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  CatalogProgress,
   ChatMessage,
   ConnectionStatus,
   ForkTrace,
@@ -31,6 +32,7 @@ export interface WorkbenchState {
   steps: RuntimeStep[];
   forks: ForkTrace[];
   initializationMessage: string | null;
+  catalogProgress: CatalogProgress | null;
   result: TaskResult | null;
   artifacts: Artifact[];
   error: string | null;
@@ -54,6 +56,7 @@ export const initialState: WorkbenchState = {
   steps: [],
   forks: [],
   initializationMessage: null,
+  catalogProgress: null,
   result: null,
   artifacts: [],
   error: null,
@@ -107,7 +110,7 @@ function eventState(state: WorkbenchState, event: MonitorEvent): WorkbenchState 
   if (event.sequence !== null && event.sequence <= state.lastSequence) return state;
   const lastSequence = event.sequence ?? state.lastSequence;
   const data = event.data;
-  if (event.event === "RUN_STARTED") return { ...state, lastSequence, taskStatus: "running" };
+  if (event.event === "RUN_STARTED") return { ...state, lastSequence, taskStatus: "running", catalogProgress: null };
   if (event.event === "TEXT_MESSAGE_START") {
     const id = String(data.message_id || event.event_id);
     return {
@@ -193,16 +196,51 @@ function eventState(state: WorkbenchState, event: MonitorEvent): WorkbenchState 
     const message = event.message || String(data.message || "收到你的消息了~正在初始化本次对话");
     return { ...state, lastSequence, initializationMessage: message };
   }
+  if (event.event === "CUSTOM" && data.name === "replay_gap") {
+    return { ...state, lastSequence, catalogProgress: null };
+  }
+  if (event.event === "CUSTOM" && typeof data.name === "string" && [
+    "shopping_intent_resolved", "catalog_cache_checked", "catalog_fetch_started",
+    "catalog_fetch_progress", "catalog_fetch_finished", "catalog_normalization_progress",
+    "catalog_persistence_progress", "catalog_index_progress", "hybrid_retrieval_progress",
+  ].includes(data.name)) {
+    const stageMap: Record<string, CatalogProgress["stage"]> = {
+      shopping_intent_resolved: "intent", catalog_cache_checked: "cache",
+      catalog_fetch_started: "fetch", catalog_fetch_progress: "fetch", catalog_fetch_finished: "fetch",
+      catalog_normalization_progress: "normalize", catalog_persistence_progress: "persist",
+      catalog_index_progress: "index", hybrid_retrieval_progress: "retrieve",
+    };
+    const prior = state.catalogProgress;
+    const platform = typeof data.platform === "string" ? data.platform : null;
+    const platforms = { ...(prior?.platforms ?? {}) };
+    if (platform) platforms[platform] = {
+      status: String(data.status ?? platforms[platform]?.status ?? "running"),
+      accepted: Number(data.platform_total ?? data.accepted ?? platforms[platform]?.accepted ?? 0),
+    };
+    return {
+      ...state, lastSequence, initializationMessage: null,
+      catalogProgress: {
+        stage: stageMap[data.name],
+        message: event.message || String(data.message || prior?.message || "正在更新商品目录"),
+        total: Number(data.deduplicated_total ?? data.total ?? data.fresh_candidates ?? prior?.total ?? 0),
+        target: Number(data.target ?? prior?.target ?? 100),
+        status: String(data.status ?? prior?.status ?? "running"),
+        partialPlatforms: Array.isArray(data.partial_platforms) ? data.partial_platforms.map(String) : prior?.partialPlatforms ?? [],
+        platforms,
+      },
+    };
+  }
   if (event.event === "CUSTOM" && data.name === "task_result") {
     return { ...state, lastSequence, result: (data.result as TaskResult) ?? null };
   }
-  if (event.event === "RUN_FINISHED") return { ...state, lastSequence, initializationMessage: null, taskStatus: "succeeded", connectionStatus: "idle" };
-  if (event.event === "TASK_CANCELLED") return { ...state, lastSequence, initializationMessage: null, taskStatus: "cancelled", connectionStatus: "idle" };
+  if (event.event === "RUN_FINISHED") return { ...state, lastSequence, initializationMessage: null, catalogProgress: null, taskStatus: "succeeded", connectionStatus: "idle" };
+  if (event.event === "TASK_CANCELLED") return { ...state, lastSequence, initializationMessage: null, catalogProgress: null, taskStatus: "cancelled", connectionStatus: "idle" };
   if (event.event === "RUN_ERROR") {
     return {
       ...state,
       lastSequence,
       initializationMessage: null,
+      catalogProgress: null,
       taskStatus: "failed",
       connectionStatus: "idle",
       error: event.message || String(data.message || "任务执行失败"),
@@ -246,6 +284,7 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
         toolCalls: [],
         steps: [],
         forks: [],
+        catalogProgress: null,
         lastSequence: 0,
         connectionStatus: "idle",
         error: null,
@@ -286,6 +325,7 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
         steps: [],
         forks: [],
         initializationMessage: null,
+        catalogProgress: null,
         result: null,
         artifacts: [],
         error: null,
@@ -303,6 +343,7 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
         taskStatus: action.status,
         result: action.result,
         artifacts: action.artifacts,
+        catalogProgress: null,
         error: action.error ?? state.error,
       };
     case "ERROR":

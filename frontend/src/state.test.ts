@@ -78,4 +78,54 @@ describe("workbenchReducer", () => {
     expect(end.toolCalls[0]).toMatchObject({ name: "web_search", status: "succeeded", durationMs: 18 });
     expect(end.toolCalls[0].arguments).toEqual({ query: "耳机" });
   });
+
+  it("merges catalog platform snapshots idempotently by sequence", () => {
+    const first = workbenchReducer(initialState, {
+      type: "EVENT",
+      event: event(1, "CUSTOM", {
+        name: "catalog_fetch_progress", platform: "taobao",
+        platform_total: 20, deduplicated_total: 35, target: 100,
+      }),
+    });
+    const duplicate = workbenchReducer(first, {
+      type: "EVENT",
+      event: event(1, "CUSTOM", {
+        name: "catalog_fetch_progress", platform: "taobao",
+        platform_total: 40, deduplicated_total: 55,
+      }),
+    });
+    const secondPlatform = workbenchReducer(duplicate, {
+      type: "EVENT",
+      event: event(2, "CUSTOM", {
+        name: "catalog_fetch_progress", platform: "jingdong",
+        platform_total: 15, deduplicated_total: 50,
+      }),
+    });
+
+    expect(secondPlatform.catalogProgress?.total).toBe(50);
+    expect(secondPlatform.catalogProgress?.platforms.taobao.accepted).toBe(20);
+    expect(secondPlatform.catalogProgress?.platforms.jingdong.accepted).toBe(15);
+    expect(secondPlatform.messages).toEqual([]);
+  });
+
+  it("clears transient catalog state at terminal events", () => {
+    const progress = workbenchReducer(initialState, {
+      type: "EVENT",
+      event: event(1, "CUSTOM", { name: "catalog_cache_checked", fresh_candidates: 12 }),
+    });
+    const cancelled = workbenchReducer(progress, {
+      type: "EVENT",
+      event: event(2, "TASK_CANCELLED", {}),
+    });
+
+    expect(progress.catalogProgress).not.toBeNull();
+    expect(cancelled.catalogProgress).toBeNull();
+    expect(cancelled.taskStatus).toBe("cancelled");
+
+    const replayGap = workbenchReducer(progress, {
+      type: "EVENT",
+      event: event(2, "CUSTOM", { name: "replay_gap", requested_after: 1 }),
+    });
+    expect(replayGap.catalogProgress).toBeNull();
+  });
 });

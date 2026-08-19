@@ -15,7 +15,18 @@ from app.tools.shipping_calc import shipping_calc
 
 
 def test_planner_exposes_an_ordered_tool_plan() -> None:
-    result = planner.invoke({"goal": "预算 1000 元购买降噪耳机"})
+    result = planner.invoke(
+        {
+            "goal": "预算 1000 元购买降噪耳机",
+            "shopping_intent": {
+                "category_key": "headphones",
+                "category_name": "耳机",
+                "primary_query": "降噪耳机",
+                "platforms": ["taobao", "jingdong", "douyin"],
+                "filters": {"max_price": 1000, "currency": "CNY"},
+            },
+        }
+    )
     assert result["status"] == "ok"
     assert result["steps"][0]["order"] == 1
     assert result["steps"][-1]["tool"] == "shopping_summary"

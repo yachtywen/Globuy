@@ -33,6 +33,8 @@ from app.agent.middleware import cache_breakpoint_update, loop_detected, tool_re
 from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import EventType, current_monitor
 from app.config import get_settings
+from app.products.catalog.intent import ShoppingIntent
+from app.search.schemas import Platform
 from app.tools import TERMINAL_TOOLS, TOOL_PHASES
 from app.utils.thread_ctx import (
     current_fork_depth,
@@ -57,6 +59,8 @@ class AgentState(TypedDict, total=False):
     loop_detected: bool
     memory_context: str | None
     memory_status: str
+    shopping_intent: dict[str, Any] | None
+    catalog_summary: dict[str, Any] | None
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -102,6 +106,117 @@ def _normalize_phase_tool_calls(
     return response.model_copy(update={"tool_calls": valid}), True
 
 
+def _decision_budget_exhausted(iteration: int, repeat_threshold: int | None = None) -> bool:
+    """Bound non-terminal model decisions before the graph recursion guard fires."""
+
+    threshold = (
+        get_settings().loop_repeat_threshold
+        if repeat_threshold is None
+        else repeat_threshold
+    )
+    return iteration >= max(8, threshold * 2)
+
+
+def _forced_termination_response(state: AgentState) -> AIMessage:
+    """Turn accumulated verified tool facts into the next deterministic terminal step."""
+
+    latest_picker: dict[str, Any] | None = None
+    latest_searches: dict[str, dict[str, Any]] = {}
+    for message in state.get("messages", []):
+        if not isinstance(message, ToolMessage):
+            continue
+        payload = _tool_payload(message)
+        if payload is None:
+            continue
+        if message.name == "item_picker":
+            latest_picker = payload
+        elif message.name == "item_search":
+            platform = str(payload.get("platform") or "")
+            if platform:
+                latest_searches[platform] = payload
+
+    if latest_picker is not None:
+        picks = latest_picker.get("picks")
+        if isinstance(picks, list) and picks:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "shopping_summary",
+                        "args": {
+                            "goal": state.get("original_query") or "商品推荐",
+                            "picks": picks[:3],
+                            "learned_preferences": state.get("learned_preferences", []),
+                        },
+                        "id": f"forced-summary-{uuid4().hex}",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "chat_fallback",
+                    "args": {
+                        "message": "当前候选未通过明确预算或属性约束，请调整筛选条件后重试。"
+                    },
+                    "id": f"forced-fallback-{uuid4().hex}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    candidates: list[dict[str, Any]] = []
+    seen_item_ids: set[str] = set()
+    for platform in ("taobao", "jingdong", "douyin"):
+        rows = latest_searches.get(platform, {}).get("candidates")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_id = str(row.get("item_id") or "")
+            if item_id and item_id not in seen_item_ids:
+                seen_item_ids.add(item_id)
+                candidates.append(row)
+            if len(candidates) >= 50:
+                break
+
+    if candidates:
+        filters = (state.get("shopping_intent") or {}).get("filters") or {}
+        constraints = {
+            key: filters[key]
+            for key in ("min_price", "max_price")
+            if filters.get(key) is not None
+        }
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "item_picker",
+                    "args": {"items": candidates, "constraints": constraints, "limit": 3},
+                    "id": f"forced-picker-{uuid4().hex}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "chat_fallback",
+                "args": {
+                    "message": "当前没有取得可验证的商品候选，请稍后重试或指定单个平台。"
+                },
+                "id": f"forced-fallback-{uuid4().hex}",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
 async def _report_phase(phase: Phase, *, started: bool, iteration: int) -> None:
     monitor = current_monitor()
     if monitor is None:
@@ -129,9 +244,7 @@ class AgentLoop:
         self.model = model
         # Reads confirmed user memories before runs; Agent-originated writes stay disabled.
         self.store = store
-        self.business_tools = list(
-            tools if tools is not None else get_core_tools(model=self.model)
-        )
+        self.business_tools = list(tools if tools is not None else get_core_tools(model=self.model))
         self.enable_dispatch = enable_dispatch
         self.tools = list(self.business_tools)
         if enable_dispatch:
@@ -142,14 +255,10 @@ class AgentLoop:
         self.active_children: dict[str, AgentLoop] = {}
         self._by_name = {registered.name: registered for registered in self.tools}
         self.think_tools = [
-            registered
-            for registered in self.tools
-            if registered.name in TOOL_PHASES["think"]
+            registered for registered in self.tools if registered.name in TOOL_PHASES["think"]
         ]
         self.reflect_tools = [
-            registered
-            for registered in self.tools
-            if registered.name in TOOL_PHASES["reflect"]
+            registered for registered in self.tools if registered.name in TOOL_PHASES["reflect"]
         ]
         self.graph = self._build_graph()
 
@@ -210,7 +319,10 @@ class AgentLoop:
                 await _report_phase("reflect", started=False, iteration=iteration)
                 return {"phase": "done", "iteration": iteration}
             guard = ""
-            if state.get("loop_detected"):
+            must_terminate = bool(state.get("loop_detected")) or _decision_budget_exhausted(
+                iteration
+            )
+            if must_terminate:
                 guard = (
                     "循环防护已触发：不要重复此前相同工具和参数。"
                     "已有精选商品时调用 shopping_summary，否则调用 chat_fallback。"
@@ -220,30 +332,49 @@ class AgentLoop:
                     "当前为 Reflect 阶段。检查现有观察，只允许选择："
                     + "、".join(sorted(TOOL_PHASES["reflect"]))
                     + "。信息不足且需要继续检索时不调用工具，系统会返回 Think。"
-                    "shopping_summary 成功后必须结束。"
-                    + guard
+                    "shopping_summary 成功后必须结束。" + guard
                 )
             )
             prompt = self.system_prompt
             if state.get("memory_context"):
                 prompt += "\n\n用户已确认的长期记忆：\n" + str(state["memory_context"])
-            response = await reflect_model.ainvoke(
-                [SystemMessage(content=prompt), phase_prompt, *state["messages"]],
-                config=config,
+            force_root_termination = must_terminate and current_fork_depth() == 0
+            response = (
+                _forced_termination_response(state)
+                if force_root_termination
+                else await reflect_model.ainvoke(
+                    [SystemMessage(content=prompt), phase_prompt, *state["messages"]],
+                    config=config,
+                )
+            )
+            allowed_tools = (
+                TOOL_PHASES["reflect"]
+                if force_root_termination
+                else frozenset(TERMINAL_TOOLS)
+                if must_terminate
+                else TOOL_PHASES["reflect"]
             )
             response, requested_think_tool = _normalize_phase_tool_calls(
-                response, TOOL_PHASES["reflect"]
+                response, allowed_tools
             )
+            if must_terminate and not response.tool_calls and not _message_text(response).strip():
+                response = response.model_copy(
+                    update={
+                        "content": (
+                            "当前证据不足以生成可靠清单，请缩小平台范围或补充筛选条件后重试。"
+                        )
+                    }
+                )
             await _report_phase("reflect", started=False, iteration=iteration)
             if response.tool_calls:
                 next_phase: Phase = "act"
+            elif must_terminate:
+                next_phase = "done"
             elif requested_think_tool:
                 next_phase = "think"
             elif current_fork_depth() > 0:
                 # A homogeneous fork returns its compact findings to the parent. It must not
                 # require a parent-only terminal shopping summary in order to stop.
-                next_phase = "done"
-            elif state.get("loop_detected"):
                 next_phase = "done"
             else:
                 next_phase = "think"
@@ -262,12 +393,30 @@ class AgentLoop:
             detected = loop_detected(recent)
             terminal_result: dict[str, Any] | None = None
             terminal_name: str | None = None
+            shopping_intent = state.get("shopping_intent")
+            catalog_summary = state.get("catalog_summary")
             for message in reversed(state["messages"]):
                 if not isinstance(message, ToolMessage):
                     break
+                payload = _tool_payload(message)
+                if (
+                    message.name == "planner"
+                    and payload
+                    and isinstance(payload.get("shopping_intent"), dict)
+                ):
+                    shopping_intent = payload["shopping_intent"]
+                if message.name == "item_search" and payload:
+                    catalog_summary = {
+                        key: payload.get(key)
+                        for key in (
+                            "status",
+                            "catalog_status",
+                            "catalog_candidate_count",
+                            "provider_status",
+                        )
+                    }
                 if message.name not in TERMINAL_TOOLS:
                     continue
-                payload = _tool_payload(message)
                 if (
                     message.name == "chat_fallback"
                     and payload
@@ -278,6 +427,23 @@ class AgentLoop:
                 if payload and payload.get("terminal") is True:
                     terminal_result, terminal_name = payload, message.name
                     break
+            if state.get("shopping_intent") is None and shopping_intent:
+                monitor = current_monitor()
+                if monitor is not None:
+                    filters = (
+                        shopping_intent.get("filters")
+                        if isinstance(shopping_intent.get("filters"), dict)
+                        else {}
+                    )
+                    await monitor.report_catalog(
+                        "shopping_intent_resolved",
+                        phase="intent",
+                        category_name=shopping_intent.get("category_name"),
+                        platforms=shopping_intent.get("platforms", []),
+                        has_budget=filters.get("min_price") is not None
+                        or filters.get("max_price") is not None,
+                        message=f"已识别商品品类：{shopping_intent.get('category_name', '')}",
+                    )
             phase: Phase = "done" if terminal_result is not None else "reflect"
             await _report_phase("observe", started=False, iteration=iteration)
             return {
@@ -291,6 +457,8 @@ class AgentLoop:
                     else state.get("learned_preferences", [])
                 ),
                 "loop_detected": detected,
+                "shopping_intent": shopping_intent,
+                "catalog_summary": catalog_summary,
             }
 
         async def compress(state: AgentState) -> dict[str, Any]:
@@ -358,6 +526,8 @@ class AgentLoop:
             "loop_detected": False,
             "memory_context": None,
             "memory_status": "not_configured" if self.store is None else "ready",
+            "shopping_intent": None,
+            "catalog_summary": None,
         }
 
     async def _state_with_memory(self, content: str) -> AgentState:
@@ -386,23 +556,27 @@ class AgentLoop:
         return {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": (
-                settings.fork_recursion_limit
-                if child
-                else settings.main_agent_recursion_limit
+                settings.fork_recursion_limit if child else settings.main_agent_recursion_limit
             ),
             "metadata": {"model_role": "coordinator"},
         }
 
     async def _invoke(
-        self, content: str, thread_id: str, *, child: bool = False
+        self,
+        content: str,
+        thread_id: str,
+        *,
+        child: bool = False,
+        shopping_intent: dict[str, Any] | None = None,
     ) -> AgentState:
         settings = get_settings()
-        timeout = (
-            settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
-        )
+        timeout = settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
         async with asyncio.timeout(timeout):
+            state = await self._state_with_memory(content)
+            if shopping_intent is not None:
+                state["shopping_intent"] = shopping_intent
             return await self.graph.ainvoke(
-                await self._state_with_memory(content),
+                state,
                 config=self._config(thread_id, child=child),
             )
 
@@ -412,16 +586,25 @@ class AgentLoop:
         """Yield LangGraph v2 events, including nested ShoppingSummary model events."""
 
         settings = get_settings()
-        timeout = (
-            settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
-        )
+        timeout = settings.fork_timeout_seconds if child else settings.main_agent_timeout_seconds
+        config = self._config(thread_id, child=child)
         async with asyncio.timeout(timeout):
             async for graph_event in self.graph.astream_events(
                 await self._state_with_memory(content),
-                config=self._config(thread_id, child=child),
+                config=config,
                 version="v2",
             ):
                 yield graph_event
+            # Manually invoked fork graphs can also emit top-level-looking chain events.
+            # Publish the checkpoint for this exact graph/thread as the authoritative
+            # terminal state so API collection never depends on concurrent event order.
+            snapshot = await self.graph.aget_state(config)
+            yield {
+                "event": "globuy_final_state",
+                "name": "AgentLoop",
+                "data": {"output": snapshot.values},
+                "metadata": {"thread_id": thread_id, "child": child},
+            }
 
     @staticmethod
     def _compact_tool_results(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
@@ -437,7 +620,13 @@ class AgentLoop:
                 results.append({"tool": message.name, "result": payload})
         return results
 
-    async def dispatch(self, demand: str) -> dict[str, Any]:
+    async def dispatch(
+        self,
+        demand: str,
+        *,
+        shopping_intent: ShoppingIntent | None = None,
+        target_platform: Platform | None = None,
+    ) -> dict[str, Any]:
         settings = get_settings()
         if not fork_dispatch_allowed(settings.fork_max_depth):
             return {
@@ -460,7 +649,14 @@ class AgentLoop:
             )
         try:
             with fork_scope(child_thread_id):
-                state = await child._invoke(demand, child_thread_id, child=True)
+                state = await child._invoke(
+                    demand,
+                    child_thread_id,
+                    child=True,
+                    shopping_intent=(
+                        shopping_intent.model_dump(mode="json") if shopping_intent else None
+                    ),
+                )
             final_message = state["messages"][-1]
             tool_results = self._compact_tool_results(state["messages"])
             return {
@@ -469,10 +665,9 @@ class AgentLoop:
                 "answer": _message_text(final_message),
                 "tool_results": tool_results,
                 "search_results": [
-                    item["result"]
-                    for item in tool_results
-                    if item["tool"] == "item_search"
+                    item["result"] for item in tool_results if item["tool"] == "item_search"
                 ],
+                "target_platform": target_platform,
             }
         except TimeoutError:
             return {

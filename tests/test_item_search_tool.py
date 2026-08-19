@@ -8,6 +8,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 
 from app.agent.dispatch_tool import build_dispatch_node
 from app.api.monitor import AgentEvent, EventType, Monitor, monitor_scope
+from app.config import get_settings
 from app.search.schemas import Candidate, ItemSearchOutput
 from app.tools import item_search as exported_item_search
 from app.utils.thread_ctx import thread_scope
@@ -16,7 +17,7 @@ item_search_module = importlib.import_module("app.tools.item_search")
 
 
 class FakeSearchService:
-    def search(self, query, platform, top_k, filters):
+    def search(self, query, platform, top_k, filters, **kwargs):
         return ItemSearchOutput(
             status="ok",
             platform=platform,
@@ -33,8 +34,23 @@ class FakeSearchService:
                 )
             ],
             total_recall=3,
+            catalog_candidate_count=3,
             truncated=True,
         )
+
+
+class FakeCoordinator:
+    def __init__(self) -> None:
+        self.intents = []
+
+    async def ensure(self, intent):
+        self.intents.append(intent)
+        return None
+
+
+class FakeWorker:
+    async def run_once(self, offer_ids):
+        raise AssertionError("no newly hydrated offers expected")
 
 
 @pytest.mark.asyncio
@@ -49,6 +65,8 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
     monkeypatch.setattr(
         item_search_module, "get_product_search_service", lambda: FakeSearchService()
     )
+    settings = get_settings().model_copy(update={"product_provider": "none"})
+    monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
     with thread_scope("root", tmp_path, run_id="run-1"), monitor_scope(
         Monitor(publish, publish_thread_id="root")
     ):
@@ -72,6 +90,12 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
                                     "query": "降噪耳机",
                                     "platform": "jingdong",
                                     "top_k": 1,
+                                    "intent": {
+                                        "category_key": "headphones",
+                                        "category_name": "耳机",
+                                        "primary_query": "降噪耳机",
+                                        "platforms": ["jingdong"],
+                                    },
                                 },
                             }
                         ],
@@ -83,10 +107,45 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
     payload = json.loads(state["messages"][-1].content)
     assert payload["status"] == "ok"
     assert payload["candidates"][0]["retrieval_rank"] == 1
-    assert [item.type for _, item in events] == [
+    assert [item.type for _, item in events if item.type != EventType.CUSTOM] == [
         EventType.TOOL_CALL_START,
         EventType.TOOL_CALL_ARGS,
         EventType.TOOL_CALL_RESULT,
         EventType.TOOL_CALL_END,
     ]
+    assert any(item.type == EventType.CUSTOM for _, item in events)
     assert all(channel == "root" for channel, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_item_search_hydrates_only_its_requested_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = FakeCoordinator()
+    monkeypatch.setattr(
+        item_search_module, "get_product_search_service", lambda: FakeSearchService()
+    )
+    monkeypatch.setattr(
+        item_search_module,
+        "get_catalog_runtime",
+        lambda: (coordinator, FakeWorker()),
+    )
+    settings = get_settings().model_copy(update={"product_provider": "justone"})
+    monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
+
+    payload = await exported_item_search.ainvoke(
+        {
+            "query": "牛仔裤",
+            "platform": "taobao",
+            "intent": {
+                "category_key": "jeans",
+                "category_name": "牛仔裤",
+                "primary_query": "牛仔裤",
+                "platforms": ["taobao", "jingdong", "douyin"],
+            },
+        }
+    )
+
+    assert payload["status"] == "ok"
+    assert len(coordinator.intents) == 1
+    assert coordinator.intents[0].platforms == ["taobao"]

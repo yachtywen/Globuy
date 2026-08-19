@@ -526,6 +526,17 @@ HTTPS 使用 `wss://`。浏览器自动随同源握手发送会话 Cookie。首�
 - `{name: "replay_gap", requested_after, earliest_available_sequence}`：游标过旧，调用运行状态和会话详情恢复。
 - `{name: "heartbeat", server_time}`：保活，不展示。
 - `{name: "thread_archived", thread_id, new_thread_id}`：当前会话归档，切换只读并跟随新会话。
+- 商品目录临时状态：`shopping_intent_resolved`、`catalog_cache_checked`、`catalog_fetch_started`、
+  `catalog_fetch_progress`、`catalog_fetch_finished`、`catalog_normalization_progress`、
+  `catalog_persistence_progress`、`catalog_index_progress`、`hybrid_retrieval_progress`。这些事件只包含品类名、平台、
+  是否有预算、阶段状态和候选计数等白名单字段；不得包含 Token、游标、Provider 原文、原始业务码或异常堆栈。
+  前端按 `sequence` 幂等合并平台快照，不把事件转换成 assistant 消息，并在终态、取消、错误、新 run、切换会话或
+  `replay_gap` 状态同步后清理临时进度。
+
+ItemSearch 仍保持一次调用只搜索一个平台。内部调用可携带同一份已验证结构化购物意图，返回状态为
+`ok | partial | not_configured | error | cancelled`，并可包含 `catalog_status`、`catalog_candidate_count`、
+`captured_at` 和 `provider_status`。Provider 默认关闭时仍搜索已有本地目录；目录不足不会触发真实网络请求，而返回
+`not_configured`。候选不新增无法验证的库存、运费或综合评分字段。
 
 ### 8.3 重连规则
 

@@ -20,6 +20,26 @@
 [docs/globuy接口文档v1.md](docs/globuy接口文档v1.md)。
 当前项目优化部分已做和未做还有还需要做的内容详细看[docs/ToDo.md](docs/ToDo.md)。
 
+## 按需商品目录（默认无付费调用）
+
+商品搜索现在支持“结构化购物意图 → MySQL 覆盖检查 → 可选三平台共享补库 → Outbox 批量投影 →
+OpenSearch Hybrid 检索”。`GLOBUY_PRODUCT_PROVIDER` 默认是 `none`：已有本地目录仍可搜索，目录不足时返回
+`not_configured`，不会静默请求 Just One 或任何付费模型。只有另行确认 API 计费、长期保存权和展示权后，才应在
+本地 `.env` 中配置 `GLOBUY_PRODUCT_PROVIDER=justone` 与 Token。
+
+数据库升级和 v2 索引生命周期命令：
+
+```powershell
+alembic upgrade head
+python -m app.products.catalog_lifecycle stats
+python -m app.products.catalog_lifecycle audit
+python -m app.products.catalog_lifecycle cleanup
+python -m app.products.catalog_lifecycle rebuild --value globuy-products-v2-20260819
+```
+
+`rebuild` 从 MySQL 的活动且有合法价格的 Offer 构建新物理索引，校验后原子切换
+`globuy-products` 别名；活动索引不会执行 `force merge`。
+
 ## 快速开始：本地演示模式
 
 这条路径适合课程演示、前后端联调和同学第一次运行。它会启动一个本地 MySQL 8 容器，使用
@@ -252,6 +272,19 @@ Set-Location <globuy 仓库目录>\frontend
 npm run test
 npm run build
 ```
+
+### 双层评测
+
+默认离线评测只使用仓库内合成夹具，不调用真实模型、WebSearch、商品 Provider 或向量服务：
+
+```powershell
+python scripts/eval_regression.py --suite offline
+```
+
+真实质量评测通过正式认证、HTTP 202、WebSocket replay 和 MySQL 商品事实执行，必须使用专用评测
+账号并显式增加 `--allow-model-calls`。独立 LLM Judge 还需要配置 `GLOBUY_EVAL_JUDGE_*` 并增加
+`--judge`；若服务端外部工具已配置，脚本会拒绝运行，除非再明确增加
+`--allow-external-tools`。完整契约与产物说明见 [评测系统文档](docs/evaluation-system.md)。
 
 ## 项目结构
 

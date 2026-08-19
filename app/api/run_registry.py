@@ -25,6 +25,25 @@ AgentStreamRunner = Callable[[str, str], AsyncIterator[dict[str, Any]]]
 logger = logging.getLogger(__name__)
 
 
+def _accumulate_final_state(
+    current: dict[str, Any] | None,
+    authoritative: bool,
+    graph_event: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    output = graph_event.get("data", {}).get("output")
+    if not isinstance(output, dict):
+        return current, authoritative
+    if graph_event.get("event") == "globuy_final_state":
+        return output, True
+    if (
+        not authoritative
+        and graph_event.get("event") == "on_chain_end"
+        and not graph_event.get("parent_ids")
+    ):
+        return output, False
+    return current, authoritative
+
+
 @dataclass
 class RunHandle:
     thread_id: str
@@ -331,6 +350,7 @@ class RunRegistry:
             )
             message_started = True
             final_state: dict[str, Any] | None = None
+            final_state_is_authoritative = False
             with bind_context(
                 handle.thread_id,
                 self.session_dir(handle.thread_id),
@@ -349,12 +369,11 @@ class RunRegistry:
                     async for graph_event in self.stream_runner(
                         handle.query, handle.thread_id
                     ):
-                        if (
-                            graph_event.get("event") == "on_chain_end"
-                            and not graph_event.get("parent_ids")
-                            and isinstance(graph_event.get("data", {}).get("output"), dict)
-                        ):
-                            final_state = graph_event["data"]["output"]
+                        final_state, final_state_is_authoritative = _accumulate_final_state(
+                            final_state,
+                            final_state_is_authoritative,
+                            graph_event,
+                        )
                         if graph_event.get("event") != "on_chat_model_stream":
                             continue
                         event_metadata = graph_event.get("metadata") or {}

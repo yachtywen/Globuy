@@ -13,11 +13,7 @@ def search_pipeline_body() -> dict[str, Any]:
     return {
         "description": "globuy product BM25 + dense-vector RRF",
         "phase_results_processors": [
-            {
-                "score-ranker-processor": {
-                    "combination": {"technique": "rrf"}
-                }
-            }
+            {"score-ranker-processor": {"combination": {"technique": "rrf"}}}
         ],
     }
 
@@ -43,6 +39,13 @@ def product_index_body(metadata: EmbeddingMetadata) -> dict[str, Any]:
                 "item_id": {"type": "keyword"},
                 "product_id": {"type": "keyword"},
                 "offer_id": {"type": "keyword"},
+                "category_key": {"type": "keyword"},
+                "category_path": {"type": "keyword"},
+                "captured_at": {"type": "date"},
+                "last_seen_at": {"type": "date"},
+                "is_active": {"type": "boolean"},
+                "semantic_hash": {"type": "keyword"},
+                "projection_hash": {"type": "keyword"},
                 "platform": {"type": "keyword"},
                 "title": {"type": "text", "analyzer": "cjk"},
                 "price": {"type": "double"},
@@ -96,7 +99,23 @@ def hybrid_search_body(
     platform: Platform,
     pool_size: int,
     filters: SearchFilters | None = None,
+    *,
+    category_key: str | None = None,
+    offer_ids: list[str] | None = None,
+    fresh_after: str | None = None,
 ) -> dict[str, Any]:
+    recall_filters: list[dict[str, Any]] = [
+        {"term": {"platform": platform}},
+        {"term": {"is_active": True}},
+    ]
+    if category_key:
+        recall_filters.append({"term": {"category_key": category_key}})
+    if offer_ids:
+        if len(offer_ids) > 120:
+            raise ValueError("offer_ids 最多允许 120 个")
+        recall_filters.append({"terms": {"offer_id": offer_ids}})
+    if fresh_after:
+        recall_filters.append({"range": {"last_seen_at": {"gte": fresh_after}}})
     body: dict[str, Any] = {
         "size": pool_size,
         "_source": {"excludes": ["content_vector", "semantic_text", "attribute_terms"]},
@@ -115,7 +134,7 @@ def hybrid_search_body(
                 ],
                 # Platform defines the single-platform recall domain and therefore
                 # constrains both BM25 and KNN before RRF fusion.
-                "filter": {"bool": {"filter": [{"term": {"platform": platform}}]}},
+                "filter": {"bool": {"filter": recall_filters}},
             }
         },
     }

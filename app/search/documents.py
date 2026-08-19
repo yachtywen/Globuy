@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from typing import Any
 
 from app.products.identity import offer_id, product_id
@@ -71,11 +73,27 @@ def semantic_text(item: Mapping[str, Any]) -> str:
     return "\n".join(dict.fromkeys(part for part in parts if part))
 
 
+def semantic_hash(item: Mapping[str, Any], version: str = "product-semantic-v1") -> str:
+    return hashlib.sha256(f"{version}\n{semantic_text(item)}".encode()).hexdigest()
+
+
+def projection_hash(document: Mapping[str, Any]) -> str:
+    payload = {
+        key: value
+        for key, value in document.items()
+        if key not in {"content_vector", "projection_hash"}
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def index_document(item: Mapping[str, Any], vector: list[float]) -> dict[str, Any]:
     attributes = item.get("attributes")
     if not isinstance(attributes, Mapping):
         attributes = {}
-    return {
+    document = {
         "item_id": str(item["item_id"]),
         "product_id": str(item.get("product_id") or product_id(str(item["item_id"]))),
         "offer_id": str(item.get("offer_id") or offer_id(str(item["item_id"]))),
@@ -91,4 +109,18 @@ def index_document(item: Mapping[str, Any], vector: list[float]) -> dict[str, An
         "product_url": item.get("product_url"),
         "semantic_text": semantic_text(item),
         "content_vector": vector,
+        "category_key": item.get("category_key"),
+        "category_path": item.get("category_path") or [],
+        "captured_at": _iso(item.get("captured_at")),
+        "last_seen_at": _iso(item.get("last_seen_at")),
+        "is_active": bool(item.get("is_active", True)),
+        "semantic_hash": semantic_hash(item),
     }
+    document["projection_hash"] = projection_hash(document)
+    return document
+
+
+def _iso(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat() + ("Z" if value.tzinfo is None else "")
+    return str(value) if value else None

@@ -228,8 +228,20 @@ def create_app(
         return {"name": settings.app_name, "version": __version__, "docs": "/docs"}
 
     @app.get("/healthz", tags=["system"])
-    async def health() -> dict[str, str]:
-        result = {"status": "ok", "model_provider": settings.model_provider}
+    async def health() -> dict[str, str | bool]:
+        result: dict[str, str | bool] = {
+            "status": "ok",
+            "model_provider": settings.model_provider,
+            "product_provider": settings.product_provider,
+            "product_provider_configured": bool(
+                settings.product_provider != "none" and settings.justone_token is not None
+            ),
+            "web_search_provider": settings.web_search_provider,
+            "web_search_configured": bool(
+                settings.web_search_provider != "none" and settings.tavily_api_key is not None
+            ),
+            "category_cache_enabled": bool(settings.redis_url),
+        }
         if database is not None:
             try:
                 await database.ping()

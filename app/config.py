@@ -2,9 +2,9 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     output_dir: Path = Path("output")
     uploaded_dir: Path = Path("uploaded")
     prompt_file: Path = Path("app/prompt/prompts.yml")
-    #触发压缩的token上限
+    # 触发压缩的token上限
     compression_token_limit: int = 12_000
-    #压缩时只保留最近的三个工具调用及返回结果（每个工具调用的结果,每个ToolMessage会在返回前先经过compact_tool_content.py压缩）
+    # 压缩时保留最近三个工具调用组；ToolMessage 返回前先经过结果压缩。
     compression_keep_recent: int = 3
     tool_result_token_limit: int = Field(default=4_000, ge=256)
     loop_detection_window: int = Field(default=6, ge=2, le=50)
@@ -70,10 +70,53 @@ class Settings(BaseSettings):
     price_refresh_interval_hours: int = Field(default=24, ge=1, le=168)
     price_refresh_local_hour: int = Field(default=3, ge=0, le=23)
 
+    product_provider: Literal["none", "justone"] = "none"
+    justone_base_url: str = "https://api.justoneapi.com"
+    justone_token: SecretStr | None = None
+    product_provider_timeout_seconds: float = Field(default=12.0, gt=0)
+    catalog_minimum_total: int = Field(default=60, ge=1)
+    catalog_target_total: int = Field(default=100, ge=1)
+    catalog_hard_cap_total: int = Field(default=120, ge=1)
+    catalog_minimum_per_platform: int = Field(default=15, ge=1)
+    catalog_max_success_calls_per_run: int = Field(default=12, ge=1)
+    catalog_max_attempts_per_run: int = Field(default=20, ge=1)
+    catalog_soft_deadline_seconds: float = Field(default=20.0, gt=0)
+    catalog_hard_deadline_seconds: float = Field(default=60.0, gt=0)
+    catalog_freshness_seconds: int = Field(default=86_400, ge=60)
+    catalog_scope_ttl_seconds: int = Field(default=2_592_000, ge=3600)
+    catalog_lease_seconds: int = Field(default=120, ge=10)
+    provider_max_concurrency: int = Field(default=3, ge=1, le=20)
+    provider_per_platform_concurrency: int = Field(default=1, ge=1, le=1)
+    product_outbox_batch_size: int = Field(default=100, ge=1, le=1000)
+    product_outbox_max_bytes: int = Field(default=1_000_000, ge=1024)
+    product_outbox_max_attempts: int = Field(default=8, ge=1, le=100)
+    product_outbox_retry_base_seconds: int = Field(default=2, ge=1)
+    product_outbox_retry_max_seconds: int = Field(default=300, ge=1)
+    product_index_deleted_ratio_threshold: float = Field(default=0.25, ge=0, le=1)
+    product_index_disk_percent_threshold: float = Field(default=80.0, ge=1, le=100)
+    product_index_retention_seconds: int = Field(default=86_400, ge=0)
+
     @field_validator("database_url", mode="before")
     @classmethod
     def empty_database_url_is_unconfigured(cls, value: object) -> object:
         return None if value == "" else value
+
+    @field_validator("justone_token", mode="before")
+    @classmethod
+    def empty_provider_token_is_unconfigured(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def validate_catalog_limits(self) -> Self:
+        if not (
+            self.catalog_minimum_total
+            <= self.catalog_target_total
+            <= self.catalog_hard_cap_total
+        ):
+            raise ValueError("catalog limits must satisfy minimum <= target <= hard cap")
+        if self.catalog_soft_deadline_seconds > self.catalog_hard_deadline_seconds:
+            raise ValueError("catalog soft deadline cannot exceed hard deadline")
+        return self
 
     web_search_provider: Literal["none", "tavily"] = "tavily"
     tavily_api_key: SecretStr | None = None
@@ -96,7 +139,8 @@ class Settings(BaseSettings):
     store_backend: Literal["opensearch"] = "opensearch"
     opensearch_url: str = "http://127.0.0.1:9200"
     opensearch_memory_index: str = "globuy-memory"
-    opensearch_product_index: str = "globuy-products-v1"
+    opensearch_product_index: str = "globuy-products-v2-initial"
+    opensearch_product_index_prefix: str = "globuy-products-v2-"
     opensearch_product_alias: str = "globuy-products"
     opensearch_product_pipeline: str = "globuy-products-rrf"
     opensearch_timeout_seconds: float = Field(default=10.0, gt=0)

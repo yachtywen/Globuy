@@ -5,11 +5,19 @@ specific vendor. More providers can be added without changing the AgentLoop.
 """
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from app.config import Settings, get_settings
+
+
+def _is_deepseek_endpoint(base_url: str | None) -> bool:
+    """Return whether the OpenAI-compatible endpoint is DeepSeek's official API."""
+
+    hostname = (urlparse(base_url or "").hostname or "").lower()
+    return hostname == "api.deepseek.com" or hostname.endswith(".api.deepseek.com")
 
 
 def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
@@ -28,6 +36,12 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
     }
     if settings.llm_base_url:
         kwargs["base_url"] = settings.llm_base_url
+    if _is_deepseek_endpoint(settings.llm_base_url):
+        # DeepSeek thinking mode requires every historical assistant message to
+        # round-trip its vendor-specific reasoning_content. LangChain tool-call
+        # messages do not guarantee that field survives the graph state, so a
+        # later Think/Reflect turn can otherwise fail with HTTP 400.
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     return ChatOpenAI(**kwargs)
 
 

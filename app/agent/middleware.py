@@ -163,11 +163,40 @@ async def guarded_tool_call(
     call_id = str(call.get("id") or "unknown")
     name = str(call.get("name") or "unknown")
     arguments = call.get("args") if isinstance(call.get("args"), dict) else {}
+    state = request.state if isinstance(request.state, dict) else {}
+    if name == "item_search" and not arguments.get("intent") and state.get("shopping_intent"):
+        arguments = {**arguments, "intent": state["shopping_intent"]}
+        request = request.override(tool_call={**call, "args": arguments})
     monitor = current_monitor()
     started = time.perf_counter()
     if monitor is not None:
         await monitor.report_tool_start(call_id, name, _safe_arguments(arguments))
-    state = request.state if isinstance(request.state, dict) else {}
+    if name == "item_search" and not state.get("shopping_intent") and not arguments.get("intent"):
+        payload = {
+            "status": "needs_planning",
+            "message": "商品搜索前必须先通过 planner 形成结构化购物意图。",
+        }
+        rejected = ToolMessage(
+            content=_json(payload), name=name, tool_call_id=call_id, status="error"
+        )
+        if monitor is not None:
+            await monitor.report_tool_end(
+                call_id, {"status": "needs_planning", "tool_name": name, "duration_ms": 0}
+            )
+        return rejected
+    if (
+        name == "dispatch_tool"
+        and arguments.get("target_platform")
+        and not state.get("shopping_intent")
+        and not arguments.get("shopping_intent")
+    ):
+        payload = {
+            "status": "needs_planning",
+            "message": "商品检索分支必须继承 planner 已验证的结构化购物意图。",
+        }
+        return ToolMessage(
+            content=_json(payload), name=name, tool_call_id=call_id, status="error"
+        )
     decision_phase = state.get("decision_phase")
     if decision_phase in {"think", "reflect"}:
         from app.tools import TOOL_PHASES
@@ -225,16 +254,10 @@ def tool_records(messages: Sequence[BaseMessage]) -> list[dict[str, str]]:
                     call.get("args") if isinstance(call.get("args"), dict) else {},
                 )
         elif isinstance(message, ToolMessage):
-            name, arguments = calls.get(
-                str(message.tool_call_id), (str(message.name or ""), {})
-            )
-            signature = hashlib.sha256(
-                f"{name}:{_json(arguments)}".encode()
-            ).hexdigest()
+            name, arguments = calls.get(str(message.tool_call_id), (str(message.name or ""), {}))
+            signature = hashlib.sha256(f"{name}:{_json(arguments)}".encode()).hexdigest()
             digest = hashlib.sha256(str(message.content).encode("utf-8")).hexdigest()
-            records.append(
-                {"tool_name": name, "signature": signature, "result_digest": digest}
-            )
+            records.append({"tool_name": name, "signature": signature, "result_digest": digest})
     return records
 
 
@@ -265,6 +288,7 @@ def _safe_boundary(messages: Sequence[BaseMessage], keep_recent_groups: int) -> 
     while boundary > 0 and isinstance(messages[boundary], ToolMessage):
         boundary -= 1
     return boundary
+
 
 # 先粗略估算token数，超过12000token才压缩，
 def cache_breakpoint_update(messages: Sequence[BaseMessage]) -> list[BaseMessage] | None:

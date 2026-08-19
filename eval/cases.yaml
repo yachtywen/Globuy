@@ -1,0 +1,423 @@
+schema_version: "1.0"
+
+cases:
+  - id: offline-single-platform-budget
+    description: 单平台预算过滤、确定性排序与商品事实追溯
+    suite: offline
+    turns:
+      - query: 帮我找一条 500 元以内的牛仔裤
+    rubric:
+      p0:
+        - id: off_single_terminal
+          description: 任务成功形成完整终态
+          judge: deterministic
+          assertion: {type: terminal_status, value: [complete]}
+        - id: off_single_facts
+          description: 商品字段与固定事实一致
+          judge: deterministic
+          assertion: {type: facts_match_catalog}
+      p1:
+        - id: off_single_tools
+          description: 使用规划、检索、筛选和总结工具
+          judge: deterministic
+          assertion:
+            type: required_tools
+            value: [planner, item_search, item_picker, shopping_summary]
+        - id: off_single_budget
+          description: 所有推荐均在 500 元预算内
+          judge: deterministic
+          assertion: {type: max_price, value: 500}
+      p2:
+        - id: off_single_text
+          description: 最终回答非空
+          judge: deterministic
+          assertion: {type: final_text_nonempty}
+    fixture:
+      execution_status: succeeded
+      terminal_status: complete
+      duration_ms: 120
+      transcript: "[用户] 帮我找一条 500 元以内的牛仔裤\n[Globuy] 推荐淘宝基础款牛仔裤，价格 465 元。"
+      result:
+        status: complete
+        final_text: "推荐[淘宝基础款牛仔裤](https://example.invalid/jeans-taobao)，价格 465 元。"
+        picks:
+          - item_id: jeans-001
+            product_id: product-jeans
+            offer_id: offer-jeans-taobao
+            platform: taobao
+            title: 淘宝基础款牛仔裤
+            price: 465
+            currency: CNY
+            product_url: https://example.invalid/jeans-taobao
+      catalog:
+        - item_id: jeans-001
+          product_id: product-jeans
+          offer_id: offer-jeans-taobao
+          platform: taobao
+          title: 淘宝基础款牛仔裤
+          price: 465
+          currency: CNY
+          product_url: https://example.invalid/jeans-taobao
+      events:
+        - {event: RUN_STARTED, run_id: run-1, sequence: 1, data: {}}
+        - {event: TOOL_CALL_START, run_id: run-1, sequence: 2, data: {tool_name: planner}}
+        - {event: TOOL_CALL_START, run_id: run-1, sequence: 3, data: {tool_name: item_search}}
+        - {event: TOOL_CALL_START, run_id: run-1, sequence: 4, data: {tool_name: item_picker}}
+        - {event: TOOL_CALL_START, run_id: run-1, sequence: 5, data: {tool_name: shopping_summary}}
+        - {event: RUN_FINISHED, run_id: run-1, sequence: 6, data: {}}
+
+  - id: offline-multiplatform-fork
+    description: 多平台同质 fork 回流并只发布一个终态
+    suite: offline
+    turns:
+      - query: 对比淘宝、京东和抖音的同类耳机
+    rubric:
+      p0:
+        - id: off_fork_terminal
+          description: 每个 run 只有一个终态事件
+          judge: deterministic
+          assertion: {type: terminal_event_once}
+        - id: off_fork_facts
+          description: 跨平台商品均可追溯
+          judge: deterministic
+          assertion: {type: facts_match_catalog}
+      p1:
+        - id: off_fork_dispatch
+          description: 使用 dispatch_tool 和筛选工具
+          judge: deterministic
+          assertion: {type: required_tools, value: [dispatch_tool, item_picker]}
+        - id: off_fork_platforms
+          description: 至少覆盖三个平台
+          judge: deterministic
+          assertion: {type: platform_count, value: 3}
+      p2:
+        - id: off_fork_text
+          description: 输出明确的对比结论
+          judge: deterministic
+          assertion: {type: contains_text, value: [三平台]}
+    fixture:
+      execution_status: succeeded
+      terminal_status: complete
+      result:
+        status: complete
+        final_text: 三平台候选已完成对比。
+        picks:
+          - {item_id: h-1, offer_id: o-1, platform: taobao, title: 淘宝耳机, price: 199, currency: CNY, product_url: "https://example.invalid/h-1"}
+          - {item_id: h-2, offer_id: o-2, platform: jingdong, title: 京东耳机, price: 219, currency: CNY, product_url: "https://example.invalid/h-2"}
+          - {item_id: h-3, offer_id: o-3, platform: douyin, title: 抖音耳机, price: 189, currency: CNY, product_url: "https://example.invalid/h-3"}
+      catalog:
+        - {item_id: h-1, offer_id: o-1, platform: taobao, title: 淘宝耳机, price: 199, currency: CNY, product_url: "https://example.invalid/h-1"}
+        - {item_id: h-2, offer_id: o-2, platform: jingdong, title: 京东耳机, price: 219, currency: CNY, product_url: "https://example.invalid/h-2"}
+        - {item_id: h-3, offer_id: o-3, platform: douyin, title: 抖音耳机, price: 189, currency: CNY, product_url: "https://example.invalid/h-3"}
+      transcript: "[用户] 对比淘宝、京东和抖音的同类耳机\n[Globuy] 三平台候选已完成对比。"
+      events:
+        - {event: TOOL_CALL_START, run_id: run-2, sequence: 1, data: {tool_name: dispatch_tool}}
+        - {event: TOOL_CALL_START, run_id: run-2, sequence: 2, data: {tool_name: item_picker}}
+        - {event: RUN_FINISHED, run_id: run-2, sequence: 3, data: {}}
+
+  - id: offline-partial-honesty
+    description: Provider 部分失败时不伪造缺失平台商品
+    suite: offline
+    turns:
+      - query: 三个平台都帮我搜一下机械键盘
+    rubric:
+      p0:
+        - id: off_partial_empty
+          description: 无有效候选时不生成结构化商品
+          judge: deterministic
+          assertion: {type: picks_empty, value: true}
+        - id: off_partial_terminal
+          description: 结果明确标记不完整
+          judge: deterministic
+          assertion: {type: terminal_status, value: [incomplete, not_configured]}
+      p1:
+        - id: off_partial_message
+          description: 明确说明只得到部分结果
+          judge: deterministic
+          assertion: {type: contains_text, value: [部分平台暂不可用]}
+      p2:
+        - id: off_partial_next
+          description: 给出可执行的稍后重试建议
+          judge: deterministic
+          assertion: {type: contains_text, value: [稍后重试]}
+    fixture:
+      execution_status: succeeded
+      terminal_status: incomplete
+      result:
+        status: incomplete
+        final_text: 部分平台暂不可用，当前没有足够候选，请稍后重试。
+        picks: []
+      transcript: "[用户] 三个平台都帮我搜一下机械键盘\n[Globuy] 部分平台暂不可用，当前没有足够候选，请稍后重试。"
+      events:
+        - {event: TOOL_CALL_START, run_id: run-3, sequence: 1, data: {tool_name: item_search}}
+        - {event: TOOL_CALL_END, run_id: run-3, sequence: 2, data: {status: partial}}
+        - {event: RUN_FINISHED, run_id: run-3, sequence: 3, data: {}}
+
+  - id: offline-phase-gate
+    description: 阶段非法工具调用被门禁拒绝
+    suite: offline
+    turns:
+      - query: 在 Think 阶段直接总结
+    rubric:
+      p0:
+        - id: off_gate_empty
+          description: 被拒绝的调用不得生成商品
+          judge: deterministic
+          assertion: {type: picks_empty, value: true}
+      p1:
+        - id: off_gate_status
+          description: 返回 phase_rejected 状态
+          judge: deterministic
+          assertion: {type: contains_text, value: [phase_rejected]}
+      p2:
+        - id: off_gate_text
+          description: 错误说明非空
+          judge: deterministic
+          assertion: {type: final_text_nonempty}
+    fixture:
+      execution_status: succeeded
+      terminal_status: incomplete
+      result: {status: incomplete, final_text: "phase_rejected：shopping_summary 不允许在 think 阶段执行。", picks: []}
+      transcript: "[系统夹具] phase_rejected"
+      events:
+        - {event: TOOL_CALL_START, run_id: run-4, sequence: 1, data: {tool_name: shopping_summary}}
+        - {event: TOOL_CALL_END, run_id: run-4, sequence: 2, data: {status: phase_rejected}}
+        - {event: RUN_FINISHED, run_id: run-4, sequence: 3, data: {}}
+
+  - id: offline-decision-budget
+    description: 决策预算耗尽后确定性筛选并收尾
+    suite: offline
+    turns:
+      - query: 在已有候选中直接给结论
+    rubric:
+      p0:
+        - id: off_budget_terminal
+          description: 预算耗尽仍形成完整结果
+          judge: deterministic
+          assertion: {type: terminal_status, value: [complete]}
+        - id: off_budget_facts
+          description: 收尾商品事实一致
+          judge: deterministic
+          assertion: {type: facts_match_catalog}
+      p1:
+        - id: off_budget_tools
+          description: 使用确定性筛选与总结
+          judge: deterministic
+          assertion: {type: required_tools, value: [item_picker, shopping_summary]}
+      p2:
+        - id: off_budget_no_retry
+          description: 不把内部重试文本作为最终回答
+          judge: deterministic
+          assertion: {type: forbids_text, value: [我再重试一次]}
+    fixture:
+      execution_status: succeeded
+      terminal_status: complete
+      result:
+        status: complete
+        final_text: 已从现有候选中选出确定性结果。
+        picks:
+          - {item_id: d-1, offer_id: od-1, platform: jingdong, title: 确定性候选, price: 299, currency: CNY, product_url: "https://example.invalid/d-1"}
+      catalog:
+        - {item_id: d-1, offer_id: od-1, platform: jingdong, title: 确定性候选, price: 299, currency: CNY, product_url: "https://example.invalid/d-1"}
+      transcript: "[用户] 在已有候选中直接给结论\n[Globuy] 已从现有候选中选出确定性结果。"
+      events:
+        - {event: TOOL_CALL_START, run_id: run-5, sequence: 1, data: {tool_name: item_picker}}
+        - {event: TOOL_CALL_START, run_id: run-5, sequence: 2, data: {tool_name: shopping_summary}}
+        - {event: RUN_FINISHED, run_id: run-5, sequence: 3, data: {}}
+
+  - id: offline-cancellation-events
+    description: 取消传播与终态事件互斥
+    suite: offline
+    turns:
+      - query: 取消当前任务
+    rubric:
+      p0:
+        - id: off_cancel_terminal
+          description: 只发布一个取消终态
+          judge: deterministic
+          assertion: {type: terminal_event_once}
+        - id: off_cancel_empty
+          description: 取消后不生成商品
+          judge: deterministic
+          assertion: {type: picks_empty, value: true}
+      p1:
+        - id: off_cancel_status
+          description: 终态为 cancelled
+          judge: deterministic
+          assertion: {type: terminal_status, value: [cancelled]}
+      p2:
+        - id: off_cancel_message
+          description: 用户可见取消说明清晰
+          judge: deterministic
+          assertion: {type: contains_text, value: [任务已取消]}
+    fixture:
+      execution_status: cancelled
+      terminal_status: cancelled
+      result: {status: cancelled, final_text: 任务已取消。, picks: []}
+      transcript: "[用户] 取消当前任务\n[Globuy] 任务已取消。"
+      events:
+        - {event: RUN_STARTED, run_id: run-6, sequence: 1, data: {}}
+        - {event: TASK_CANCELLED, run_id: run-6, sequence: 2, data: {}}
+
+  - id: live-budget-recommendation
+    description: 预算明确的真实商品推荐及来源一致性
+    suite: live
+    requirements: {model: true, item_index: true}
+    turns:
+      - query: 我想买一条 500 元以内的牛仔裤，请给我最多三项可核验的推荐。
+    rubric:
+      p0:
+        - {id: live_budget_terminal, description: 任务形成完整终态, judge: deterministic, assertion: {type: terminal_status, value: [complete]}}
+        - {id: live_budget_facts, description: 推荐商品字段与 MySQL 事实一致, judge: deterministic, assertion: {type: facts_match_catalog}}
+        - {id: live_budget_limit, description: 推荐价格不超过 500 元, judge: deterministic, assertion: {type: max_price, value: 500}}
+        - {id: live_budget_url, description: 回答链接均有事实来源, judge: deterministic, assertion: {type: urls_are_grounded}}
+      p1:
+        - {id: live_budget_fit, description: 推荐理由回应了牛仔裤和预算需求, judge: llm}
+        - {id: live_budget_trace, description: 使用规划、检索、筛选和总结链路, judge: deterministic, assertion: {type: required_tools, value: [planner, item_search, item_picker, shopping_summary]}}
+      p2:
+        - {id: live_budget_clarity, description: 回答清晰并便于比较, judge: llm}
+
+  - id: live-multiplatform-compare
+    description: 多平台搜索并给出明确比较
+    suite: live
+    requirements: {model: true, item_index: true}
+    turns:
+      - query: 帮我跨淘宝、京东和抖音比较 800 元以内的降噪耳机。
+    rubric:
+      p0:
+        - {id: live_compare_terminal, description: 任务成功完成, judge: deterministic, assertion: {type: terminal_status, value: [complete]}}
+        - {id: live_compare_facts, description: 结构化商品均可追溯, judge: deterministic, assertion: {type: facts_match_catalog}}
+        - {id: live_compare_budget, description: 商品均不超过 800 元, judge: deterministic, assertion: {type: max_price, value: 800}}
+      p1:
+        - {id: live_compare_behavior, description: 回答进行了跨平台比较并说明差异, judge: llm}
+        - {id: live_compare_dispatch, description: 运行轨迹使用了跨平台 dispatch, judge: deterministic, assertion: {type: required_tools, value: [dispatch_tool, item_picker]}}
+      p2:
+        - {id: live_compare_clarity, description: 比较结论明确且不堆砌信息, judge: llm}
+
+  - id: live-no-fabrication
+    description: 无可靠候选时不编造商品
+    suite: live
+    requirements: {model: true, item_index: true}
+    turns:
+      - query: 帮我找一台量子隐形 16K 无人机，预算 1 元，只接受完全匹配。
+    rubric:
+      p0:
+        - {id: live_none_empty, description: 不生成结构化商品, judge: deterministic, assertion: {type: picks_empty, value: true}}
+        - {id: live_none_terminal, description: 任务安全结束, judge: deterministic, assertion: {type: terminal_status, value: [complete, incomplete, not_configured]}}
+      p1:
+        - {id: live_none_honesty, description: 如实说明没有可靠匹配而非虚构商品, judge: llm}
+      p2:
+        - {id: live_none_next, description: 给出合理的放宽条件建议, judge: llm}
+
+  - id: live-category-only
+    description: 只咨询品类知识时不擅自推荐商品
+    suite: live
+    requirements: {model: true, category_index: true}
+    turns:
+      - query: 第一次买降噪耳机，应该看哪些参数？先不要推荐具体商品。
+    rubric:
+      p0:
+        - {id: live_category_empty, description: 不生成结构化商品推荐, judge: deterministic, assertion: {type: picks_empty, value: true}}
+        - {id: live_category_no_search, description: 不调用商品检索工具, judge: deterministic, assertion: {type: forbidden_tools, value: [item_search, item_picker, shopping_summary]}}
+      p1:
+        - {id: live_category_advice, description: 回答覆盖降噪、佩戴或续航等选购维度, judge: llm}
+      p2:
+        - {id: live_category_risk, description: 至少给出一个避坑或核验建议, judge: llm}
+
+  - id: live-chitchat-boundary
+    description: 闲聊不触发购物检索
+    suite: live
+    requirements: {model: true}
+    turns:
+      - query: 你好呀，你是谁？
+    rubric:
+      p0:
+        - {id: live_chat_no_products, description: 不生成商品, judge: deterministic, assertion: {type: picks_empty, value: true}}
+        - {id: live_chat_no_tools, description: 不调用商品和费用工具, judge: deterministic, assertion: {type: forbidden_tools, value: [item_search, item_picker, price_compare, shipping_calc, shopping_summary]}}
+      p1:
+        - {id: live_chat_identity, description: 自我介绍为购物助手并说明能力边界, judge: llm}
+      p2:
+        - {id: live_chat_tone, description: 回复简短友好, judge: llm}
+
+  - id: live-constraint-reset
+    description: 多轮切换品类后不错误继承旧预算
+    suite: live
+    requirements: {model: true, item_index: true}
+    turns:
+      - query: 先帮我找 300 元以内的耳机。
+      - query: 现在换个话题，帮我看看高端机械键盘，不沿用刚才的预算。
+    rubric:
+      p0:
+        - {id: live_reset_terminal, description: 两轮均有且仅有一个终态事件, judge: deterministic, assertion: {type: terminal_event_once}}
+        - {id: live_reset_facts, description: 最后一轮商品事实一致, judge: deterministic, assertion: {type: facts_match_catalog}}
+      p1:
+        - {id: live_reset_behavior, description: 第二轮没有继续套用 300 元预算, judge: llm}
+      p2:
+        - {id: live_reset_explain, description: 回答自然地体现品类与约束已切换, judge: llm}
+
+  - id: live-memory-recall
+    description: 独立预置的长期偏好在新会话中生效
+    suite: live
+    requirements: {model: true, item_index: true}
+    setup_memories:
+      - {category: preference, key: no_in_ear, content: 不要入耳式耳机，只考虑头戴式, confidence: 1.0}
+    prior_context: 评测前已通过正式记忆 API 写入“不要入耳式耳机，只考虑头戴式”。
+    turns:
+      - query: 给我推荐一款通勤用耳机。
+    rubric:
+      p0:
+        - {id: live_memory_terminal, description: 任务成功结束, judge: deterministic, assertion: {type: terminal_status, value: [complete, incomplete]}}
+        - {id: live_memory_facts, description: 若有推荐则商品事实一致, judge: deterministic, assertion: {type: facts_match_catalog}}
+      p1:
+        - {id: live_memory_apply, description: 主动应用了只考虑头戴式的已知偏好, judge: llm}
+      p2:
+        - {id: live_memory_explain, description: 向用户说明推荐与其偏好的关系, judge: llm}
+
+  - id: live-not-configured-honesty
+    description: 外部实时事实能力未配置时诚实降级
+    suite: live
+    requirements: {model: true}
+    turns:
+      - query: 请查询今天刚发布的全球耳机新闻和实时价格，不要使用已有商品快照。
+    rubric:
+      p0:
+        - {id: live_nc_empty, description: 不把快照商品冒充实时结果, judge: deterministic, assertion: {type: picks_empty, value: true}}
+        - {id: live_nc_urls, description: 不输出无事实支持的链接, judge: deterministic, assertion: {type: urls_are_grounded}}
+      p1:
+        - {id: live_nc_honesty, description: 明确说明实时能力不可用或未配置, judge: llm}
+      p2:
+        - {id: live_nc_next, description: 给出稍后重试或提供来源的可执行建议, judge: llm}
+
+  - id: live-long-context
+    description: 长上下文后仍能回忆最初商品事实
+    suite: live
+    requirements: {model: true, item_index: true}
+    turns:
+      - query: 帮我找一款 500 元以内的牛仔裤。
+      - query: 说说选择牛仔裤版型时要注意什么。
+      - query: 再简单介绍一下耳机的降噪类型。
+      - query: 回到第一轮：你最先推荐的牛仔裤叫什么、多少钱？一句话回答。
+    rubric:
+      p0:
+        - {id: live_context_terminal, description: 每轮只有一个终态事件, judge: deterministic, assertion: {type: terminal_event_once}}
+        - {id: live_context_text, description: 最终回答非空, judge: deterministic, assertion: {type: final_text_nonempty}}
+      p1:
+        - {id: live_context_recall, description: 最后一轮准确回忆第一轮商品名称和价格, judge: llm}
+      p2:
+        - {id: live_context_short, description: 最后一轮接近一句话且直接回答, judge: llm}
+
+  - id: live-loop-termination
+    description: 复杂但明确的请求在决策预算内形成有效终态
+    suite: live
+    requirements: {model: true, item_index: true}
+    turns:
+      - query: 在 600 元内从三个平台找牛仔裤，比较后直接给最多三项，不要反复向我确认。
+    rubric:
+      p0:
+        - {id: live_loop_terminal, description: 形成唯一终态, judge: deterministic, assertion: {type: terminal_event_once}}
+        - {id: live_loop_status, description: 未因循环进入错误终态, judge: deterministic, assertion: {type: terminal_status, value: [complete, incomplete]}}
+        - {id: live_loop_retry, description: 不暴露内部重试过程, judge: deterministic, assertion: {type: forbids_text, value: [我再重试一次, recursion, 递归上限]}}
+      p1:
+        - {id: live_loop_answer, description: 请求信息充分时直接比较并收敛, judge: llm}
+      p2:
+        - {id: live_loop_clarity, description: 最终回答结构清楚且无内部过程噪声, judge: llm}

@@ -53,9 +53,13 @@ class Candidate(BaseModel):
 class ItemSearchOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["ok", "not_configured", "error"]
+    status: Literal["ok", "partial", "not_configured", "error", "cancelled"]
     platform: Platform
     candidates: list[Candidate] = Field(default_factory=list)
     total_recall: int = Field(default=0, ge=0)
     truncated: bool = False
     message: str | None = None
+    catalog_status: Literal["fresh", "hydrated", "partial", "stale"] | None = None
+    catalog_candidate_count: int = Field(default=0, ge=0)
+    captured_at: str | None = None
+    provider_status: str | None = None

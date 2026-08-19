@@ -1,5 +1,105 @@
 # globuy 项目状态
 
+## 2026-08-19：完成双层评测系统首版
+
+- 新增严格 YAML case 契约和首批 6 个离线契约 case、10 个真实质量 case；离线层使用合成事实与
+  模拟 AG-UI 事件，默认不访问模型、Provider、数据库或向量服务，真实层复用正式登录、CSRF、
+  HTTP 202、任务轮询、WebSocket replay、长期记忆 API 与 MySQL Product/Offer 事实。
+- P0 事实/安全改为确定性硬门禁，覆盖终态互斥、工具轨迹、预算、结构化商品、价格、平台和来源；
+  P1/P2 可由独立 `GLOBUY_EVAL_JUDGE_*` 模型严格 JSON 判断，Judge 不得覆盖 P0 失败，也不隐式
+  复用主模型配置。评分固定为 P0/P1/P2 = 0.50/0.35/0.15，P0 全过且总分至少 0.70 才 PASS。
+- 新增 CLI、manifest/events/case-results/Markdown 报告和 0.90 高分脱敏轨迹；轨迹只接受合成或
+  专用评测账号数据并标记 `training_use=false`。`/healthz` 增加无秘密的 Provider/WebSearch/缓存
+  能力标志，真实脚本默认拒绝未明确授权的外部调用。
+- 验证：默认 offline CLI 的 6/6 case PASS、均分 1.000；新增评测测试 8 项通过，覆盖 Schema、
+  篡改事实硬失败、Judge 缺失 PARTIAL、429 重试、criterion 完整性、脱敏高分轨迹和健康预检。
+  除仓库既有缺失 `datasets.onebound_headphones` 模块的单个测试文件外，后端 151 项测试全部通过；
+  本次相关 Ruff 与 compileall 通过。全仓 Ruff 仍只有用户既有 `tests/test_catalog_images.py` import
+  顺序问题。测试使用仓库内独立 `--basetemp`；未调用真实 DeepSeek、Judge、Tavily、Just One 或
+  OpenSearch。live 的 10 个质量 case 已定义但本轮未执行，仍需专用账号和显式费用授权。
+
+## 2026-08-19：修复 Just One 标准化、目录读回与 Agent 确定性收尾
+
+- Just One 适配器已按已核验的淘宝、京东、抖音响应结构分别读取商品列表、分页、抖音
+  `searchId`、商品身份、标题、元价格、图片、落地链接、销量、评分和店铺属性；首个抖音请求不再发送
+  `page`，后续页延续 `searchId`。请求语义/标准化版本升级为 `provider-request-v3`，旧账本继续保留审计。
+- 修复目录写入和读回的三个边界：Provider 页内重复身份会在 MySQL 事务前稳定去重，持久化异常会把请求记为
+  `persistence_error` 而不是永久停在 `reserved`；单平台 ItemSearch 只补充自身平台，避免多个并发工具重复补充
+  同一组范围；OpenSearch 内部投影字段在构造严格 Candidate 前被过滤，不再触发 `extra_forbidden`。
+- Agent 增加早于 LangGraph recursion limit 的决策预算。达到预算或检测到循环时，根 Agent 从已验证的
+  ItemSearch 结果确定性调用 ItemPicker，再调用 ShoppingSummary；没有有效候选时才走 ChatFallback，不再把
+  “我再重试一次”之类的内部过程文本当作最终答案。品类和预算已明确时先做宽泛检索，性别、版型、颜色、品牌
+  仅作为后续可选细化条件。
+- 修复浏览器流式任务偶发保存子 Agent 过程文字的问题：手动派生的 fork 也可能产生无 `parent_ids` 的
+  `on_chain_end`，API 过去会把并发事件中最后出现的此类输出误认作主图终态。`AgentLoop.astream()` 现在在正常
+  完成后从当前主图、当前 `thread_id` 的检查点发布唯一 `globuy_final_state`；RunRegistry 将其视为权威终态，
+  后到的普通 chain/fork 事件也不能覆盖。
+- 真实用例“我想买一条500元左右的牛仔裤”已通过完整 DeepSeek、Just One、MySQL、Outbox、BGE-M3、
+  OpenSearch 与 ShoppingSummary 链路：目录现有 169 条标题匹配的活动商品（淘宝 86、抖音 83），最终返回
+  499、465、510 元三项带来源链接的清单；最终验收 run 55 秒进入 `done`，Provider 请求账本 28→28，缓存命中
+  未新增调用。京东本轮外部接口返回 `provider_error/unknown`，按 partial 隔离，不影响淘宝/抖音结果。
+- 离线验证：除仓库既有缺失 `datasets.onebound_headphones` 模块的单个测试文件外，后端 143 项测试全部通过；
+  相关修改 Ruff 通过，`compileall app` 通过。全仓 Ruff 仍报告用户既有文件
+  `tests/test_catalog_images.py` 的一处 import 顺序问题，本轮未改动该无关文件。
+- 流式终态修复后又完成一次真实 HTTP API 验收：注册隔离 QA 用户、创建会话、提交同一牛仔裤任务、轮询任务接口，
+  53.2 秒后 `succeeded`，`RUN_FINISHED` sequence 为 196，结果包含抖音 499 元、京东 449 元、淘宝 465 元
+  三项真实来源商品；QA 用户及其级联会话数据已在验收后删除。
+
+## 2026-08-19：修复 DeepSeek 多轮工具调用的 reasoning_content 400
+
+- 真实前端任务在 Planner 成功后第二次进入 Think 时失败；后端堆栈确认官方 DeepSeek 端点返回
+  `The reasoning_content in the thinking mode must be passed back to the API`。数据库、OpenSearch、Redis、
+  BGE-M3 加载和 Planner 本身均不是根因。
+- `build_chat_model()` 现在只对 `api.deepseek.com` 及其子域统一注入
+  `thinking={type: disabled}`，覆盖主 Agent 的 Think/Reflect 与同质 fork，避免 LangGraph 历史中的
+  assistant/tool 消息无法完整往返厂商专用 `reasoning_content` 时在后续轮次触发 HTTP 400；其他
+  OpenAI 兼容端点保持原有默认参数。ShoppingSummary 原有的非思考结构化调用保护继续保留。
+- 新增 DeepSeek 主模型关闭思考和非 DeepSeek 端点不改写参数的离线回归测试。验证：
+  `tests/test_framework.py + tests/test_completion_loop.py` 共 26 项通过，Ruff 与 compileall 通过；
+  未调用真实 DeepSeek、Tavily 或商品 Provider。首次 pytest 受宿主历史临时目录 ACL 影响，随后使用
+  仓库内全新 `--basetemp` 完整通过。
+
+## 2026-08-19：完成全品类按需商品搜索 A～F 离线实现
+
+- 新增严格 `ShoppingIntent`、目录范围/请求指纹、60/100/120 停止策略、三平台通用标准化器与异步 Just One
+  Provider 协议。Provider 默认仍为 `none`；认证、额度、权限与未知网络结果不会自动重复付费，阶段 G 未执行。
+- 新增显式 Alembic 增量迁移：扩展 Product/Offer/SourceSnapshot/Outbox，并加入
+  `catalog_scopes`、`catalog_scope_offers`、`catalog_hydration_runs` 和 `provider_request_ledger`。单页采集在同一
+  MySQL 事务内写快照、Product、Offer、Observation、范围成员和 Offer 级 Outbox。
+- ItemSearch 三个平台 fork 共享同一个补库协调任务；跨平台并行、平台内分页串行，抖音延续 `searchId`。协调器
+  同时使用进程内 singleflight、MySQL 范围租约、请求账本和订阅者引用计数；最后一个订阅者退出才取消公共任务。
+  有效 Offer 以稳定身份去重，并在持久化前严格截断到 120 条硬上限。
+- 商品投影升级为 `globuy-products-v2-*`：OpenSearch `_id` 使用稳定 `offer_id`，映射加入品类、新鲜度、活动态和
+  两类哈希；Outbox 按 Offer 合并、批量读取 MySQL、仅语义变化时批量编码、标量 update 保留向量、相同投影 no-op、
+  失效 Offer delete，并逐项确认 Bulk 结果。检索保持 BM25 + BGE-M3 + Lucene HNSW/COSINE + 无权重 RRF。
+- 新增范围 TTL/Offer 失效、索引统计与蓝绿重建 CLI；重建从 MySQL 活动 Offer 建 v2 物理索引、追平起始位点后的
+  Outbox、校验计数/平台聚合并原子切换别名，不对活动索引执行 force merge。
+- Agent 状态和工具门禁接入结构化意图，目录事件仅发布白名单字段；前端 reducer 按 sequence 幂等合并平台快照，
+  在意图、缓存、采集、标准化、持久化、索引和检索阶段展示临时中文状态，终态/取消/错误/新 run/切换会话时清理，
+  且不把目录事件写入 assistant 消息。
+- 无付费验证：Alembic MySQL 离线升级 SQL、Ruff、compileall、后端除仓库既有缺失
+  `datasets.onebound_headphones` 模块外的 132 项测试、前端 15 项 Vitest、TypeScript 与 Vite 生产构建均通过。
+  本机 `127.0.0.1:3307` 未运行 MySQL，因此在线 `alembic upgrade head` 未执行；迁移仍需在可用 MySQL 上复验空库、
+  现有库和重复升级。未调用真实商品 Provider、DeepSeek 或 BGE-M3。真实 Provider 价格、授权和限额验收仍属于
+  单独授权的阶段 G。
+
+## 2026-08-19：补强按需商品搜索的 OpenSearch 增量与生命周期设计
+
+- 修订 `docs/商品搜索链路逻辑更新的具体实现方案.md`，明确现有物理索引支持按稳定 `offer_id`
+  增量新增、替换和单文档删除；Lucene/HNSW 删除先使用 live-docs 逻辑标记，后台 segment merge
+  回收，不会因删除部分商品而剪断图结构。大量更新/删除的治理对象是 tombstone 带来的磁盘、遍历和
+  延迟成本，而不是禁止增量删除。
+- OpenSearch 继续作为固定的 BM25 + BGE-M3 + Lucene HNSW/COSINE + 无权重 RRF 当前检索投影，
+  MySQL 继续保存 Product/Offer 事实以及 Observation/Snapshot 历史。方案新增 Offer 失效 Outbox 删除、
+  deleted-doc/磁盘/segment/Outbox lag/检索 P95 监控，以及从 MySQL 活动 Offer 重建、追平 Outbox、
+  验收和原子别名切换的蓝绿生命周期；活动写索引不执行 force merge。
+- 将长期 `CatalogScope` 与短生命周期 Provider 请求指纹拆开，范围成员改为 MySQL 中带 TTL 的
+  `CatalogScopeOffer`，不再向商品文档写入无界 `scope_ids`。Outbox 目标改为按 Offer 合并事件、批量
+  读取、批量 Embedding、单批 Bulk、逐项确认和一次 refresh；新增 `projection_hash` 跳过真正的 no-op，
+  并明确 `semantic_hash` 只能节省向量计算、不能消除 Lucene 写放大。
+- 本轮仅更新目标设计与实施/测试/验收条目，尚未修改运行代码、数据库迁移、OpenSearch Mapping、
+  Worker 或前端，也未调用真实商品 Provider 或付费模型。
+
 ## 2026-07-22：固化全品类按需商品搜索与 AG-UI 进度目标方案
 
 - 新增 `docs/商品搜索链路逻辑更新的具体实现方案.md`，将当前“主要检索耳机离线快照”的链路扩展为目标设计：Think/Planner 先形成结构化商品品类和搜索意图，ItemSearch 内部检查公共目录覆盖，不足时通过通用 Provider 适配层按需补充淘宝、京东和抖音候选，再经 MySQL、事务 Outbox、批量 Embedding 和 OpenSearch 执行现有 BM25 + BGE-M3 + 无权重 RRF 混合检索。
@@ -22,7 +122,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-07-22
+> 最后更新时间：2026-08-19
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件
@@ -158,7 +258,7 @@ Agent 的 `tool_set/system_prompt`：
 | Recall | User/Query/Item 演示编码与融合排序；Faiss HNSW/IP 索引支持新增、检索、保存和加载 | 否 |
 | Memory | MySQL 为权威库，提供用户级 CRUD、版本历史与事务 Outbox；LangGraph BaseStore 使用独立 OpenSearch 记忆索引检索，并在运行前注入相关条目 | 是（读取）；写入只接受用户确认后的 API 操作 |
 | Compress | Cache Breakpoint 已在 Observe 后进入主图，保留最近 3 个完整工具调用组 | 是 |
-| Eval | 动态 Rubric、确定性 Judge、JSONL TraceLogger | 否 |
+| Eval | YAML 双层 case、P0 确定性硬门禁、可选独立 LLM Judge、正式 HTTP/WS live runner、JSON/Markdown 报告和高分脱敏轨迹 | 离线契约已可运行；真实质量层需显式授权独立执行，不在主 AgentLoop 内自动触发 |
 | Frontend | React + TypeScript + Vite；注册登录门禁、`/assistant/:thread_id` 恢复、三栏工作台、HTTP 202 创建任务、只订阅 WS、游标重放、只读归档、默认心愿库、价格变化和长期记忆管理 | 是 |
 | OpenSearch / Redis | OpenSearch 3.7.0 分别承载商品、品类和长期记忆索引；Redis 7 承担 CategoryInsight 缓存与登录失败限流 | ItemSearch、CategoryInsight 和 Memory 检索已接入；MySQL 仍是业务权威库 |
 
@@ -488,7 +588,8 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 
 1. 对已接入的 LangGraph BaseStore + 独立 OpenSearch 记忆索引补充真实 OpenSearch 故障补偿、
    用户确认偏好和恢复演练。
-2. 在最终回答后接入 Eval 和高分轨迹采集。
+2. 为现有双层 Eval 补充隔离环境的冷缓存、Provider 故障注入和真实质量基线；保持评测轨迹不进入
+   自动训练或学习排序闭环。
 
 ## 10. 已确认设计决策
 
@@ -509,6 +610,26 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-08-19：完成 Globuy 双层评测系统首版。默认 offline CLI 运行严格 YAML 合成 case，live
+  CLI 复用正式认证、异步任务、WebSocket replay、记忆 CRUD 和 MySQL 商品事实；P0 由代码硬判，
+  P1/P2 可交给独立 Judge。新增分层报告、环境指纹、外部调用预检和高分脱敏轨迹，6 个离线 case
+  与 8 项新增测试通过；除既有缺失数据集模块的单个测试文件外，后端 151 项测试通过，未执行任何
+  真实付费调用；10 个 live case 留待专用账号与授权验收。
+
+- 2026-08-19：完成 Just One 三平台响应标准化与真实牛仔裤端到端验收；修复页内重复入库、单平台补库
+  并发边界、OpenSearch 内部字段泄漏到严格 Candidate、Agent 递归循环和品类/预算已明确时的过度澄清。
+  最终真实 run 返回 3 项带来源商品，缓存复测未新增 Provider 请求；并修复浏览器流式 API 将 fork 的
+  `on_chain_end` 误作主图终态的问题，真实 HTTP 任务再次返回抖音、京东、淘宝三平台清单。
+
+- 2026-08-19：修复官方 DeepSeek 思考模式在 Planner 后再次进入 Think 时要求回传
+  `reasoning_content` 而导致的 HTTP 400。主 Agent、Reflect 和 fork 共享的模型工厂现对官方 DeepSeek
+  端点统一关闭 thinking，其他兼容端点不受影响；26 项相关离线测试及静态检查通过。
+
+- 2026-08-19：补强全品类按需搜索方案的索引生命周期：明确 OpenSearch 支持稳定 ID 增量
+  index/update/delete，Lucene/HNSW 部分删除通过 live-docs 与 segment merge 处理；引入活动 Offer
+  当前投影、TTL 范围成员、`projection_hash` no-op、Outbox 真批量、deleted-doc/容量监控和带 Outbox
+  追平的蓝绿重建。保持 OpenSearch 固定选型与现有混合检索契约不变；本次只有文档设计变更。
 
 - 2026-07-22：新增 `docs/商品搜索链路逻辑更新的具体实现方案.md`，固化“先识别品类、缓存优先、
   三平台按需补充60～100条且最多120条、MySQL→Outbox→OpenSearch、语义哈希复用向量、全链路

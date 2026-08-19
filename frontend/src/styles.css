@@ -303,6 +303,22 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px sol
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
+.catalog-progress {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line, #d8d1bf);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 55%);
+}
+
+.catalog-progress > span,
+.catalog-progress small { color: var(--muted, #6d685d); }
+.catalog-progress > div { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.catalog-progress small { padding: 0.2rem 0.45rem; border-radius: 999px; background: rgb(120 105 75 / 8%); }
+.catalog-progress em { color: #8a5b2d; font-size: 0.78rem; font-style: normal; }
+
 /* Brand landing */
 .landing-page { min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 74fr) minmax(320px, 26fr); color: var(--ink); background: #fdf8ea; overflow: hidden; animation: landing-in .5s ease-out; }
 .landing-art { min-width: 0; min-height: 100dvh; position: relative; padding: 40px 52px 44px; background: #fdf8ea; overflow: hidden; }

@@ -9,13 +9,20 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
-from app.agent.main_agent import AgentLoop, _normalize_phase_tool_calls
+from app.agent.llm import build_chat_model
+from app.agent.main_agent import (
+    AgentLoop,
+    _decision_budget_exhausted,
+    _forced_termination_response,
+    _normalize_phase_tool_calls,
+)
 from app.agent.middleware import (
     cache_breakpoint_update,
     compact_tool_content,
     loop_detected,
     tool_records,
 )
+from app.api.run_registry import _accumulate_final_state
 from app.config import Settings
 from app.tools import CORE_TOOL_NAMES, TERMINAL_TOOLS, TOOL_PHASES, build_core_tools
 from app.tools.item_picker import item_picker
@@ -45,6 +52,56 @@ def test_cross_phase_tool_calls_are_removed_before_history() -> None:
 
     assert had_invalid is True
     assert [call["name"] for call in normalized.tool_calls] == ["category_insight"]
+
+
+def test_decision_budget_stops_before_graph_recursion_limit() -> None:
+    assert _decision_budget_exhausted(7, repeat_threshold=4) is False
+    assert _decision_budget_exhausted(8, repeat_threshold=4) is True
+
+
+def test_forced_termination_selects_verified_candidates_then_summarizes() -> None:
+    search = ToolMessage(
+        name="item_search",
+        tool_call_id="search-1",
+        content=json.dumps(
+            {
+                "status": "ok",
+                "platform": "taobao",
+                "candidates": [candidate("jeans", rank=1, price=499)],
+            }
+        ),
+    )
+    picker_call = _forced_termination_response(
+        {
+            "messages": [search],
+            "original_query": "买500元左右的牛仔裤",
+            "shopping_intent": {"filters": {"min_price": 350, "max_price": 550}},
+        }
+    )
+
+    assert picker_call.tool_calls[0]["name"] == "item_picker"
+    assert picker_call.tool_calls[0]["args"]["constraints"] == {
+        "min_price": 350,
+        "max_price": 550,
+    }
+
+    picked = item_picker.invoke(picker_call.tool_calls[0]["args"])
+    summary_call = _forced_termination_response(
+        {
+            "messages": [
+                ToolMessage(
+                    name="item_picker",
+                    tool_call_id="picker-1",
+                    content=json.dumps(picked),
+                )
+            ],
+            "original_query": "买500元左右的牛仔裤",
+            "learned_preferences": [],
+        }
+    )
+
+    assert summary_call.tool_calls[0]["name"] == "shopping_summary"
+    assert summary_call.tool_calls[0]["args"]["picks"][0]["item_id"] == "jeans"
 
 
 def candidate(
@@ -122,6 +179,34 @@ def test_deepseek_summary_model_disables_thinking() -> None:
         "existing": True,
         "thinking": {"type": "disabled"},
     }
+
+
+def test_deepseek_main_agent_disables_thinking_for_multiturn_tools() -> None:
+    model = build_chat_model(
+        Settings(
+            model_provider="openai-compatible",
+            llm_model="deepseek-v4-flash",
+            llm_api_key="test-key",
+            llm_base_url="https://api.deepseek.com",
+        )
+    )
+
+    assert model is not None
+    assert model.extra_body == {"thinking": {"type": "disabled"}}
+
+
+def test_non_deepseek_main_agent_keeps_provider_defaults() -> None:
+    model = build_chat_model(
+        Settings(
+            model_provider="openai-compatible",
+            llm_model="test-model",
+            llm_api_key="test-key",
+            llm_base_url="https://llm.example.com/v1",
+        )
+    )
+
+    assert model is not None
+    assert model.extra_body is None
 
 
 def test_item_picker_applies_hard_constraints_without_score() -> None:
@@ -485,3 +570,43 @@ async def test_agentloop_astream_exposes_v2_graph_events(tmp_path: Path) -> None
         event["event"] == "on_chain_end" and not event.get("parent_ids")
         for event in events
     )
+    assert events[-1]["event"] == "globuy_final_state"
+    assert events[-1]["data"]["output"]["phase"] == "done"
+
+
+def test_authoritative_stream_state_cannot_be_overwritten_by_fork_end_event() -> None:
+    state, authoritative = _accumulate_final_state(
+        None,
+        False,
+        {
+            "event": "on_chain_end",
+            "data": {"output": {"phase": "done", "original_query": "fork"}},
+        },
+    )
+    state, authoritative = _accumulate_final_state(
+        state,
+        authoritative,
+        {
+            "event": "globuy_final_state",
+            "data": {
+                "output": {
+                    "phase": "done",
+                    "original_query": "root",
+                    "terminal_result": {"status": "complete", "picks": [{"id": 1}]},
+                }
+            },
+        },
+    )
+    state, authoritative = _accumulate_final_state(
+        state,
+        authoritative,
+        {
+            "event": "on_chain_end",
+            "data": {"output": {"phase": "done", "original_query": "late-fork"}},
+        },
+    )
+
+    assert authoritative is True
+    assert state is not None
+    assert state["original_query"] == "root"
+    assert state["terminal_result"]["picks"] == [{"id": 1}]

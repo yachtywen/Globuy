@@ -16,7 +16,7 @@ import {
   UserCircle,
   X,
 } from "@phosphor-icons/react";
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { LandingPage } from "./LandingPage";
@@ -29,7 +29,7 @@ import { sanitizeShoppingMarkdown } from "./presentation";
 import brandMark from "./assets/globuy-mark.webp";
 import heroIllustration from "./assets/globuy-hero.webp";
 import { useGlobuyTask } from "./useGlobuyTask";
-import type { ChatMessage, ThreadSummary } from "./types";
+import type { CatalogProgress, ChatMessage, ThreadSummary } from "./types";
 
 const STATUS_LABELS: Record<string, string> = {
   idle: "待命",
@@ -53,6 +53,20 @@ const PHASE_LABELS: Record<string, string> = {
   reflect: "复核结果",
   summarize: "生成建议",
 };
+const PLATFORM_LABELS: Record<string, string> = {
+  taobao: "淘宝",
+  jingdong: "京东",
+  douyin: "抖音",
+};
+
+const CatalogProgressPanel = memo(function CatalogProgressPanel({ progress }: { progress: CatalogProgress }) {
+  return <div aria-live="polite" className="catalog-progress">
+    <strong>{progress.message}</strong>
+    <span>{progress.total > 0 ? `已找到 ${progress.total} 件` : "按阶段更新"}</span>
+    {Object.keys(progress.platforms).length > 0 && <div>{Object.entries(progress.platforms).map(([platform, item]) => <small key={platform}>{PLATFORM_LABELS[platform] || "商品平台"} {item.accepted}</small>)}</div>}
+    {progress.partialPlatforms.length > 0 && <em>部分平台暂不可用，继续使用已有真实结果</em>}
+  </div>;
+});
 
 const TOOL_LABELS: Record<string, string> = {
   web_search: "网络搜索",
@@ -228,6 +242,7 @@ function RuntimePanel({ state, onReconnect, onClose }: {
           <div className="live-status-block">
             <div className="live-status-row"><span className={`pulse-dot ${statusTone(state.taskStatus)}`} /><strong>{STATUS_LABELS[state.taskStatus]}</strong></div>
             {state.initializationMessage && <p aria-live="polite" className="initialization-message">{state.initializationMessage}</p>}
+            {state.catalogProgress && <CatalogProgressPanel progress={state.catalogProgress} />}
             <div className="connection-row">
               <span>{STATUS_LABELS[state.connectionStatus] || state.connectionStatus}</span>
               <span>{completedSteps} / {Math.max(state.steps.length, completedSteps)} 阶段完成</span>
