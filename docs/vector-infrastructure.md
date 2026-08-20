@@ -1,6 +1,6 @@
 # globuy 向量与检索基础设施固定选型
 
-> 决策状态：用户已于 2026-07-19 确认无训练方案，并于 2026-07-20 授权实施。
+> 决策状态：用户已于 2026-07-19 确认无训练方案、2026-07-20 授权实施，并于 2026-08-20 授权长期记忆改用 PostgreSQL/pgvector；ItemSearch 的 OpenSearch 契约不变。
 > 本文记录当前有效契约；完成程度与实测结果以 `docs/project-status.md` 为准。
 
 ## 1. 当前项目边界
@@ -65,7 +65,7 @@ semantic 0.9/0.1；纯语义 query 可绕过融合直接走 KNN。这些权重�
 | 向量检索 | Lucene HNSW + `cosinesimil` | L2 | 与归一化文本向量匹配 |
 | 融合 | `score-ranker-processor` 的无权重 RRF | 手工分数、`min_max + 0.7/0.3` | 不引入未经标注验证的业务权重，避免跨路原始分数不可比 |
 | Faiss | 保留实验性 ANN 基础设施 | ItemSearch 主链路 | 现阶段过滤、全文和可运维性比单纯 ANN 更重要 |
-| 长期记忆 | 目标仍为 LangGraph BaseStore + OpenSearch | 本地 JSON 作为最终实现 | 尚未接入，不能把 ItemSearch 索引等同于记忆索引 |
+| 长期记忆 | LangGraph BaseStore + PostgreSQL/pgvector + 关键词 RRF | OpenSearch 商品索引或本地 JSON 作为最终实现 | 与 ItemSearch 分离，采用用户确认、版本审计和软衰减生命周期 |
 | CategoryInsight RAG | 独立 OpenSearch 索引；BGE-M3 + BM25 的 Category 专用 min-max Pipeline；按需冻结 Cross-Encoder 精排 | 复用商品索引或 ItemSearch RRF Pipeline | 知识卡片与商品候选的 Schema、分数和生命周期不同 |
 
 Faiss 代码可用于学习、基准测试或未来经过明确论证的纯 ANN 场景，但不得在 OpenSearch 不可用
@@ -137,14 +137,13 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
 
 ## 7. CategoryInsight 实施状态与其他向量应用
 
-- 长期记忆仍是本地 JSON，目标为 LangGraph BaseStore + 独立 OpenSearch 索引。
+- 长期记忆已接入 LangGraph BaseStore + PostgreSQL/pgvector；黑名单全量优先，普通记忆使用向量与关键词无权重 RRF，并乘置信度和时间软衰减。
 - CategoryInsight 已建立独立知识索引和 RAG。当前 `globuy-category` 指向包含 7 张耳机卡片的
   确定性验收索引，三条 Category Pipeline 和真实 BGE-M3 Hybrid Query 已通过本机验证。
 - 生产 DeepSeek 制卡发布尚需对“向外部兼容端点发送聚合卡片草稿”进行知情授权；本机冻结
   `BAAI/bge-reranker-v2-m3` HTTP 端点也尚未配置。生产抽取缺失会返回 not_configured；需要精排
   且端点不可用时返回 partial，候选不足时旁路精排。任何路径都不得由模型常识静默补全。
-- 长期记忆实施时可复用冻结模型实例和 OpenSearch 客户端，但必须使用独立 mapping、别名和
-  生命周期；不得直接复用商品索引、ItemSearch RRF 或 Category Pipeline。
+- 长期记忆复用冻结 BGE-M3 模型实例，但使用 PostgreSQL 独立事实表、`vector(1024)` 投影、HNSW/COSINE、关键词 GIN 和独立生命周期；不得复用商品索引、ItemSearch RRF Pipeline 或 Category Pipeline。
 
 ## 8. 变更控制
 

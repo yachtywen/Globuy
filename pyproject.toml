@@ -24,7 +24,8 @@ dependencies = [
   "redis>=5.2,<8.0",
   "aiosqlite>=0.21,<1.0",
   "sqlalchemy[asyncio]>=2.0.41,<3.0",
-  "asyncmy>=0.2.10,<1.0",
+  "psycopg[binary,pool]>=3.2,<4.0",
+  "pgvector>=0.4,<1.0",
   "alembic>=1.16,<2.0",
   "argon2-cffi>=23.1,<26.0",
 ]
@@ -34,6 +35,9 @@ dev = [
   "pytest>=8.4,<10.0",
   "pytest-asyncio>=1.0,<2.0",
   "ruff>=0.12,<1.0",
+]
+migration = [
+  "asyncmy>=0.2.10,<1.0",
 ]
 
 [tool.setuptools.packages.find]

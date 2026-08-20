@@ -10,7 +10,7 @@
     <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.116+-009688?logo=fastapi&logoColor=white" />
     <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" />
     <img alt="OpenSearch" src="https://img.shields.io/badge/OpenSearch-Hybrid-005EB8?logo=opensearch&logoColor=white" />
-    <img alt="MySQL" src="https://img.shields.io/badge/MySQL-8-4479A1?logo=mysql&logoColor=white" />
+    <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white" />
   </p>
 </div>
 
@@ -49,8 +49,8 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 | 同质 fork | 主 Agent 通过 `dispatch_tool` 按需派生子任务；fork 继承完整工具集与 System Prompt，拥有独立 thread/checkpoint，最大深度固定为 1 |
 | Harness 防护 | 决策预算、循环指纹检测、主循环递归上限、fork 90 秒超时、候选截断与确定性终结，避免无效自旋和上下文膨胀 |
 | Cache Breakpoint | 在 Observe 后压缩旧历史，保留最近 3 个完整工具调用组和合法的 tool-call/tool-result 配对 |
-| 长期记忆 | MySQL 保存用户确认的偏好事实和版本，事务 Outbox 投影到独立 OpenSearch 记忆索引，并通过 LangGraph BaseStore 适配层按 `user_id + query` 召回 |
-| 商品检索 | 结构化意图、目录覆盖检查、可选 Provider 补库、MySQL Product/Offer、Outbox 投影和 OpenSearch Hybrid Search |
+| 长期记忆 | PostgreSQL 保存用户确认的偏好事实和版本；pgvector + 关键词 RRF 检索，支持候选确认和软衰减 |
+| 商品检索 | 结构化意图、目录覆盖检查、可选 Provider 补库、PostgreSQL Product/Offer、Outbox 投影和 OpenSearch Hybrid Search |
 | 混合召回 | `BM25(title) + BAAI/bge-m3 Dense Vector + Lucene HNSW/COSINE + 无权重 RRF`；平台前置过滤，价格/评分/销量/属性后置过滤 |
 | 实时任务 | FastAPI 返回 HTTP `202`，后台执行 Agent；WebSocket 按 thread/run 推送带 sequence 的事件，支持 replay、心跳、多订阅、取消与终态恢复 |
 | 用户系统 | Argon2id 密码哈希、服务端可撤销会话、HttpOnly Cookie、CSRF、幂等写入和资源归属校验 |
@@ -73,9 +73,9 @@ LLM 决策之外还存在确定性控制层：阶段工具白名单阻止跨阶�
 
 长对话不会在每轮无边界累积。系统在 Observe 后识别历史边界，保留稳定 Prompt 前缀、当前约束和最近 3 个完整工具调用组，用摘要替换更旧历史，同时保证未完成工具调用及其结果不会被拆散。该机制已经接入主图，而不是独立演示脚本。
 
-### 4. MySQL 事实库 + OpenSearch 检索投影
+### 4. PostgreSQL 事实库 + pgvector/OpenSearch 检索
 
-MySQL 是用户、会话、任务、Product、Offer、价格观测、心愿库和长期记忆的权威事实库；OpenSearch 负责商品、品类知识和记忆的检索投影。事务 Outbox 将事实写入与异步索引解耦，支持失败重试、Offer 失效删除、投影哈希 no-op、增量更新以及蓝绿重建后原子切换别名。
+PostgreSQL 是用户、会话、任务、Product、Offer、价格观测、心愿库和长期记忆的权威事实库。pgvector 承担长期记忆语义投影，OpenSearch 继续负责商品与品类知识检索。事务 Outbox 将事实写入与异步投影解耦，支持失败重试、幂等更新和索引重建。
 
 ### 5. AG-UI 风格事件与可恢复 WebSocket
 
@@ -103,7 +103,7 @@ flowchart LR
     FORK --> TOOLS[九个业务工具]
     ACT --> TOOLS
 
-    TOOLS --> CATALOG[MySQL Product / Offer]
+    TOOLS --> CATALOG[PostgreSQL Product / Offer]
     CATALOG --> OUTBOX[Transactional Outbox]
     OUTBOX --> OS[(OpenSearch)]
     TOOLS --> REDIS[(Redis)]
@@ -113,16 +113,16 @@ flowchart LR
     BROKER -->|WebSocket + replay| U
 
     MEMORY[用户确认型长期记忆] --> CATALOG
-    MEMORY --> OUTBOX
-    OS -->|BaseStore recall| LOOP
+    MEMORY --> PGVECTOR[(PostgreSQL + pgvector)]
+    PGVECTOR -->|BaseStore recall| LOOP
 ```
 
 ## 一次购物请求如何执行
 
 1. FastAPI 校验用户会话、CSRF 和幂等键，创建 run 后立即返回 `202`。
-2. Agent 从 MySQL/OpenSearch 读取当前用户已确认的相关偏好，拼装本轮上下文。
+2. Agent 从 PostgreSQL/pgvector 读取当前用户已确认的相关偏好，拼装本轮上下文。
 3. Think/Planner 提取品类、预算、平台和硬约束；多平台任务可派生同质 fork。
-4. ItemSearch 检查目录覆盖；本地目录不足且 Provider 明确启用时，受控补充候选并写入 MySQL。
+4. ItemSearch 检查目录覆盖；本地目录不足且 Provider 明确启用时，受控补充候选并写入 PostgreSQL。
 5. Product Outbox 将活动 Offer 批量投影到 OpenSearch，执行 BM25 + Dense Vector + RRF 检索。
 6. Observe/Reflect 检查工具结果、循环状态和约束满足情况，必要时继续检索或确定性收尾。
 7. ShoppingSummary 输出带价格、平台、理由和来源链接的清单；前端通过 WebSocket 增量呈现全过程。
@@ -134,7 +134,7 @@ flowchart LR
 | Agent | LangChain 1.x、LangGraph 1.x、OpenAI-compatible Chat Model |
 | Backend | Python 3.12、FastAPI、Uvicorn、Pydantic、SQLAlchemy Async、Alembic |
 | Retrieval | OpenSearch 3.7、BGE-M3、BM25、Lucene HNSW、RRF；Faiss 仅作实验性 ANN |
-| Data | MySQL 8、Redis 7、Transactional Outbox |
+| Data | PostgreSQL 17、pgvector 0.8、Redis 7、Transactional Outbox |
 | Frontend | React 19、TypeScript 5.8、Vite 7、Vitest |
 | Protocol | HTTP 202、WebSocket、AG-UI 风格事件、sequence replay |
 | Quality | Pytest、Ruff、双层 Eval、可选独立 LLM Judge |
@@ -149,7 +149,7 @@ flowchart LR
 - Python 3.12（项目固定使用 Conda 环境 `globuy`）
 - Node.js 20.19+
 - Docker Desktop 与 Docker Compose
-- MySQL 8
+- Docker Desktop（运行 PostgreSQL 17 + pgvector；完整检索还会运行 OpenSearch/Redis）
 
 ### 1. 克隆与安装
 
@@ -165,43 +165,23 @@ npm ci
 Pop-Location
 ```
 
-### 2. 配置 MySQL 与本地环境
+### 2. 配置 PostgreSQL 与本地环境
 
-项目正式接口依赖 MySQL；未配置数据库时后端会拒绝启动。可以使用已有 MySQL 8，也可以创建本地容器：
-
-```powershell
-$rootPassword = python -c "import secrets; print(secrets.token_urlsafe(24))"
-$appPassword = python -c "import secrets; print(secrets.token_urlsafe(24))"
-
-docker run -d --name globuy-mysql --restart unless-stopped `
-  -e "MYSQL_ROOT_PASSWORD=$rootPassword" `
-  -p 3307:3306 `
-  -v globuy-mysql-data:/var/lib/mysql `
-  mysql:8.4
-```
-
-待 MySQL ready 后创建数据库与最小权限账号：
+项目正式接口依赖 PostgreSQL 17 + pgvector；未配置数据库时后端会拒绝启动。先复制配置模板，将模板中的 PostgreSQL 密码替换为本地随机密码，再启动数据库并执行迁移：
 
 ```powershell
-$sql = @"
-CREATE DATABASE IF NOT EXISTS globuy CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-CREATE USER IF NOT EXISTS 'globuy_app'@'%' IDENTIFIED BY '$appPassword';
-ALTER USER 'globuy_app'@'%' IDENTIFIED BY '$appPassword';
-GRANT ALL PRIVILEGES ON globuy.* TO 'globuy_app'@'%';
-FLUSH PRIVILEGES;
-"@
-$sql | docker exec -i -e "MYSQL_PWD=$rootPassword" globuy-mysql mysql -uroot
-
 Copy-Item .env.example .env
-$databaseUrl = "mysql+asyncmy://globuy_app:$appPassword@127.0.0.1:3307/globuy?charset=utf8mb4"
-$envFile = Get-Content .env -Raw
-$envFile = $envFile -replace '(?m)^GLOBUY_DATABASE_URL=.*$', "GLOBUY_DATABASE_URL=$databaseUrl"
-$envFile = $envFile -replace '(?m)^GLOBUY_MODEL_PROVIDER=.*$', 'GLOBUY_MODEL_PROVIDER=mock'
-$envFile = $envFile -replace '(?m)^GLOBUY_WEB_SEARCH_PROVIDER=.*$', 'GLOBUY_WEB_SEARCH_PROVIDER=none'
-Set-Content .env $envFile -Encoding utf8
 
+# 在 .env 中为下列三项设置同一个随机本地密码；URL 中的密码需要 URL 编码。
+# GLOBUY_POSTGRES_PASSWORD
+# GLOBUY_DATABASE_URL（主机通过 127.0.0.1:5433 连接）
+# GLOBUY_DOCKER_DATABASE_URL（Compose 服务通过 postgres:5432 连接）
+
+docker compose up -d --wait postgres
 alembic upgrade head
 ```
+
+开发演示可设置 `GLOBUY_MODEL_PROVIDER=mock`、`GLOBUY_WEB_SEARCH_PROVIDER=none`，这样不会调用付费模型或商品 Provider。不要提交 `.env`、密码、Token、数据库卷或真实 Provider 响应。
 
 不要提交 `.env`、密码、Token、数据库卷或真实 Provider 响应。
 
@@ -226,7 +206,7 @@ npm run dev -- --host 127.0.0.1
 ### 4. 启用完整检索（可选）
 
 ```powershell
-docker compose up -d --wait --wait-timeout 300 opensearch redis
+docker compose up -d --wait --wait-timeout 300 postgres opensearch redis
 
 # 需要有权使用的 Candidate 数据包
 python -m app.products.import_snapshot
@@ -238,7 +218,7 @@ python -m app.category.build_index --deterministic
 
 首次建库需要下载约 2.3 GB 的 `BAAI/bge-m3`。仓库不发布 `.env`、模型缓存、数据库卷、OpenSearch 索引或未获授权的商品快照；检索结果代表数据采集时的快照，不代表实时库存或平台官方推荐。
 
-更完整的配置和 Worker 运维见 [MySQL 持久化说明](docs/mysql-persistence.md) 与 [接口文档](docs/globuy接口文档v1.md)。
+PostgreSQL 迁移、长期记忆衰减和 Worker 运维见 [PostgreSQL 迁移实施方案](docs/pg迁移.md) 与 [接口文档](docs/globuy接口文档v1.md)。
 
 ## 测试与评测
 
@@ -268,7 +248,7 @@ python scripts/eval_regression.py --suite offline
 python scripts/eval_regression.py --suite live --allow-model-calls
 ```
 
-P0 事实与安全条件由代码硬判；P1/P2 可以交给独立 Judge，但 Judge 不能覆盖 P0 失败。真实层复用正式登录、CSRF、HTTP 202、任务轮询、WebSocket replay、长期记忆 API 与 MySQL 商品事实。详见 [评测系统文档](docs/evaluation-system.md)。
+P0 事实与安全条件由代码硬判；P1/P2 可以交给独立 Judge，但 Judge 不能覆盖 P0 失败。真实层复用正式登录、CSRF、HTTP 202、任务轮询、WebSocket replay、长期记忆 API 与 PostgreSQL 商品事实。详见 [评测系统文档](docs/evaluation-system.md)。
 
 ## 项目结构
 
@@ -285,7 +265,7 @@ globuy/
 │  ├─ database/       # SQLAlchemy 模型、Repository 与会话持久化
 │  └─ eval/           # 双层评测、硬门禁、Judge 与报告
 ├─ frontend/          # React + TypeScript + Vite 工作台
-├─ alembic/           # MySQL Schema 迁移
+├─ alembic/           # PostgreSQL Schema 迁移
 ├─ tests/             # 后端离线测试
 ├─ eval/              # YAML 评测用例与夹具
 ├─ docs/              # 架构契约、接口、状态与运维文档
@@ -312,7 +292,7 @@ globuy/
 - [ItemSearch 无训练方案](docs/itemsearch-no-training-implementation-plan.md)
 - [AgentLoop 收尾实现](docs/itempicker-agentloop-10-14-implementation.md)
 - [双层评测系统](docs/evaluation-system.md)
-- [MySQL 持久化与 Worker](docs/mysql-persistence.md)
+- [PostgreSQL 与 pgvector 迁移](docs/pg迁移.md)
 
 ## 说明
 

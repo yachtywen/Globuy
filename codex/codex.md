@@ -58,8 +58,8 @@ React、TypeScript、Vite 和 OpenSearch；Faiss 仅保留为实验性 ANN 能�
 - 商品向量固定为 1024 维归一化向量；OpenSearch 使用 Lucene HNSW + COSINE。
 - ItemSearch 的旧“三塔 + Faiss + min_max 0.7/0.3”目标已经取消。Faiss 只保留为实验性
   ANN 基础设施，不得作为 OpenSearch 故障时的静默后备。
-- 长期记忆接口：`LangGraph BaseStore`，OpenSearch 为后端。
-- 长期记忆与 CategoryInsight 尚未接入；后续使用独立索引和生命周期，不能直接复用商品索引。
+- 长期记忆接口：`LangGraph BaseStore`，PostgreSQL/pgvector 为事实与检索后端。
+- 长期记忆使用独立事实表、候选确认、版本审计和软衰减生命周期，不能直接复用商品索引；CategoryInsight 继续使用独立 OpenSearch 索引。
 - Qdrant、Redis Stack、Chroma、pgvector、Milvus 不得作为 ItemSearch 默认替代；更换模型、
   维度、归一化方式、距离或融合策略必须先获得用户批准。
 
@@ -144,9 +144,9 @@ tool-call/tool-result 配对。压缩前后必须保持消息协议合法，摘�
 - `source_session`、`created_at`、`confidence`：来源、时效和置信度。
 
 存储能力应覆盖读取、写入/更新、用户主动撤回删除，以及按当前 query 读取相关 Top-K。
-对外仍使用已经固定的 LangGraph BaseStore 契约，OpenSearch 是目标后端；`read_relevant` 是
-BaseStore/OpenSearch 适配层的语义能力，不再另造与生态冲突的长期抽象。黑名单和硬规则必须
-全量生效，普通偏好才使用 Hybrid Query 取相关 Top-K。
+对外仍使用已经固定的 LangGraph BaseStore 契约，PostgreSQL/pgvector 是事实与检索后端；
+黑名单和硬规则必须全量生效，普通偏好使用 pgvector COSINE 与关键词召回的无权重 RRF 取相关
+Top-K，再乘置信度和时间软衰减。Agent 抽取只生成候选，必须经用户确认后才进入长期记忆。
 
 只有用户明确表达或高置信度抽取得到的偏好才持久化。新偏好必须同时影响当前 Observe/筛选，
 并带 `source_session` 写入 Store 供后续会话使用；推断性偏好要降低置信度，不能把一次浏览
@@ -180,5 +180,5 @@ LangGraph `astream_events`、模型 token、工具回调、取消和异常转换
 
 上述第 8 至 11 节描述目标行为。是否已经实现必须以 `docs/project-status.md` 和真实代码、测试
 为准。尤其是后台任务生命周期、同质 fork、显式 Think/Observe/Reflect 状态、Cache
-Breakpoint 主图接入、BaseStore/OpenSearch 长期记忆、真正的 token/tool 事件流和取消传播，
+Breakpoint 主图接入、BaseStore/PostgreSQL-pgvector 长期记忆、真正的 token/tool 事件流和取消传播，
 在完成代码与无付费调用测试前都必须继续标记为差距。

@@ -1,4 +1,4 @@
-import type { MemoryEntry, PriceHistory, RunStatusResponse, ThreadDetail, ThreadSummary, Wishlist } from "./types";
+import type { MemoryCandidate, MemoryEntry, PriceHistory, RunStatusResponse, ThreadDetail, ThreadSummary, Wishlist } from "./types";
 
 const API_ROOT = "/api/v1";
 
@@ -171,8 +171,8 @@ export const wishlistApi = {
 };
 
 export const memoryApi = {
-  list() {
-    return request<{ items: MemoryEntry[] }>("/memories");
+  list(status: "active" | "archived" = "active") {
+    return request<{ items: MemoryEntry[] }>(`/memories?status=${status}`);
   },
   create(category: MemoryEntry["category"], key: string, content: string) {
     return request<MemoryEntry>("/memories", {
@@ -182,6 +182,25 @@ export const memoryApi = {
   },
   remove(memoryId: string) {
     return request<void>(`/memories/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
+  },
+  restore(memoryId: string) {
+    return request<MemoryEntry>(`/memories/${encodeURIComponent(memoryId)}/restore`, {
+      method: "POST",
+    });
+  },
+  candidates() {
+    return request<{ items: MemoryCandidate[] }>("/memory-candidates?status=pending");
+  },
+  confirmCandidate(candidateId: string) {
+    return request<MemoryEntry>(`/memory-candidates/${encodeURIComponent(candidateId)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  },
+  rejectCandidate(candidateId: string) {
+    return request<void>(`/memory-candidates/${encodeURIComponent(candidateId)}/reject`, {
+      method: "POST",
+    });
   },
 };
 

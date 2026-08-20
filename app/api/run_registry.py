@@ -21,6 +21,9 @@ from app.search.catalog_images import enrich_task_result
 
 AgentRunner = Callable[[str, str], Awaitable[tuple[str, dict[str, Any]]]]
 AgentStreamRunner = Callable[[str, str], AsyncIterator[dict[str, Any]]]
+MemoryCandidateSink = Callable[
+    [str, str, str, list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]
+]
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,7 @@ class RunRegistry:
         stream_runner: AgentStreamRunner | None,
         session_dir: Callable[[str], Path],
         product_image_catalog_path: Path,
+        memory_candidate_sink: MemoryCandidateSink | None = None,
         cancel_grace_seconds: float = 5.0,
     ) -> None:
         self.store = store
@@ -74,6 +78,7 @@ class RunRegistry:
         self.stream_runner = stream_runner
         self.session_dir = session_dir
         self.product_image_catalog_path = product_image_catalog_path
+        self.memory_candidate_sink = memory_candidate_sink
         self.cancel_grace_seconds = cancel_grace_seconds
         self.active_tasks: dict[str, RunHandle] = {}
         self.thread_locks: dict[str, asyncio.Lock] = {}
@@ -101,9 +106,7 @@ class RunRegistry:
             raise ApiError(503, "SERVICE_SHUTTING_DOWN", "服务正在关闭", retryable=True)
         user_lock = await self._user_lock(user_id)
         async with user_lock:
-            idem = await self.store.idempotent_response(
-                user_id, client_request_id, "create_run"
-            )
+            idem = await self.store.idempotent_response(user_id, client_request_id, "create_run")
             if idem is not None:
                 return idem
             thread_lock = await self._thread_lock(thread_id)
@@ -153,9 +156,7 @@ class RunRegistry:
     ) -> dict[str, Any]:
         user_lock = await self._user_lock(user_id)
         async with user_lock:
-            idem = await self.store.idempotent_response(
-                user_id, client_request_id, "create_thread"
-            )
+            idem = await self.store.idempotent_response(user_id, client_request_id, "create_thread")
             if idem is not None:
                 return idem
             active = await self.store.active_thread(user_id)
@@ -276,9 +277,7 @@ class RunRegistry:
         record = await self.store.get_run(thread_id, run_id)
         cursor = await self.broker.cursor_info(thread_id, run_id)
         artifacts = await self.store.list_artifacts(thread_id, run_id)
-        result = enrich_task_result(
-            record.get("result"), self.product_image_catalog_path
-        )
+        result = enrich_task_result(record.get("result"), self.product_image_catalog_path)
         return {
             "thread_id": thread_id,
             "run_id": run_id,
@@ -288,9 +287,7 @@ class RunRegistry:
             "finished_at": record["finished_at"],
             **cursor,
             "result": result,
-            "artifacts": [
-                self._public_artifact(item, thread_id, run_id) for item in artifacts
-            ],
+            "artifacts": [self._public_artifact(item, thread_id, run_id) for item in artifacts],
             "memory_status": (
                 result.get("memory_status", "not_configured")
                 if isinstance(result, dict)
@@ -307,9 +304,7 @@ class RunRegistry:
         }
 
     @staticmethod
-    def _public_artifact(
-        item: dict[str, Any], thread_id: str, run_id: str
-    ) -> dict[str, Any]:
+    def _public_artifact(item: dict[str, Any], thread_id: str, run_id: str) -> dict[str, Any]:
         public = {
             key: item[key]
             for key in ("file_id", "filename", "kind", "media_type", "size", "created_at")
@@ -351,13 +346,16 @@ class RunRegistry:
             message_started = True
             final_state: dict[str, Any] | None = None
             final_state_is_authoritative = False
-            with bind_context(
-                handle.thread_id,
-                self.session_dir(handle.thread_id),
-                run_id=handle.run_id,
-                user_id=handle.user_id,
-            ), monitor_scope(
-                Monitor(self.broker.publish_internal, publish_thread_id=handle.thread_id)
+            with (
+                bind_context(
+                    handle.thread_id,
+                    self.session_dir(handle.thread_id),
+                    run_id=handle.run_id,
+                    user_id=handle.user_id,
+                ),
+                monitor_scope(
+                    Monitor(self.broker.publish_internal, publish_thread_id=handle.thread_id)
+                ),
             ):
                 if self.stream_runner is None:
                     answer, metadata = await self.agent_runner(handle.query, handle.thread_id)
@@ -366,9 +364,7 @@ class RunRegistry:
                         await self._publish_delta(handle, message_id, answer)
                 else:
                     metadata = {"streaming": True}
-                    async for graph_event in self.stream_runner(
-                        handle.query, handle.thread_id
-                    ):
+                    async for graph_event in self.stream_runner(handle.query, handle.thread_id):
                         final_state, final_state_is_authoritative = _accumulate_final_state(
                             final_state,
                             final_state_is_authoritative,
@@ -393,6 +389,44 @@ class RunRegistry:
             final_text, result, state_metadata = self._final_result(
                 final_state, "".join(deltas), metadata
             )
+            preferences = result.get("learned_preferences") or []
+            if self.memory_candidate_sink is not None and preferences:
+                try:
+                    candidates = await self.memory_candidate_sink(
+                        handle.user_id,
+                        handle.thread_id,
+                        handle.run_id,
+                        [item for item in preferences if isinstance(item, dict)],
+                    )
+                    result["memory_candidates"] = [
+                        {
+                            "candidate_id": item["candidate_id"],
+                            "category": item["category"],
+                            "key": item["key"],
+                            "status": item["status"],
+                        }
+                        for item in candidates
+                    ]
+                    for item in candidates:
+                        await self.broker.publish(
+                            EventType.CUSTOM,
+                            handle.thread_id,
+                            handle.run_id,
+                            message="发现一条待你确认的长期记忆",
+                            data={
+                                "name": "memory_candidate_created",
+                                "candidate_id": item["candidate_id"],
+                                "category": item["category"],
+                                "key": item["key"],
+                            },
+                        )
+                except Exception:
+                    logger.exception(
+                        "Memory candidate persistence failed for thread_id=%s run_id=%s",
+                        handle.thread_id,
+                        handle.run_id,
+                    )
+                    result["memory_candidate_status"] = "partial"
             metadata.update(state_metadata)
             joined = "".join(deltas)
             if final_text and final_text != joined:
@@ -568,9 +602,7 @@ class RunRegistry:
             "source_kind": "offline_snapshot",
             "artifacts": [],
         }
-        result = enrich_task_result(
-            result, self.product_image_catalog_path
-        ) or result
+        result = enrich_task_result(result, self.product_image_catalog_path) or result
         state_metadata = {
             "phase": state.get("phase") if state else metadata.get("phase"),
             "iteration": state.get("iteration", 0) if state else metadata.get("iteration", 0),

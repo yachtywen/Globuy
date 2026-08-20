@@ -124,3 +124,9 @@ class UpdateMemoryRequest(StrictModel):
     category: Literal["blacklist", "preference", "history"] | None = None
     content: str | None = Field(default=None, min_length=1, max_length=4000)
     confidence: Decimal | None = Field(default=None, ge=0, le=1)
+
+
+class ConfirmMemoryCandidateRequest(StrictModel):
+    category: Literal["blacklist", "preference", "history"] | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=128)
+    content: str | None = Field(default=None, min_length=1, max_length=4000)

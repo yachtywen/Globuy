@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from alembic import context
 from app.config import get_settings
 from app.database.models import Base
+
+if sys.platform == "win32":  # pragma: no cover - Alembic Windows compatibility
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 config = context.config
 if config.config_file_name is not None:

@@ -9,12 +9,14 @@ services:
       GLOBUY_PORT: 8000
       GLOBUY_OPENSEARCH_URL: http://opensearch:9200
       GLOBUY_REDIS_URL: redis://redis:6379/0
-      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-}
+      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-postgresql+psycopg://globuy_app:globuy_dev_change_me@postgres:5432/globuy}
     ports:
       - "8000:8000"
     volumes:
       - ./output:/workspace/output
     depends_on:
+      postgres:
+        condition: service_healthy
       opensearch:
         condition: service_healthy
     extra_hosts:
@@ -27,10 +29,13 @@ services:
       - path: .env
         required: false
     environment:
-      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-}
+      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-postgresql+psycopg://globuy_app:globuy_dev_change_me@postgres:5432/globuy}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   memory-outbox-worker:
     build: .
@@ -39,12 +44,11 @@ services:
       - path: .env
         required: false
     environment:
-      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-}
-      GLOBUY_OPENSEARCH_URL: http://opensearch:9200
+      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-postgresql+psycopg://globuy_app:globuy_dev_change_me@postgres:5432/globuy}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      opensearch:
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
@@ -55,11 +59,13 @@ services:
       - path: .env
         required: false
     environment:
-      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-}
+      GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-postgresql+psycopg://globuy_app:globuy_dev_change_me@postgres:5432/globuy}
       GLOBUY_OPENSEARCH_URL: http://opensearch:9200
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
+      postgres:
+        condition: service_healthy
       opensearch:
         condition: service_healthy
     restart: unless-stopped
@@ -73,6 +79,23 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm
+    environment:
+      POSTGRES_DB: ${GLOBUY_POSTGRES_DB:-globuy}
+      POSTGRES_USER: ${GLOBUY_POSTGRES_USER:-globuy_app}
+      POSTGRES_PASSWORD: ${GLOBUY_POSTGRES_PASSWORD:-globuy_dev_change_me}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
   opensearch:
     image: opensearchproject/opensearch:3.7.0
@@ -94,4 +117,5 @@ services:
       start_period: 30s
 
 volumes:
+  postgres-data:
   opensearch-data:

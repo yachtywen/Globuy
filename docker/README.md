@@ -1,16 +1,26 @@
-# Docker 说明
+# Docker 基础设施
 
-根目录的 `compose.yaml` 定义 API、Redis 与 OpenSearch：
+`compose.yaml` 管理以下本地服务：
 
-- OpenSearch 是固定的 BaseStore/分类语义应用层，数据卷为 `opensearch-data`。
-- Faiss 在宿主机 Conda `globuy` 环境中运行，负责 HNSW/IP 候选召回，不单独启动容器。
-- Redis 仅为后续普通缓存预留，不承担向量数据库或长期记忆默认存储。
+- PostgreSQL 17 + pgvector 0.8：全部关系型业务事实和长期记忆向量检索。
+- OpenSearch 3.7：ItemSearch 商品索引与 CategoryInsight 知识索引。
+- Redis 7：普通缓存与登录限流，不承担长期记忆存储。
+- FastAPI、价格刷新、商品 Outbox、记忆 Outbox Worker。
 
-本地启动基础设施：
+最小数据库启动：
 
 ```powershell
-docker compose up -d opensearch redis
+docker compose up -d --wait postgres
+alembic upgrade head
+```
+
+完整基础设施：
+
+```powershell
+docker compose up -d --wait --wait-timeout 300 postgres opensearch redis
 docker compose ps
 ```
 
-开发 compose 关闭了 OpenSearch Security 插件，只允许本机开发使用，不应直接暴露到公网。
+首次启动前复制 `.env.example` 为 `.env`，为 PostgreSQL 设置随机本地密码，并同时更新主机与 Compose 数据库 URL。不要提交 `.env`、数据库卷、Token 或真实 Provider 响应。
+
+MySQL 历史数据的一次性迁移、短停机切换、验收与回滚步骤见 [`docs/pg迁移.md`](../docs/pg迁移.md)。

@@ -1,8 +1,8 @@
 """Add bounded catalog hydration and product projection state."""
 
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from app.database.models import UTC_DATETIME
 
 revision = "20260819_0002"
@@ -12,12 +12,17 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Revision 0001 historically calls current metadata.create_all(). On a
+    # brand-new database that already materializes the latest schema; existing
+    # MySQL databases still need this incremental revision.
+    if sa.inspect(op.get_bind()).has_table("provider_request_ledger"):
+        return
     op.add_column("products", sa.Column("category_key", sa.String(128)))
     op.add_column("products", sa.Column("category_path", sa.JSON()))
     op.add_column("products", sa.Column("semantic_hash", sa.String(64)))
     op.create_index("ix_products_category_key", "products", ["category_key"])
     op.create_index("ix_products_semantic_hash", "products", ["semantic_hash"])
-    for name, column in (
+    for _name, column in (
         ("provider_query", sa.Column("provider_query", sa.String(255))),
         ("scope_id", sa.Column("scope_id", sa.String(128))),
         ("page_number", sa.Column("page_number", sa.Integer())),
@@ -45,7 +50,14 @@ def upgrade() -> None:
         sa.Column("lease_expires_at", UTC_DATETIME),
         sa.Column("created_at", UTC_DATETIME, nullable=False),
         sa.Column("updated_at", UTC_DATETIME, nullable=False),
-        sa.UniqueConstraint("category_key", "platform", "currency", "provider", "scope_version", name="uq_catalog_scope_identity"),
+        sa.UniqueConstraint(
+            "category_key",
+            "platform",
+            "currency",
+            "provider",
+            "scope_version",
+            name="uq_catalog_scope_identity",
+        ),
     )
     op.create_index("ix_catalog_scopes_category_key", "catalog_scopes", ["category_key"])
     op.create_index("ix_catalog_scopes_platform", "catalog_scopes", ["platform"])
@@ -54,8 +66,18 @@ def upgrade() -> None:
     op.create_index("ix_catalog_scopes_lease_expires_at", "catalog_scopes", ["lease_expires_at"])
     op.create_table(
         "catalog_scope_offers",
-        sa.Column("scope_id", sa.String(128), sa.ForeignKey("catalog_scopes.scope_id", ondelete="CASCADE"), primary_key=True),
-        sa.Column("offer_id", sa.String(128), sa.ForeignKey("offers.offer_id", ondelete="CASCADE"), primary_key=True),
+        sa.Column(
+            "scope_id",
+            sa.String(128),
+            sa.ForeignKey("catalog_scopes.scope_id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column(
+            "offer_id",
+            sa.String(128),
+            sa.ForeignKey("offers.offer_id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
         sa.Column("last_seen_at", UTC_DATETIME, nullable=False),
         sa.Column("expires_at", UTC_DATETIME, nullable=False),
     )
@@ -79,8 +101,17 @@ def upgrade() -> None:
     op.create_table(
         "provider_request_ledger",
         sa.Column("request_key", sa.String(64), primary_key=True),
-        sa.Column("hydration_run_id", sa.String(128), sa.ForeignKey("catalog_hydration_runs.hydration_run_id", ondelete="SET NULL")),
-        sa.Column("scope_id", sa.String(128), sa.ForeignKey("catalog_scopes.scope_id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "hydration_run_id",
+            sa.String(128),
+            sa.ForeignKey("catalog_hydration_runs.hydration_run_id", ondelete="SET NULL"),
+        ),
+        sa.Column(
+            "scope_id",
+            sa.String(128),
+            sa.ForeignKey("catalog_scopes.scope_id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("provider", sa.String(64), nullable=False),
         sa.Column("platform", sa.String(64), nullable=False),
         sa.Column("normalized_query", sa.String(255), nullable=False),
@@ -111,7 +142,10 @@ def downgrade() -> None:
     for table, names in (
         ("outbox_events", ["claim_token", "claimed_at", "available_at"]),
         ("offers", ["projected_at", "projection_hash", "inactive_reason"]),
-        ("source_snapshots", ["response_sha256", "cursor_json", "page_number", "scope_id", "provider_query"]),
+        (
+            "source_snapshots",
+            ["response_sha256", "cursor_json", "page_number", "scope_id", "provider_query"],
+        ),
         ("products", ["semantic_hash", "category_path", "category_key"]),
     ):
         for name in names:

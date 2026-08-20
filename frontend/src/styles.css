@@ -63,9 +63,20 @@
 .memory-form textarea { min-height: 112px; resize: vertical; }
 .memory-form button:disabled { opacity: .62; cursor: wait; }
 .memory-list { margin-top: 8px; }.memory-list span { color: #8a5a35; font-size: .72rem; font-weight: 750; letter-spacing: .08em; }
+.memory-view-tabs { width: fit-content; margin: 16px 0 8px; padding: 3px; display: flex; gap: 3px; background: #f2ece3; border-radius: 11px; }
+.memory-view-tabs button { min-height: 34px; padding: 0 13px; color: #756b62; background: transparent; border: 0; border-radius: 8px; cursor: pointer; font-size: .78rem; }
+.memory-view-tabs button[aria-selected="true"] { color: #302d2a; background: white; box-shadow: 0 1px 4px rgba(53, 43, 34, .08); font-weight: 750; }
 .memory-empty { min-height: 330px; display: grid; place-items: center; align-content: center; gap: 9px; padding: 32px; border: 1px dashed #d9cbbb; border-radius: 16px; background: #fcf8f1; text-align: center; color: #6f665d; }
 .memory-empty svg { color: #b66b52; }
 .memory-empty p { max-width: 390px; margin: 0; line-height: 1.65; }
+.memory-candidates { margin: 18px 0; padding: 16px; border: 1px solid #dfc6a9; border-radius: 16px; background: #fff9ef; }
+.memory-candidates > p { margin: 5px 0 12px; color: #6f665d; font-size: .88rem; }
+.memory-candidates article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-top: 1px solid #eadaca; }
+.memory-candidates article > div:first-child { display: grid; gap: 4px; }
+.memory-candidates article p { margin: 0; line-height: 1.55; color: #504b45; }
+.memory-candidates article span { color: #8a5a35; font-size: .72rem; font-weight: 750; }
+.memory-candidate-actions { display: flex; gap: 6px; align-items: start; }
+.memory-candidate-actions button { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid #dfc6a9; border-radius: 50%; background: #fff; color: #754e3e; cursor: pointer; }
 .quick-memory-block { display: grid; gap: 12px; margin: 0 0 24px; padding: 18px; border-radius: 16px; background: #f8f2e9; }
 .quick-memory-block > strong { font-size: .82rem; color: #62594f; }
 .quick-memory-tags { display: flex; flex-wrap: wrap; gap: 9px; }

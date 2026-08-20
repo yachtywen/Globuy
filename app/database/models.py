@@ -6,7 +6,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    ARRAY,
     JSON,
     BigInteger,
     Boolean,
@@ -21,9 +23,16 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
+from sqlalchemy.dialects.postgresql import TIMESTAMP as PostgreSQLTimestamp
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-UTC_DATETIME = DateTime(timezone=False).with_variant(MySQLDateTime(fsp=6), "mysql")
+UTC_DATETIME = (
+    DateTime(timezone=False)
+    .with_variant(MySQLDateTime(fsp=6), "mysql")
+    .with_variant(PostgreSQLTimestamp(timezone=False, precision=6), "postgresql")
+)
+KEYWORDS_TYPE = ARRAY(String(128)).with_variant(JSON(), "sqlite").with_variant(JSON(), "mysql")
+MEMORY_VECTOR_TYPE = Vector(1024).with_variant(JSON(), "sqlite").with_variant(JSON(), "mysql")
 
 
 class Base(DeclarativeBase):
@@ -450,6 +459,7 @@ class MemoryEntry(Base):
     category: Mapped[str] = mapped_column(String(32), index=True)
     key: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text)
+    keywords: Mapped[list[str]] = mapped_column(KEYWORDS_TYPE, default=list)
     confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), default=Decimal("1"))
     source: Mapped[str] = mapped_column(String(32), default="user")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
@@ -459,11 +469,60 @@ class MemoryEntry(Base):
     created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     updated_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     deleted_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+    lifecycle_status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    last_reinforced_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    reinforcement_count: Mapped[int] = mapped_column(Integer, default=1)
+    archived_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+    purge_after: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
 
     __table_args__ = (
         CheckConstraint("category IN ('blacklist','preference','history')"),
         CheckConstraint("source IN ('user','agent_confirmed','import')"),
+        CheckConstraint("lifecycle_status IN ('active','archived','deleted')"),
         UniqueConstraint("user_id", "key", name="uq_memory_user_key"),
+    )
+
+
+class MemoryEmbedding(Base):
+    __tablename__ = "memory_embeddings"
+
+    memory_id: Mapped[str] = mapped_column(
+        ForeignKey("memory_entries.memory_id", ondelete="CASCADE"), primary_key=True
+    )
+    embedding: Mapped[list[float]] = mapped_column(MEMORY_VECTOR_TYPE)
+    embedding_model: Mapped[str] = mapped_column(String(255))
+    embedding_revision: Mapped[str] = mapped_column(String(128))
+    dimensions: Mapped[int] = mapped_column(Integer)
+    normalized: Mapped[bool] = mapped_column(Boolean, default=True)
+    semantic_text_version: Mapped[str] = mapped_column(String(64))
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    embedded_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+
+
+class MemoryCandidate(Base):
+    __tablename__ = "memory_candidates"
+
+    candidate_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    key: Mapped[str] = mapped_column(String(128))
+    content: Mapped[str] = mapped_column(Text)
+    keywords: Mapped[list[str]] = mapped_column(KEYWORDS_TYPE, default=list)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4))
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_thread_id: Mapped[str | None] = mapped_column(String(128))
+    source_run_id: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    expires_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+
+    __table_args__ = (
+        CheckConstraint("category IN ('blacklist','preference','history')"),
+        CheckConstraint("status IN ('pending','confirmed','rejected','expired')"),
+        UniqueConstraint("user_id", "content_hash", "status", name="uq_memory_candidate_state"),
     )
 
 

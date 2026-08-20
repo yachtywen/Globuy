@@ -1,7 +1,6 @@
 """Create the authoritative Globuy relational schema."""
 
 from alembic import op
-
 from app.database.models import Base
 
 revision = "20260721_0001"
@@ -11,7 +10,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    Base.metadata.create_all(bind=op.get_bind(), checkfirst=True)
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    Base.metadata.create_all(bind=bind, checkfirst=True)
 
 
 def downgrade() -> None:

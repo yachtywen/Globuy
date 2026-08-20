@@ -86,8 +86,8 @@ def _artifact_dict(item: Artifact) -> dict[str, Any]:
     }
 
 
-class MySQLSessionStore:
-    """MySQL-backed store preserving the RunRegistry storage protocol."""
+class SQLAlchemySessionStore:
+    """PostgreSQL-backed store preserving the RunRegistry storage protocol."""
 
     def __init__(self, database: Database) -> None:
         self.database = database

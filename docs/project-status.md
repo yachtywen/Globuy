@@ -1,5 +1,27 @@
 # globuy 项目状态
 
+## 2026-08-20：固化 Agent 全链路可观测体系实施计划
+
+- 新增 `docs/agent-observability-langfuse-implementation-plan.md`，基于当前 LangGraph
+  `astream_events`、Monitor、AG-UI、同质 fork 和双层 Eval，确定使用 LangFuse Cloud 日本区建设
+  生产可用观测旁路；目标覆盖根 Trace、阶段、九工具、模型 generation、fork 父子关系、Token、RT、
+  故障分类、Eval Scores 和五分钟 badcase 定位验收。
+- 数据策略固定为默认脱敏摘要：不上传完整 System Prompt、原始商品数组、用户身份、记忆原文、密钥或
+  `reasoning_content`；LangFuse 未配置或不可用时 fail-open，不得阻断 Agent、WebSocket 或评测。
+- 本轮仅新增实施计划和状态记录，尚未安装 LangFuse SDK、修改运行代码、连接 Cloud 或发起外部调用；
+  实施时必须保护当前工作区已有的 PostgreSQL/pgvector 迁移改动。
+
+## 2026-08-20：关系事实库迁移到 PostgreSQL，并接入 pgvector 长期记忆
+
+- 当前权威架构已从 MySQL 更新为 PostgreSQL 17：用户、认证、会话、运行、消息、商品、报价、价格观测、心愿库、长期记忆、版本审计和 Outbox 均使用 SQLAlchemy async + Psycopg。`compose.yaml` 新增 `pgvector/pgvector:0.8.6-pg17-bookworm`、健康检查和独立卷；API、价格 Worker、商品 Worker 与记忆 Worker 默认连接 PostgreSQL。历史章节中的 MySQL 描述只代表当时实现，不再代表当前目标架构。
+- 长期记忆已实现 PostgreSQL 事实表和 `vector(1024)` 投影：LangGraph BaseStore 先返回全量 active 黑名单，再以 pgvector COSINE 与 PostgreSQL GIN 关键词两路召回、`k=60` 无权重 RRF 融合，并乘 `confidence × 2^(-age/half_life)`。向量投影带模型、revision、维度、归一化和语义文本版本元数据，禁止混用不兼容向量空间；旧 OpenSearch 记忆适配器已移除，ItemSearch 与 CategoryInsight 的 OpenSearch 契约保持不变。
+- 新增候选确认闭环：Agent 的 `learned_preferences` 只写入 `memory_candidates` 并发布 `CUSTOM/memory_candidate_created`，用户可在个人中心确认、编辑后确认或拒绝；确认后才写入永久记忆、版本审计和 Outbox。新增候选查询/确认/拒绝、归档记忆查询和恢复 API，前端已增加待确认面板以及“当前记忆/已归档”切换与恢复操作。
+- 软衰减采用用户确认的平衡档：历史半衰期 30 天、最早 180 天归档；偏好半衰期 180 天、最早 730 天归档；黑名单不衰减、不自动归档。归档项退出默认召回但可恢复；历史归档后 365 天、偏好归档后 730 天清理；候选 30 天过期，拒绝/过期候选 90 天后清理。
+- Alembic 新增 `vector` 扩展、关键词 GIN、向量 HNSW/COSINE、候选和生命周期 Schema；兼容仓库早期 `metadata.create_all()` 基线迁移的全新 PostgreSQL 建库路径。Windows 入口增加 Psycopg Selector Event Loop 兼容。新增一次性 `app.database.migrate_mysql_to_postgres`：目标非空即拒绝，按外键顺序分批复制，逐表校验行数和规范 SHA-256 摘要，失败时整笔回滚，并为 active 记忆补建向量 Outbox。
+- 新增详细实施与维护窗口文档 `docs/pg迁移.md`，README、`.env.example`、Docker 说明、长期契约和向量基础设施文档已同步为 PostgreSQL/pgvector。`asyncmy` 仅保留在可选 migration 依赖中；运行时依赖为 Psycopg 和 pgvector。
+- 已验证：真实 Docker PostgreSQL healthy；`vector:0.8.6`、Alembic `20260820_0003`、关键词 GIN 与向量 HNSW 索引存在；独立临时空库从零升级到 head 后两个专用索引齐全并已删除测试库；真实 PostgreSQL 上完成 1024 维向量写入和召回；FastAPI `/healthz` 返回 `200 / status=ok / database=ok`。Ruff（本次 app/alembic/记忆测试范围）与 compileall 通过；后端定向 26 项测试通过，其中真实 pgvector 记忆 1 项、其余均为无外部调用测试；前端 TypeScript、Vite 生产构建、4 文件 15 项 Vitest 通过。测试未调用付费模型或外部商品 Provider。
+- 当前剩余差距：本机没有运行中的 MySQL 容器，`.env` 也没有可读取的有效 MySQL URL，因此尚未搬运真实历史业务数据，也没有执行正式短停机切换。上线前必须提供只读 MySQL 源连接、备份位置和维护窗口，执行迁移 manifest 对账、Outbox 清零、API 冒烟与回滚演练；在这些条件完成前，不把“真实历史数据已迁移”标记为完成。
+
 ## 2026-08-20：重构 GitHub 项目 README
 
 - 按仓库真实实现重写根 README：首屏突出对话式购物 Agent 定位，新增已实现能力矩阵、主 Agent +
@@ -621,6 +643,10 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-08-20：新增 Agent 全链路可观测体系实施计划，确定 LangFuse Cloud 日本区、默认脱敏摘要和
+  生产可用交付深度；计划以现有 Monitor/AG-UI/Eval 为基础增加 Trace/Span、Token/RT、fork 关联、
+  Eval Scores、看板和故障注入验收。本轮未修改运行代码或连接外部服务。
 
 - 2026-08-19：完成 Globuy 双层评测系统首版。默认 offline CLI 运行严格 YAML 合成 case，live
   CLI 复用正式认证、异步任务、WebSocket replay、记忆 CRUD 和 MySQL 商品事实；P0 由代码硬判，

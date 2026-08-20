@@ -109,9 +109,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_catalog_limits(self) -> Self:
         if not (
-            self.catalog_minimum_total
-            <= self.catalog_target_total
-            <= self.catalog_hard_cap_total
+            self.catalog_minimum_total <= self.catalog_target_total <= self.catalog_hard_cap_total
         ):
             raise ValueError("catalog limits must satisfy minimum <= target <= hard cap")
         if self.catalog_soft_deadline_seconds > self.catalog_hard_deadline_seconds:
@@ -136,9 +134,16 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=16, ge=1)
     embedding_max_length: int = Field(default=256, ge=1)
 
-    store_backend: Literal["opensearch"] = "opensearch"
+    memory_store_backend: Literal["pgvector"] = "pgvector"
+    memory_candidate_min_confidence: float = Field(default=0.75, ge=0, le=1)
+    memory_candidate_ttl_days: int = Field(default=30, ge=1)
+    memory_preference_half_life_days: int = Field(default=180, ge=1)
+    memory_history_half_life_days: int = Field(default=30, ge=1)
+    memory_preference_archive_days: int = Field(default=730, ge=1)
+    memory_history_archive_days: int = Field(default=180, ge=1)
+    memory_recall_limit: int = Field(default=10, ge=1, le=50)
+    memory_recall_candidate_pool: int = Field(default=50, ge=10, le=500)
     opensearch_url: str = "http://127.0.0.1:9200"
-    opensearch_memory_index: str = "globuy-memory"
     opensearch_product_index: str = "globuy-products-v2-initial"
     opensearch_product_index_prefix: str = "globuy-products-v2-"
     opensearch_product_alias: str = "globuy-products"

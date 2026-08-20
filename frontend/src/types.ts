@@ -102,6 +102,22 @@ export interface MemoryEntry {
   version: number;
   created_at: string;
   updated_at: string;
+  lifecycle_status: "active" | "archived" | "deleted";
+  keywords: string[];
+  last_reinforced_at: string;
+  reinforcement_count: number;
+}
+
+export interface MemoryCandidate {
+  candidate_id: string;
+  category: MemoryEntry["category"];
+  key: string;
+  content: string;
+  keywords: string[];
+  confidence: number;
+  status: "pending" | "confirmed" | "rejected" | "expired";
+  created_at: string;
+  expires_at: string;
 }
 
 export interface TaskResult {

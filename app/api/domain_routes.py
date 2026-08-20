@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from app.api.schemas import (
     AddWishlistItemRequest,
+    ConfirmMemoryCandidateRequest,
     CreateMemoryRequest,
     UpdateMemoryRequest,
     UpdateWishlistItemRequest,
@@ -92,8 +93,9 @@ async def wishlist_price_history(
 async def list_memories(
     principal: Annotated[Principal, Depends(current_user)],
     service: Annotated[MemoryService, Depends(memory_service)],
+    status: Annotated[str, Query(pattern="^(active|archived)$")] = "active",
 ) -> dict:
-    return {"items": await service.list(principal.user_id)}
+    return {"items": await service.list(principal.user_id, lifecycle_status=status)}
 
 
 @router.post("/memories", status_code=201)
@@ -136,4 +138,48 @@ async def delete_memory(
     service: Annotated[MemoryService, Depends(memory_service)],
 ) -> Response:
     await service.delete(principal.user_id, memory_id)
+    return Response(status_code=204)
+
+
+@router.post("/memories/{memory_id}/restore")
+async def restore_memory(
+    memory_id: str,
+    principal: Annotated[Principal, Depends(csrf_user)],
+    service: Annotated[MemoryService, Depends(memory_service)],
+) -> dict:
+    return await service.restore(principal.user_id, memory_id)
+
+
+@router.get("/memory-candidates")
+async def list_memory_candidates(
+    principal: Annotated[Principal, Depends(current_user)],
+    service: Annotated[MemoryService, Depends(memory_service)],
+    status: Annotated[str, Query(pattern="^(pending|confirmed|rejected|expired)$")] = "pending",
+) -> dict:
+    return {"items": await service.list_candidates(principal.user_id, status=status)}
+
+
+@router.post("/memory-candidates/{candidate_id}/confirm")
+async def confirm_memory_candidate(
+    candidate_id: str,
+    payload: ConfirmMemoryCandidateRequest,
+    principal: Annotated[Principal, Depends(csrf_user)],
+    service: Annotated[MemoryService, Depends(memory_service)],
+) -> dict:
+    return await service.confirm_candidate(
+        principal.user_id,
+        candidate_id,
+        category=payload.category,
+        key=payload.key,
+        content=payload.content,
+    )
+
+
+@router.post("/memory-candidates/{candidate_id}/reject", status_code=204)
+async def reject_memory_candidate(
+    candidate_id: str,
+    principal: Annotated[Principal, Depends(csrf_user)],
+    service: Annotated[MemoryService, Depends(memory_service)],
+) -> Response:
+    await service.reject_candidate(principal.user_id, candidate_id)
     return Response(status_code=204)

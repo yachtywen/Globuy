@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -14,6 +15,7 @@ from app.api.errors import ApiError
 from app.auth.service import utc_naive
 from app.database.models import (
     IdempotencyKey,
+    MemoryCandidate,
     MemoryEntry,
     MemoryVersion,
     Offer,
@@ -26,6 +28,7 @@ from app.database.models import (
     WishlistItem,
 )
 from app.database.session import Database
+from app.memory.keywords import extract_keywords
 from app.products.schedule import next_daily_refresh
 
 
@@ -46,6 +49,7 @@ def _memory_snapshot(item: MemoryEntry) -> dict[str, Any]:
         "category": item.category,
         "key": item.key,
         "content": item.content,
+        "keywords": list(item.keywords or []),
         "confidence": _decimal(item.confidence),
         "source": item.source,
         "status": item.status,
@@ -55,6 +59,11 @@ def _memory_snapshot(item: MemoryEntry) -> dict[str, Any]:
         "created_at": _iso(item.created_at),
         "updated_at": _iso(item.updated_at),
         "deleted_at": _iso(item.deleted_at),
+        "lifecycle_status": item.lifecycle_status,
+        "last_reinforced_at": _iso(item.last_reinforced_at),
+        "reinforcement_count": item.reinforcement_count,
+        "archived_at": _iso(item.archived_at),
+        "purge_after": _iso(item.purge_after),
     }
 
 
@@ -228,9 +237,7 @@ class WishlistService:
                     source_run_id=source_run_id,
                     status="active",
                     last_checked_at=offer.last_seen_at,
-                    next_check_at=next_daily_refresh(
-                        now, local_hour=self.refresh_local_hour
-                    ),
+                    next_check_at=next_daily_refresh(now, local_hour=self.refresh_local_hour),
                     latest_observation_id=offer.last_observation_id,
                     failure_count=0,
                     updated_at=now,
@@ -243,9 +250,7 @@ class WishlistService:
                 item.added_at = now
                 item.source_thread_id = source_thread_id or item.source_thread_id
                 item.source_run_id = source_run_id or item.source_run_id
-                item.next_check_at = next_daily_refresh(
-                    now, local_hour=self.refresh_local_hour
-                )
+                item.next_check_at = next_daily_refresh(now, local_hour=self.refresh_local_hour)
                 item.updated_at = now
             response = self._public(item, offer, product)
             session.add(
@@ -350,13 +355,17 @@ class MemoryService:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def list(self, user_id: str) -> list[dict[str, Any]]:
+    async def list(self, user_id: str, *, lifecycle_status: str = "active") -> list[dict[str, Any]]:
         async with self.database.sessions() as session:
             items = list(
                 (
                     await session.scalars(
                         select(MemoryEntry)
-                        .where(MemoryEntry.user_id == user_id, MemoryEntry.status == "active")
+                        .where(
+                            MemoryEntry.user_id == user_id,
+                            MemoryEntry.status == "active",
+                            MemoryEntry.lifecycle_status == lifecycle_status,
+                        )
                         .order_by(MemoryEntry.updated_at.desc(), MemoryEntry.memory_id)
                     )
                 ).all()
@@ -410,6 +419,7 @@ class MemoryService:
                 category=category,
                 key=key,
                 content=content,
+                keywords=extract_keywords(content),
                 confidence=confidence,
                 source="user",
                 status="active",
@@ -418,6 +428,9 @@ class MemoryService:
                 version=1,
                 created_at=now,
                 updated_at=now,
+                lifecycle_status="active",
+                last_reinforced_at=now,
+                reinforcement_count=1,
             )
             session.add(item)
             snapshot = _memory_snapshot(item)
@@ -456,10 +469,16 @@ class MemoryService:
                 item.category = category
             if content is not None:
                 item.content = content
+                item.keywords = extract_keywords(content)
             if confidence is not None:
                 item.confidence = confidence
             item.version += 1
             item.updated_at = now
+            item.last_reinforced_at = now
+            item.reinforcement_count += 1
+            item.lifecycle_status = "active"
+            item.archived_at = None
+            item.purge_after = None
             snapshot = _memory_snapshot(item)
             session.add(
                 MemoryVersion(
@@ -485,6 +504,7 @@ class MemoryService:
             if item is None or item.status != "active":
                 raise ApiError(404, "MEMORY_NOT_FOUND", "长期记忆不存在")
             item.status = "deleted"
+            item.lifecycle_status = "deleted"
             item.deleted_at = now
             item.updated_at = now
             item.version += 1
@@ -500,6 +520,224 @@ class MemoryService:
                 )
             )
             session.add(self._outbox(item, "memory.deleted", snapshot, now))
+
+    async def restore(self, user_id: str, memory_id: str) -> dict[str, Any]:
+        now = utc_naive()
+        async with self.database.sessions.begin() as session:
+            item = await session.scalar(
+                select(MemoryEntry)
+                .where(MemoryEntry.memory_id == memory_id, MemoryEntry.user_id == user_id)
+                .with_for_update()
+            )
+            if item is None or item.status != "active" or item.lifecycle_status != "archived":
+                raise ApiError(404, "MEMORY_NOT_ARCHIVED", "已归档长期记忆不存在")
+            item.lifecycle_status = "active"
+            item.archived_at = None
+            item.purge_after = None
+            item.last_reinforced_at = now
+            item.reinforcement_count += 1
+            item.updated_at = now
+            item.version += 1
+            snapshot = _memory_snapshot(item)
+            session.add(
+                MemoryVersion(
+                    memory_version_id=uuid4().hex,
+                    memory_id=item.memory_id,
+                    version=item.version,
+                    operation="restore",
+                    snapshot_json=snapshot,
+                    created_at=now,
+                )
+            )
+            session.add(self._outbox(item, "memory.upserted", snapshot, now))
+        return snapshot
+
+    async def list_candidates(self, user_id: str, *, status: str = "pending") -> list[dict]:
+        async with self.database.sessions() as session:
+            candidates = list(
+                (
+                    await session.scalars(
+                        select(MemoryCandidate)
+                        .where(
+                            MemoryCandidate.user_id == user_id,
+                            MemoryCandidate.status == status,
+                        )
+                        .order_by(MemoryCandidate.created_at.desc())
+                    )
+                ).all()
+            )
+        return [self._candidate_snapshot(item) for item in candidates]
+
+    async def create_candidate(
+        self,
+        user_id: str,
+        *,
+        category: str,
+        key: str,
+        content: str,
+        confidence: Decimal,
+        source_thread_id: str | None,
+        source_run_id: str | None,
+        ttl_days: int = 30,
+    ) -> dict[str, Any]:
+        now = utc_naive()
+        content_hash = hashlib.sha256(
+            f"{category}\0{key}\0{' '.join(content.split())}".encode()
+        ).hexdigest()
+        async with self.database.sessions.begin() as session:
+            existing = await session.scalar(
+                select(MemoryCandidate).where(
+                    MemoryCandidate.user_id == user_id,
+                    MemoryCandidate.content_hash == content_hash,
+                    MemoryCandidate.status == "pending",
+                )
+            )
+            if existing is not None:
+                return self._candidate_snapshot(existing)
+            candidate = MemoryCandidate(
+                candidate_id=uuid4().hex,
+                user_id=user_id,
+                category=category,
+                key=key,
+                content=content,
+                keywords=extract_keywords(content),
+                confidence=confidence,
+                content_hash=content_hash,
+                source_thread_id=source_thread_id,
+                source_run_id=source_run_id,
+                status="pending",
+                created_at=now,
+                expires_at=now + timedelta(days=ttl_days),
+            )
+            session.add(candidate)
+        return self._candidate_snapshot(candidate)
+
+    async def confirm_candidate(
+        self,
+        user_id: str,
+        candidate_id: str,
+        *,
+        category: str | None = None,
+        key: str | None = None,
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_naive()
+        async with self.database.sessions.begin() as session:
+            candidate = await session.scalar(
+                select(MemoryCandidate)
+                .where(
+                    MemoryCandidate.candidate_id == candidate_id,
+                    MemoryCandidate.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if candidate is None:
+                raise ApiError(404, "MEMORY_CANDIDATE_NOT_FOUND", "长期记忆候选不存在")
+            if candidate.status == "confirmed":
+                existing = await session.scalar(
+                    select(MemoryEntry).where(
+                        MemoryEntry.user_id == user_id, MemoryEntry.key == candidate.key
+                    )
+                )
+                if existing is not None:
+                    return _memory_snapshot(existing)
+            if candidate.status != "pending" or candidate.expires_at <= now:
+                raise ApiError(409, "MEMORY_CANDIDATE_NOT_PENDING", "长期记忆候选已失效")
+            resolved_category = category or candidate.category
+            resolved_key = key or candidate.key
+            resolved_content = content or candidate.content
+            item = await session.scalar(
+                select(MemoryEntry)
+                .where(MemoryEntry.user_id == user_id, MemoryEntry.key == resolved_key)
+                .with_for_update()
+            )
+            if item is None:
+                item = MemoryEntry(
+                    memory_id=uuid4().hex,
+                    user_id=user_id,
+                    category=resolved_category,
+                    key=resolved_key,
+                    content=resolved_content,
+                    keywords=extract_keywords(resolved_content),
+                    confidence=candidate.confidence,
+                    source="agent_confirmed",
+                    status="active",
+                    lifecycle_status="active",
+                    source_thread_id=candidate.source_thread_id,
+                    source_run_id=candidate.source_run_id,
+                    version=1,
+                    reinforcement_count=1,
+                    last_reinforced_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(item)
+                operation = "create"
+            else:
+                item.category = resolved_category
+                item.content = resolved_content
+                item.keywords = extract_keywords(resolved_content)
+                item.confidence = candidate.confidence
+                item.source = "agent_confirmed"
+                item.status = "active"
+                item.lifecycle_status = "active"
+                item.archived_at = None
+                item.purge_after = None
+                item.source_thread_id = candidate.source_thread_id
+                item.source_run_id = candidate.source_run_id
+                item.version += 1
+                item.reinforcement_count += 1
+                item.last_reinforced_at = now
+                item.updated_at = now
+                operation = "update"
+            snapshot = _memory_snapshot(item)
+            session.add(
+                MemoryVersion(
+                    memory_version_id=uuid4().hex,
+                    memory_id=item.memory_id,
+                    version=item.version,
+                    operation=operation,
+                    snapshot_json=snapshot,
+                    created_at=now,
+                )
+            )
+            session.add(self._outbox(item, "memory.upserted", snapshot, now))
+            candidate.status = "confirmed"
+            candidate.decided_at = now
+        return snapshot
+
+    async def reject_candidate(self, user_id: str, candidate_id: str) -> None:
+        now = utc_naive()
+        async with self.database.sessions.begin() as session:
+            candidate = await session.scalar(
+                select(MemoryCandidate)
+                .where(
+                    MemoryCandidate.candidate_id == candidate_id,
+                    MemoryCandidate.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if candidate is None or candidate.status != "pending":
+                raise ApiError(404, "MEMORY_CANDIDATE_NOT_FOUND", "待确认长期记忆候选不存在")
+            candidate.status = "rejected"
+            candidate.decided_at = now
+
+    @staticmethod
+    def _candidate_snapshot(item: MemoryCandidate) -> dict[str, Any]:
+        return {
+            "candidate_id": item.candidate_id,
+            "category": item.category,
+            "key": item.key,
+            "content": item.content,
+            "keywords": list(item.keywords or []),
+            "confidence": _decimal(item.confidence),
+            "source_thread_id": item.source_thread_id,
+            "source_run_id": item.source_run_id,
+            "status": item.status,
+            "created_at": _iso(item.created_at),
+            "expires_at": _iso(item.expires_at),
+            "decided_at": _iso(item.decided_at),
+        }
 
     @staticmethod
     def _outbox(

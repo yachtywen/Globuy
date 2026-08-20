@@ -6,6 +6,7 @@ import asyncio
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import uuid4
@@ -63,9 +64,8 @@ from app.auth.service import AuthService
 from app.config import Settings, get_settings
 from app.database.services import MemoryService, WishlistService
 from app.database.session import Database
-from app.database.session_store import MySQLSessionStore
-from app.infrastructure.opensearch import build_opensearch_client
-from app.memory.opensearch_store import GlobuyMemoryStore
+from app.database.session_store import SQLAlchemySessionStore
+from app.memory.postgres_store import PostgresMemoryStore
 from app.search.catalog_images import enrich_task_result
 from app.search.encoder import get_embedding_encoder
 from app.utils.path_utils import session_path, upload_path
@@ -128,7 +128,7 @@ def create_app(
             pool_size=settings.database_pool_size,
             pool_recycle=settings.database_pool_recycle_seconds,
         )
-        store = MySQLSessionStore(database)
+        store = SQLAlchemySessionStore(database)
         auth_service = AuthService(database, settings)
         wishlist_service = WishlistService(
             database,
@@ -137,12 +137,11 @@ def create_app(
         )
         memory_service = MemoryService(database)
         if agent_runner is run_agent:
-            main_agent.store = GlobuyMemoryStore(
+            main_agent.store = PostgresMemoryStore(
                 database,
                 memory_service,
-                build_opensearch_client(settings),
                 get_embedding_encoder(),
-                settings.opensearch_memory_index,
+                settings,
             )
     else:
         # Kept only for isolated legacy tests and explicit local diagnostics.
@@ -154,6 +153,45 @@ def create_app(
         retention_seconds=settings.event_retention_seconds,
         subscriber_queue_size=settings.ws_subscriber_queue_size,
     )
+
+    async def persist_memory_candidates(
+        user_id: str,
+        thread_id: str,
+        run_id: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if memory_service is None:
+            return []
+        persisted: list[dict[str, Any]] = []
+        for candidate in candidates:
+            try:
+                confidence = Decimal(str(candidate.get("confidence", 0)))
+                category = str(candidate.get("category") or "")
+                key = str(candidate.get("key") or "").strip()
+                content = str(candidate.get("content") or "").strip()
+                if (
+                    confidence < Decimal(str(settings.memory_candidate_min_confidence))
+                    or category not in {"blacklist", "preference", "history"}
+                    or not key
+                    or not content
+                ):
+                    continue
+                persisted.append(
+                    await memory_service.create_candidate(
+                        user_id,
+                        category=category,
+                        key=key[:128],
+                        content=content[:4000],
+                        confidence=confidence,
+                        source_thread_id=thread_id,
+                        source_run_id=run_id,
+                        ttl_days=settings.memory_candidate_ttl_days,
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        return persisted
+
     registry = RunRegistry(
         store=store,
         broker=broker,
@@ -161,6 +199,7 @@ def create_app(
         stream_runner=stream_runner,
         session_dir=lambda thread_id: _session_dir(settings, thread_id),
         product_image_catalog_path=settings.product_image_catalog_path,
+        memory_candidate_sink=(persist_memory_candidates if memory_service is not None else None),
         cancel_grace_seconds=settings.run_cancel_grace_seconds,
     )
 
