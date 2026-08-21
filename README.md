@@ -15,7 +15,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/assets/screenshots/globuy-cover.png" width="100%" alt="Globuy 登录封面与品牌主视觉" />
+  <img src="docs/assets/screenshots/globuy-login-cover.png" width="100%" alt="Globuy 登录封面与品牌主视觉" />
 </p>
 
 ## 项目简介
@@ -33,13 +33,13 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 
 用户输入预算和用途后，前端持续展示 Agent 阶段、工具调用和完成状态，并将经过验证的候选渲染为可比较、可收藏、可追溯来源的商品卡片。
 
-![Globuy 对话式购物工作台](docs/assets/screenshots/globuy-workbench.png)
+![Globuy 对话式购物工作台](docs/assets/screenshots/globuy-agent-workbench.png)
 
 ### 心愿库与价格追踪
 
 推荐商品可以进入用户心愿库。系统保留加入价格、当前价格、最近观测时间和下一次检查时间，并支持手动刷新与独立价格 Worker。
 
-![Globuy 心愿库与价格追踪](docs/assets/screenshots/globuy-wishlist.png)
+![Globuy 心愿库与价格追踪](docs/assets/screenshots/globuy-wishlist-price-tracking.png)
 
 ## 已实现能力
 
