@@ -95,6 +95,8 @@ def test_health(client: TestClient) -> None:
     assert isinstance(payload["product_provider_configured"], bool)
     assert isinstance(payload["web_search_configured"], bool)
     assert isinstance(payload["category_cache_enabled"], bool)
+    assert payload["observability_status"] == "disabled"
+    assert payload["observability_configured"] is False
     assert all("key" not in key and "token" not in key for key in payload)
 
 
@@ -114,6 +116,7 @@ def test_http_chat_uses_mock_graph(client: TestClient) -> None:
 def test_thread_task_status_and_replayable_websocket(client: TestClient) -> None:
     thread = create_thread(client)
     task = start_task(client, thread["thread_id"], "测试 WebSocket")
+    assert len(task["trace_id"]) == 32
     status = wait_for_status(
         client, thread["thread_id"], task["run_id"], {"succeeded"}
     )

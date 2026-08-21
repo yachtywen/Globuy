@@ -1,5 +1,28 @@
 # globuy 项目状态
 
+## 2026-08-21：完成 Agent 全链路可观测代码接入
+
+- 接入 LangFuse Python SDK v4：每个 RunRegistry run 使用 `run_id` 生成稳定的 32 位 W3C Trace ID，
+  创建根 `globuy.agent_run`；同一个 request-scoped LangChain Callback 通过 RunnableConfig 与 ContextVar
+  进入 LangGraph 主图、模型、九个业务工具、ShoppingSummary 和同质 fork，不改变 AG-UI 与 WebSocket。
+- 新增默认关闭的 `none | langfuse` provider、Cloud 日本区配置、100% 首期采样和 `none/summary/full`
+  采集档。默认 summary 只导出结构、长度和摘要哈希；SDK mask 与 OTEL export-stage mask 双层覆盖
+  LangChain span，用户 ID 使用带 Salt 的 HMAC。初始化、发送和关闭异常全部 fail-open。
+- ChatOpenAI 开启 streaming usage，使模型返回的 prompt/completion usage 可进入 generation；工具与阶段
+  RT 由 LangFuse span 和现有 Monitor 事件共同保留。`/healthz` 新增无凭据状态，API 任务响应、run status、
+  `RUN_STARTED/RUN_FINISHED` 暴露同一非敏感 Trace ID，进程关闭时有界等待 SDK shutdown。
+- live Eval evidence/report 增加每轮 Trace ID、工具调用数和工具总耗时；新增显式
+  `--publish-langfuse-scores`，只在 live 且 LangFuse 已配置时发布总分与 P0 score。offline 默认路径仍不
+  访问模型、Provider、数据库或 Cloud。
+- 验证未调用真实模型或 Cloud：Ruff、`compileall` 通过；观测/评测/AgentLoop/fork 定向集合 53 项
+  通过，offline CLI 6/6 PASS；包含完整 API 测试的另一组集合 29 项通过。仍有一个与本次无关的
+  WebSocket 多订阅 replay 用例在当前 Starlette TestClient 下偶发 `CancelledError`；评测健康测试已
+  显式隔离本地 `.env` 的数据库 URL，避免开发机配置污染 legacy SQLite 测试。
+- 尚未完成：缺少真实 LangFuse Cloud 项目凭据，因此远端 ingestion、看板、三类烟雾 Trace、隐私搜索和
+  五分钟 badcase 计时验收未执行；文档已给出启用、看板、排障与紧急关闭 Runbook。
+- README、`.env.example`、双层评测文档和接口文档已同步启用步骤、健康字段、Trace ID 契约及显式
+  Score 发布方式；LangFuse 保持可选旁路，不成为 API 启动或任务成功的必要条件。
+
 ## 2026-08-20：固化 Agent 全链路可观测体系实施计划
 
 - 新增 `docs/agent-observability-langfuse-implementation-plan.md`，基于当前 LangGraph

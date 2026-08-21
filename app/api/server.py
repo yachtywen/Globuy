@@ -66,6 +66,7 @@ from app.database.services import MemoryService, WishlistService
 from app.database.session import Database
 from app.database.session_store import SQLAlchemySessionStore
 from app.memory.postgres_store import PostgresMemoryStore
+from app.observability import ObservabilityManager
 from app.search.catalog_images import enrich_task_result
 from app.search.encoder import get_embedding_encoder
 from app.utils.path_utils import session_path, upload_path
@@ -153,6 +154,7 @@ def create_app(
         retention_seconds=settings.event_retention_seconds,
         subscriber_queue_size=settings.ws_subscriber_queue_size,
     )
+    observability = ObservabilityManager(settings)
 
     async def persist_memory_candidates(
         user_id: str,
@@ -200,6 +202,7 @@ def create_app(
         session_dir=lambda thread_id: _session_dir(settings, thread_id),
         product_image_catalog_path=settings.product_image_catalog_path,
         memory_candidate_sink=(persist_memory_candidates if memory_service is not None else None),
+        observability=observability,
         cancel_grace_seconds=settings.run_cancel_grace_seconds,
     )
 
@@ -217,6 +220,7 @@ def create_app(
         finally:
             await registry.close()
             await broker.close()
+            await observability.shutdown()
             await store.close()
 
     app = FastAPI(
@@ -232,6 +236,7 @@ def create_app(
     app.state.auth_service = auth_service
     app.state.event_broker = broker
     app.state.run_registry = registry
+    app.state.observability = observability
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_error_handler)
@@ -280,6 +285,7 @@ def create_app(
                 settings.web_search_provider != "none" and settings.tavily_api_key is not None
             ),
             "category_cache_enabled": bool(settings.redis_url),
+            **observability.health(),
         }
         if database is not None:
             try:

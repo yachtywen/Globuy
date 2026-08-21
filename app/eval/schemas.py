@@ -136,6 +136,7 @@ class CaseEvidence(StrictModel):
     catalog: list[CatalogFact] = Field(default_factory=list)
     transcript: str = ""
     duration_ms: int = Field(default=0, ge=0)
+    trace_ids: list[str] = Field(default_factory=list)
     error: str | None = None
 
 

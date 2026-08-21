@@ -236,6 +236,7 @@ def test_health_exposes_safe_evaluation_preflight_flags(tmp_path: Path) -> None:
         return query, {}
 
     settings = Settings(
+        database_url=None,
         model_provider="mock",
         product_provider="none",
         web_search_provider="none",

@@ -20,6 +20,7 @@ from app.config import Settings, get_settings
 from app.database.models import Offer, Product
 from app.database.session import Database
 from app.eval.schemas import CaseEvidence, CatalogFact, EvaluationCase, EvaluationCaseFile
+from app.observability import trace_id_for_run
 
 TERMINAL_RUN_STATUSES = {"succeeded", "cancelled", "failed", "interrupted"}
 TERMINAL_EVENTS = {"RUN_FINISHED", "RUN_ERROR", "TASK_CANCELLED"}
@@ -219,6 +220,7 @@ class LiveEvaluationClient:
         thread_id = await self._create_thread()
         memory_ids: list[str] = []
         all_events: list[dict[str, Any]] = []
+        trace_ids: list[str] = []
         transcript: list[str] = []
         final_run: dict[str, Any] = {}
         try:
@@ -235,6 +237,9 @@ class LiveEvaluationClient:
                 )
                 response.raise_for_status()
                 run_id = str(response.json()["run_id"])
+                trace_ids.append(
+                    str(response.json().get("trace_id") or trace_id_for_run(run_id))
+                )
                 final_run = await self._wait_run(thread_id, run_id, case.timeout_seconds)
                 all_events.extend(
                     await _collect_replayed_events(
@@ -260,6 +265,7 @@ class LiveEvaluationClient:
                 catalog=await _catalog_facts(result, self.settings),
                 transcript="\n\n".join(transcript),
                 duration_ms=int((time.perf_counter() - started) * 1000),
+                trace_ids=trace_ids,
                 error=(final_run.get("error") or {}).get("message"),
             )
         except TimeoutError as exc:
@@ -268,6 +274,7 @@ class LiveEvaluationClient:
                 events=all_events,
                 transcript="\n\n".join(transcript),
                 duration_ms=int((time.perf_counter() - started) * 1000),
+                trace_ids=trace_ids,
                 error=str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - one case must not stop the suite
@@ -276,6 +283,7 @@ class LiveEvaluationClient:
                 events=all_events,
                 transcript="\n\n".join(transcript),
                 duration_ms=int((time.perf_counter() - started) * 1000),
+                trace_ids=trace_ids,
                 error=f"{type(exc).__name__}: {exc}",
             )
         finally:

@@ -19,13 +19,14 @@ from app.config import get_settings  # noqa: E402
 from app.eval.llm_judge import JudgeConfig, call_llm_judge  # noqa: E402
 from app.eval.reporting import (  # noqa: E402
     append_high_value_trace,
-    render_report,
+    render_report_with_evidence,
     write_events,
     write_json,
 )
 from app.eval.runner import LiveEvaluationClient, fixture_evidence, load_case_file  # noqa: E402
 from app.eval.schemas import CaseEvidence, CaseResult, EvaluationCase  # noqa: E402
 from app.eval.scoring import score_evidence  # noqa: E402
+from app.observability import ObservabilityManager  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -117,6 +118,11 @@ async def main() -> int:
     parser.add_argument("--allow-model-calls", action="store_true")
     parser.add_argument("--allow-external-tools", action="store_true")
     parser.add_argument("--judge", action="store_true")
+    parser.add_argument(
+        "--publish-langfuse-scores",
+        action="store_true",
+        help="显式把 live case 分数关联到对应 LangFuse Trace",
+    )
     args = parser.parse_args()
 
     case_file = load_case_file(args.cases)
@@ -127,6 +133,8 @@ async def main() -> int:
         raise SystemExit("没有匹配的评测 case")
     if args.suite == "live" and not args.allow_model_calls:
         raise SystemExit("拒绝运行 live 评测：请显式添加 --allow-model-calls")
+    if args.publish_langfuse_scores and args.suite != "live":
+        raise SystemExit("--publish-langfuse-scores 仅允许用于 live 评测")
 
     evaluation_id = f"{args.suite}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     output_dir = args.output or PROJECT_ROOT / "output" / "eval" / evaluation_id
@@ -171,10 +179,41 @@ async def main() -> int:
                 results.append(result)
                 print(f"   -> {result.verdict} ({result.score:.3f})", flush=True)
 
+    published_scores = 0
+    if args.publish_langfuse_scores:
+        score_publisher = ObservabilityManager(get_settings())
+        if not score_publisher.enabled:
+            raise SystemExit("LangFuse 未正确配置，拒绝发布评测分数")
+        for result in results:
+            for trace_id in evidence_by_case[result.case_id].trace_ids:
+                published_scores += int(
+                    score_publisher.publish_score(
+                        trace_id=trace_id,
+                        name="globuy.eval.score",
+                        value=result.score,
+                        comment=f"{evaluation_id}/{result.case_id}",
+                        metadata={"case_id": result.case_id, "verdict": result.verdict},
+                    )
+                )
+                published_scores += int(
+                    score_publisher.publish_score(
+                        trace_id=trace_id,
+                        name="globuy.eval.p0_pass",
+                        value=1.0 if result.p0_pass else 0.0,
+                        data_type="BOOLEAN",
+                        comment=f"{evaluation_id}/{result.case_id}",
+                    )
+                )
+        await score_publisher.shutdown()
+
     manifest = _manifest(evaluation_id, args.cases, args.suite, capabilities, judge_config)
     manifest["external_calls_authorized"] = bool(
-        args.allow_model_calls or args.allow_external_tools or args.judge
+        args.allow_model_calls
+        or args.allow_external_tools
+        or args.judge
+        or args.publish_langfuse_scores
     )
+    manifest["langfuse_scores_published"] = published_scores
     write_json(output_dir / "manifest.json", manifest)
     write_events(output_dir / "events.jsonl", evidence_by_case)
     write_json(
@@ -182,7 +221,7 @@ async def main() -> int:
         [result.model_dump(mode="json") for result in results],
     )
     (output_dir / "report.md").write_text(
-        render_report(results, evaluation_id), encoding="utf-8"
+        render_report_with_evidence(results, evidence_by_case, evaluation_id), encoding="utf-8"
     )
     trace_path = PROJECT_ROOT / "output" / "eval" / "accepted-traces.jsonl"
     for result in results:

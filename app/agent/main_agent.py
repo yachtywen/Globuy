@@ -33,6 +33,7 @@ from app.agent.middleware import cache_breakpoint_update, loop_detected, tool_re
 from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import EventType, current_monitor
 from app.config import get_settings
+from app.observability import current_observability_config
 from app.products.catalog.intent import ShoppingIntent
 from app.search.schemas import Platform
 from app.tools import TERMINAL_TOOLS, TOOL_PHASES
@@ -553,12 +554,16 @@ class AgentLoop:
 
     def _config(self, thread_id: str, *, child: bool = False) -> RunnableConfig:
         settings = get_settings()
+        observation = current_observability_config()
+        metadata = {"model_role": "coordinator", **observation.get("metadata", {})}
         return {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": (
                 settings.fork_recursion_limit if child else settings.main_agent_recursion_limit
             ),
-            "metadata": {"model_role": "coordinator"},
+            "metadata": metadata,
+            "tags": ["globuy", "agent-fork" if child else "agent-root"],
+            **({"callbacks": observation["callbacks"]} if observation.get("callbacks") else {}),
         }
 
     async def _invoke(

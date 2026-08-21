@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     event_retention_seconds: int = Field(default=1_800, ge=1)
     ws_subscriber_queue_size: int = Field(default=256, ge=10)
 
+    observability_provider: Literal["none", "langfuse"] = "none"
+    langfuse_base_url: str = "https://jp.cloud.langfuse.com"
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_capture_mode: Literal["none", "summary", "full"] = "summary"
+    langfuse_sample_rate: float = Field(default=1.0, ge=0, le=1)
+    observability_hash_salt: SecretStr | None = None
+    observability_flush_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+
     database_url: SecretStr | None = None
     database_echo: bool = False
     database_pool_size: int = Field(default=10, ge=1, le=100)
@@ -96,7 +105,13 @@ class Settings(BaseSettings):
     product_index_disk_percent_threshold: float = Field(default=80.0, ge=1, le=100)
     product_index_retention_seconds: int = Field(default=86_400, ge=0)
 
-    @field_validator("database_url", mode="before")
+    @field_validator(
+        "database_url",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "observability_hash_salt",
+        mode="before",
+    )
     @classmethod
     def empty_database_url_is_unconfigured(cls, value: object) -> object:
         return None if value == "" else value

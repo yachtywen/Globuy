@@ -16,6 +16,7 @@ from app.api.errors import ApiError
 from app.api.event_broker import EventBroker
 from app.api.monitor import EventType, Monitor, monitor_scope
 from app.api.storage import TERMINAL_RUN_STATUSES, SessionStore, utc_now
+from app.observability import ObservabilityManager, trace_id_for_run
 from app.presentation import sanitize_shopping_markdown, visible_unresolved
 from app.search.catalog_images import enrich_task_result
 
@@ -59,6 +60,14 @@ class RunHandle:
     status: str = "starting"
 
 
+class _NullObservation:
+    def __enter__(self) -> _NullObservation:
+        return self
+
+    def __exit__(self, *_args: object) -> bool:
+        return False
+
+
 class RunRegistry:
     def __init__(
         self,
@@ -70,6 +79,7 @@ class RunRegistry:
         session_dir: Callable[[str], Path],
         product_image_catalog_path: Path,
         memory_candidate_sink: MemoryCandidateSink | None = None,
+        observability: ObservabilityManager | None = None,
         cancel_grace_seconds: float = 5.0,
     ) -> None:
         self.store = store
@@ -79,6 +89,7 @@ class RunRegistry:
         self.session_dir = session_dir
         self.product_image_catalog_path = product_image_catalog_path
         self.memory_candidate_sink = memory_candidate_sink
+        self.observability = observability
         self.cancel_grace_seconds = cancel_grace_seconds
         self.active_tasks: dict[str, RunHandle] = {}
         self.thread_locks: dict[str, asyncio.Lock] = {}
@@ -123,6 +134,7 @@ class RunRegistry:
                     "status": "starting",
                     "thread_id": thread_id,
                     "run_id": run_id,
+                    "trace_id": trace_id_for_run(run_id),
                     "replaced_run_id": replaced_run_id,
                     "created_at": created_at,
                     "ws_url": f"/api/v1/ws/{thread_id}?run_id={run_id}&after=0",
@@ -281,6 +293,7 @@ class RunRegistry:
         return {
             "thread_id": thread_id,
             "run_id": run_id,
+            "trace_id": trace_id_for_run(run_id),
             "status": record["status"],
             "created_at": record["created_at"],
             "started_at": record["started_at"],
@@ -319,8 +332,39 @@ class RunRegistry:
         message_id = uuid4().hex
         deltas: list[str] = []
         metadata: dict[str, Any] = {}
-        message_started = False
         handle.started_event.set()
+        observation = (
+            self.observability.observe_run(
+                run_id=handle.run_id,
+                thread_id=handle.thread_id,
+                user_id=handle.user_id,
+                query=handle.query,
+            )
+            if self.observability is not None
+            else None
+        )
+        observation_context = observation if observation is not None else _NullObservation()
+        with observation_context:
+            await self._execute_observed(
+                handle,
+                started=started,
+                message_id=message_id,
+                deltas=deltas,
+                metadata=metadata,
+                observation=observation,
+            )
+
+    async def _execute_observed(
+        self,
+        handle: RunHandle,
+        *,
+        started: float,
+        message_id: str,
+        deltas: list[str],
+        metadata: dict[str, Any],
+        observation: Any,
+    ) -> None:
+        message_started = False
         try:
             handle.status = "running"
             await self.store.set_run_status(handle.thread_id, handle.run_id, "running")
@@ -328,7 +372,10 @@ class RunRegistry:
                 EventType.RUN_STARTED,
                 handle.thread_id,
                 handle.run_id,
-                data={"started_at": utc_now()},
+                data={
+                    "started_at": utc_now(),
+                    "trace_id": trace_id_for_run(handle.run_id),
+                },
             )
             await self.broker.publish(
                 EventType.CUSTOM,
@@ -465,9 +512,12 @@ class RunRegistry:
                 handle.run_id,
                 data={
                     "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "trace_id": trace_id_for_run(handle.run_id),
                     "metadata": metadata,
                 },
             )
+            if observation is not None:
+                observation.finish("succeeded", result)
         except asyncio.CancelledError:
             partial = "".join(deltas)
             await asyncio.shield(
@@ -496,7 +546,9 @@ class RunRegistry:
                 data={"cancelled_at": utc_now(), "reason": "user_requested"},
             )
             handle.status = "cancelled"
-        except Exception:
+            if observation is not None:
+                observation.finish("cancelled", {"partial": bool(partial)})
+        except Exception as exc:
             logger.exception(
                 "Agent run failed for thread_id=%s run_id=%s",
                 handle.thread_id,
@@ -536,6 +588,8 @@ class RunRegistry:
                 },
             )
             handle.status = "failed"
+            if observation is not None:
+                observation.finish("failed", {"partial": bool(partial)}, error=exc)
         finally:
             if self.active_tasks.get(handle.thread_id) is handle:
                 self.active_tasks.pop(handle.thread_id, None)

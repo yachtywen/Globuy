@@ -33,6 +33,9 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
         "model": settings.llm_model,
         "api_key": settings.llm_api_key,
         "temperature": settings.llm_temperature,
+        # Streaming responses must include the final usage chunk so LangFuse can
+        # aggregate prompt/completion tokens for every generation.
+        "stream_usage": True,
     }
     if settings.llm_base_url:
         kwargs["base_url"] = settings.llm_base_url

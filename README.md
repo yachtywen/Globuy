@@ -56,6 +56,7 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 | 用户系统 | Argon2id 密码哈希、服务端可撤销会话、HttpOnly Cookie、CSRF、幂等写入和资源归属校验 |
 | 产品闭环 | React 工作台、会话归档、商品卡片、比较、来源链接、心愿库、价格历史、长期记忆管理和响应式布局 |
 | 评测体系 | YAML 双层用例、P0 确定性事实/安全门禁、可选独立 LLM Judge、正式 HTTP/WS live runner、脱敏轨迹和 Markdown 报告 |
+| Agent 可观测 | 可选 LangFuse v4 全链路 Trace；关联主图、模型、九工具与同质 fork，采集 Token/RT，并支持 Eval Score 回写；默认脱敏摘要且 fail-open |
 
 ## 核心技术亮点
 
@@ -138,6 +139,7 @@ flowchart LR
 | Frontend | React 19、TypeScript 5.8、Vite 7、Vitest |
 | Protocol | HTTP 202、WebSocket、AG-UI 风格事件、sequence replay |
 | Quality | Pytest、Ruff、双层 Eval、可选独立 LLM Judge |
+| Observability | LangFuse Cloud（可选旁路）、确定性 W3C Trace ID、LangChain Callback、脱敏 OTEL Export |
 
 ## 快速开始
 
@@ -183,7 +185,10 @@ alembic upgrade head
 
 开发演示可设置 `GLOBUY_MODEL_PROVIDER=mock`、`GLOBUY_WEB_SEARCH_PROVIDER=none`，这样不会调用付费模型或商品 Provider。不要提交 `.env`、密码、Token、数据库卷或真实 Provider 响应。
 
-不要提交 `.env`、密码、Token、数据库卷或真实 Provider 响应。
+可选启用 Agent 全链路观测：在 LangFuse 日本区项目中创建 API Key，把 Key 写入本地 `.env`，设置
+`GLOBUY_OBSERVABILITY_PROVIDER=langfuse`。默认 `summary` 模式不会上传完整 Prompt、商品数组或用户
+ID；`/healthz` 可检查 `observability_configured/enabled/status`，但不会回显凭据。完整配置、看板字段和
+排障流程见 [Agent 可观测实施与运维文档](docs/agent-observability-langfuse-implementation-plan.md)。
 
 ### 3. 启动前后端
 
@@ -246,6 +251,9 @@ python scripts/eval_regression.py --suite offline
 
 # 真实质量层必须使用隔离账号，并显式授权模型调用
 python scripts/eval_regression.py --suite live --allow-model-calls
+
+# 仅在明确希望向 LangFuse 写入分数时增加此开关
+python scripts/eval_regression.py --suite live --allow-model-calls --publish-langfuse-scores
 ```
 
 P0 事实与安全条件由代码硬判；P1/P2 可以交给独立 Judge，但 Judge 不能覆盖 P0 失败。真实层复用正式登录、CSRF、HTTP 202、任务轮询、WebSocket replay、长期记忆 API 与 PostgreSQL 商品事实。详见 [评测系统文档](docs/evaluation-system.md)。

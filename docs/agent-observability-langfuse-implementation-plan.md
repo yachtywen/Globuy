@@ -1,7 +1,8 @@
 # Globuy Agent 全链路可观测体系实施计划
 
-> 计划状态：待实施  
-> 确认日期：2026-08-20  
+> 计划状态：代码实施完成，待真实 Cloud 凭据烟雾验收
+>
+> 确认日期：2026-08-20；实施日期：2026-08-21
 > 首期选择：LangFuse Cloud 日本区、默认脱敏摘要、生产可用版
 
 ## 1. 目标与总体方案
@@ -21,16 +22,26 @@
 
 预计工作量为 9～12 人日，单人合理工期约 2～3 周。
 
+### 1.1 当前落地状态
+
+已完成 `app/observability/`、LangFuse v4 依赖、RunRegistry 根 `agent` observation、LangGraph/LangChain
+request-scoped Callback、ContextVar fork 继承、确定性 Trace ID、HMAC 用户标识、三档采集、OTEL
+export-stage 二次脱敏、健康检查、进程关闭 flush、流式 usage 请求、live Eval Trace ID 和显式 Score
+发布。`POST /api/v1/tasks`、run status、`RUN_STARTED` 与 `RUN_FINISHED` 都提供同一个 `trace_id`。
+
+本次没有真实 LangFuse 项目 Key，因此没有连接 Cloud、创建远端看板或执行付费 live Eval。Cloud 烟雾
+与五分钟定位仍是部署验收项，不能把“代码接入完成”写成“生产数据已经验证”。
+
 ## 2. 可观测适配层
 
 新增独立 `app/observability/` 模块，避免 LangFuse 代码散落在业务工具中：
 
 - `ObservabilityProvider`：支持 `none | langfuse`，默认 `none`。
 - `RunObservation`：管理根 Trace、LangChain Handler、关闭和异常降级。
-- `TraceContext`：保存 `trace_id/run_id/thread_id/fork_depth/evaluation_id`。
+- ContextVar 运行上下文：保存当前 Callback 与 `trace_id`，主图和 fork 重建 config 时继续继承。
 - `sanitize_observation()`：统一脱敏、裁剪和摘要生成。
-- `normalize_usage()`：统一 DeepSeek/OpenAI 兼容响应中的 Token 字段。
-- `classify_failure()`：将异常归入稳定故障分类。
+- ChatOpenAI `stream_usage` + LangFuse Callback：读取模型返回的标准 usage，不推测缺失 Token。
+- 根 observation 终态：记录 `succeeded/cancelled/failed`、RT 和异常类型，不上传异常正文。
 
 新增配置：
 
@@ -143,7 +154,7 @@ unknown
 扩展 live 评测，offline fixture 保持不变：
 
 - `CaseEvidence` 增加 `trace_ids`，支持多轮 case。
-- 报告为每轮真实运行生成 LangFuse Trace 链接。
+- 报告为每轮真实运行记录可在 LangFuse 搜索的 Trace ID。
 - 增加显式参数 `--publish-langfuse-scores`；未指定时只生成本地报告。
 - 启用后写入 `eval.overall`、`eval.p0_pass`、`eval.verdict` 和逐项 `eval.<criterion_id>`。
 - Score 通过稳定 `trace_id` 关联；上传失败不改变本地 verdict。
@@ -185,23 +196,22 @@ unknown
 
 ### 8.1 自动化测试
 
-全部使用 Fake LangFuse Client，不调用真实模型或 Cloud：
+已完成的自动化覆盖使用 Fake LangFuse Client，不调用真实模型或 Cloud：
 
 - provider 关闭、配置缺失和 SDK 异常时业务结果完全不变。
 - 根 Trace ID 稳定且不同 run 不冲突。
-- 主图、工具、模型、ShoppingSummary 和 fork 父子关系正确。
-- 相同 `tool_call_id` 不产生重复 observation。
-- 成功、超时、取消和异常都会关闭全部 observation。
-- DeepSeek/OpenAI Token 正确归一，不重复计算缓存 Token。
-- 工具实际 Token 与估算上下文 Token 严格分开。
+- Callback/Trace Context 在作用域内存在、退出后清理，初始化失败不逃逸到业务链路。
+- API 任务响应、状态和事件使用同一个确定性 Trace ID。
+- streaming usage 参数开启；Token 仅使用模型响应，不把工具估算值混入 generation usage。
 - 邮箱、密钥、Cookie、URL、用户记忆、Prompt 和商品数组不出现在发送载荷。
 - `/healthz` 不泄露凭据。
-- 现有 AG-UI sequence、终态互斥、WebSocket replay 和六个 offline Eval 不回归。
+- 现有 AgentLoop/fork、AG-UI/API 和六个 offline Eval 定向测试不回归。
 
 ### 8.2 Cloud 烟雾验收
 
 - 一次闲聊或单平台任务：验证基础 Trace、模型 Token 和工具 RT。
 - 一次淘宝/京东/抖音比较：验证三个 fork 属于同一个根 Trace。
+- 确认相同 `tool_call_id` 不产生重复 observation，ShoppingSummary generation 归属正确。
 - 一次取消或超时任务：验证 observation 正确结束且错误分类准确。
 - 一次 live Eval：验证本地报告、LangFuse Trace 和 Scores 能互相对应。
 - 在 LangFuse 搜索完整用户邮箱、密钥片段和原始商品数组，结果必须为零。
@@ -221,7 +231,7 @@ unknown
 
 1. 第 1～2 天：配置、Fake Client、脱敏器、稳定 Trace ID 和 fail-open 生命周期。
 2. 第 3～5 天：根 Trace、LangChain Handler、模型/工具/阶段/fork 层级与 Token 采集。
-3. 第 6～7 天：Eval Scores、报告链接、指标字段和三类看板。
+3. 第 6～7 天：Eval Scores、Trace 关联、指标字段和三类看板。
 4. 第 8～9 天：故障注入、Cloud 烟雾测试和五分钟定位验收。
 5. 第 10～12 天缓冲：处理 Token 兼容、异步上下文丢失、重复 Span 或 Cloud 网络问题。
 
@@ -243,3 +253,42 @@ unknown
 - [Token & Cost Tracking](https://langfuse.com/docs/observability/features/token-and-cost-tracking)
 - [Scores via SDK](https://langfuse.com/docs/evaluation/evaluation-methods/scores-via-sdk)
 
+## 12. 启用与运维 Runbook
+
+### 12.1 Cloud 启用
+
+1. 在 `https://jp.cloud.langfuse.com` 建立项目并创建 ingestion API Key。
+2. 将 Public/Secret Key 和随机生成的高熵 Salt 写入部署平台 Secret 或本地 `.env`；不得提交仓库。
+3. 设置 `GLOBUY_OBSERVABILITY_PROVIDER=langfuse`，首期保持 `CAPTURE_MODE=summary` 和
+   `SAMPLE_RATE=1.0`，重启 API。
+4. 检查 `/healthz`：`observability_configured=true`、`observability_enabled=true`、
+   `observability_status=ready`。这些字段只代表 SDK 已配置，不验证远端 Key 权限。
+5. 发起一条 mock 之外的隔离测试任务，用任务响应的 `trace_id` 在 LangFuse 搜索；确认根节点、
+   Think/Act/Observe/Reflect、模型 generation、工具与 fork 层级存在。
+6. 搜索测试邮箱、Secret Key 片段、完整 Prompt 与原始商品标题数组，必须零命中；否则立即关闭 provider。
+
+### 12.2 建议看板
+
+在 LangFuse UI 保存三组视图即可，无需改业务数据库：
+
+- 稳定性：按 `globuy.agent_run` 过滤，展示 trace count、ERROR 比例、P50/P95 latency，并按 status、
+  environment 分组。
+- 工具瓶颈：Observation type=tool，按 name 展示 count、error rate、P50/P95 duration；重点关注
+  `dispatch_tool`、`item_search`、`web_search`、`shopping_summary`。
+- Token/质量：Observation type=generation，按 model/name 展示 input/output/total tokens 和 cost；叠加
+  `globuy.eval.score`、`globuy.eval.p0_pass`，定位高成本低分 Trace。成本只采用 SDK/模型可核验值。
+
+### 12.3 五分钟 badcase 排查顺序
+
+1. 从 API、评测报告或用户反馈拿到 `trace_id`，先确认根 Trace 的 status、总 RT 和错误级别。
+2. 沿最慢或首个 ERROR 子节点下钻，判断停在模型、工具还是 fork；不要先通读完整日志。
+3. 模型节点检查 Token 突增、首包/总耗时和结束原因；工具节点检查输入结构摘要、RT 与异常类型。
+4. 多平台问题按 `dispatch_tool` 子树比较各 fork，区分单平台失败、超时和父 Agent 汇总失败。
+5. 对照同 case 的 Eval P0、总分与本地 `events.jsonl`；LangFuse 不替代 PostgreSQL 事实和 AG-UI 事件。
+
+### 12.4 降级与关闭
+
+- 紧急关闭：设置 `GLOBUY_OBSERVABILITY_PROVIDER=none` 并重启；Agent、HTTP/WS 和本地 Eval 不受影响。
+- 降采样：只调整 `GLOBUY_LANGFUSE_SAMPLE_RATE`；Trace ID 仍稳定返回，未采样 Trace 在 Cloud 中不存在。
+- 隐私收紧：改为 `CAPTURE_MODE=none`，输入输出属性在 export 阶段删除，名称、层级、时长仍保留。
+- SDK/网络故障只产生本地 warning；不得转成用户可见 `RUN_ERROR`。应用关闭时最多等待配置的 flush 超时。

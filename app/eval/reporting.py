@@ -107,6 +107,29 @@ def render_report(results: list[CaseResult], evaluation_id: str) -> str:
     return "\n".join(lines)
 
 
+def render_report_with_evidence(
+    results: list[CaseResult],
+    evidence_by_case: dict[str, CaseEvidence],
+    evaluation_id: str,
+) -> str:
+    """Add trace correlation and tool latency to the human-readable report."""
+
+    lines = [render_report(results, evaluation_id), "", "## 可观测性索引", ""]
+    lines.extend(["| case | Trace IDs | 工具调用数 | 工具总耗时 |", "|---|---|---:|---:|"])
+    for result in results:
+        evidence = evidence_by_case[result.case_id]
+        tool_ends = [event for event in evidence.events if event.get("event") == "TOOL_CALL_END"]
+        total_ms = sum(
+            int(event.get("data", {}).get("duration_ms") or 0) for event in tool_ends
+        )
+        trace_ids = "<br>".join(evidence.trace_ids) if evidence.trace_ids else "-"
+        lines.append(
+            f"| {_cell(result.case_id)} | {_cell(trace_ids)} | {len(tool_ends)} | {total_ms} ms |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def append_high_value_trace(
     path: Path,
     result: CaseResult,
@@ -130,6 +153,7 @@ def append_high_value_trace(
                 if item.get("event") == "TOOL_CALL_START"
             ],
             "result": evidence.result,
+            "trace_ids": evidence.trace_ids,
             "manifest": manifest_fingerprint,
             "training_use": False,
         }
@@ -142,6 +166,7 @@ def append_high_value_trace(
 __all__ = [
     "append_high_value_trace",
     "render_report",
+    "render_report_with_evidence",
     "sanitize",
     "write_events",
     "write_json",

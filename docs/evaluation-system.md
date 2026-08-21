@@ -8,9 +8,9 @@
 
 - `offline` 是默认路径，只读取仓库内合成夹具并运行确定性评分，不访问模型、Provider、数据库、
   OpenSearch 或 Redis。
-- `live` 使用正式认证、HTTP 202、WebSocket replay、任务状态与 MySQL 商品事实，必须显式允许模型
+- `live` 使用正式认证、HTTP 202、WebSocket replay、任务状态与 PostgreSQL 商品事实，必须显式允许模型
   调用；外部工具已配置时还需要第二次明确允许。
-- P0 只由代码判断，覆盖终态、工具、预算、结构化商品、MySQL 事实和来源链接；LLM Judge 只能判断
+- P0 只由代码判断，覆盖终态、工具、预算、结构化商品、PostgreSQL 事实和来源链接；LLM Judge 只能判断
   P1 行为命中与 P2 表达，不能覆盖 P0 失败。
 - 评测只生成回归和审计产物，不写训练标签、不修改检索权重，也不建立自动训练闭环。
 
@@ -55,6 +55,10 @@ python scripts/eval_regression.py --suite live --allow-model-calls
 `GLOBUY_EVAL_JUDGE_API_KEY`，然后增加 `--judge`。Judge 不会隐式复用主模型凭据。服务端若报告
 Tavily 或商品 Provider 已配置，运行器默认拒绝启动；只有明确增加 `--allow-external-tools` 才会继续。
 
+live runner 会把每轮 API 返回的确定性 `trace_id` 写入 evidence 和报告。只有显式增加
+`--publish-langfuse-scores` 时，才向对应 Trace 写入 `globuy.eval.score` 与
+`globuy.eval.p0_pass`；该开关仅允许用于 live suite，LangFuse 未配置时直接拒绝，不会静默丢分。
+
 可用参数：`--cases` 指定用例文件，`--only` 选择单 case，`--base-url` 指定服务，`--output`
 指定本轮产物目录。真实 case 按顺序执行，但每个 case 建立独立 thread，记忆条目使用 `eval_` 前缀并在
 case 结束后通过正式 API 删除，所以不依赖另一 case 的副作用。
@@ -66,11 +70,12 @@ case 结束后通过正式 API 删除，所以不依赖另一 case 的副作用�
 - `manifest.json`：Git、Prompt、cases 哈希，主模型/Judge、索引别名、Embedding 契约和安全能力开关。
 - `events.jsonl`：从正式 WebSocket replay 得到的脱敏 AG-UI 事件。
 - `case-results.json`：逐 criterion 的通过状态、理由、得分、耗时和错误。
-- `report.md`：按 offline/live 分开的汇总、失败证据和折叠对话。
+- `report.md`：按 offline/live 分开的汇总、失败证据、折叠对话、Trace ID、工具调用数和工具总耗时。
 
 P0 全过且得分至少 0.90 的合成/专用评测轨迹会追加到
 `output/eval/accepted-traces.jsonl`，并明确写入 `training_use=false`。API Key、Cookie、密码、CSRF、
 数据库 URL、Token 和 `reasoning_content` 会递归脱敏。普通用户会话不进入该轨迹文件。
 
-当前限制：首版没有评测数据库、后台 API 或前端看板；冷缓存、故障注入和 Provider 费用场景只应在
-隔离环境执行；WebSocket 事件缓冲仍是单进程内存实现，所以 live 评测继续要求单 worker。
+当前限制：没有评测数据库或后台 API；LangFuse 是外部可选看板而不是 Globuy 自建前端。冷缓存、故障
+注入和 Provider 费用场景只应在隔离环境执行；WebSocket 事件缓冲仍是单进程内存实现，所以 live 评测
+继续要求单 worker。Token/成本以模型响应中的 usage 和 LangFuse 已配置价格为准，禁止用猜测单价补数。

@@ -1,17 +1,17 @@
 # Globuy 接口文档 v1
 
 > 文档版本：v1  
-> 更新时间：2026-07-21  
+> 更新时间：2026-08-21
 > 适用范围：当前仓库实现的 Web 前端、FastAPI 后端与 WebSocket 实时任务流  
 > HTTP 接口前缀：`/api/v1`
 
-本文档以当前后端路由、Pydantic 请求模型、MySQL Repository、WebSocket 事件模型和前端 API Client 的实际实现为准，用于后续前端开发、联调与验收。示例中的 ID、邮箱、商品名称和时间均为占位数据，不代表真实业务数据。
+本文档以当前后端路由、Pydantic 请求模型、PostgreSQL Repository、WebSocket 事件模型和前端 API Client 的实际实现为准，用于后续前端开发、联调与验收。示例中的 ID、邮箱、商品名称和时间均为占位数据，不代表真实业务数据。
 
 ## 1. 当前接口范围与部署前提
 
 当前版本已实现服务状态、注册登录、会话、Agent 任务、运行结果、WebSocket 实时事件、运行产物、默认心愿库、价格历史和长期记忆接口。除注册、登录、根信息和健康检查外，核心业务接口均要求登录。业务数据按当前登录用户隔离，前端不得通过传入 `user_id` 指定身份。
 
-领域接口依赖 MySQL。正式启动时必须配置 `GLOBUY_DATABASE_URL`；未配置时生产启动会失败。代码与 Alembic 迁移已经实现，但接口可访问不代表当前部署已经完成建库、商品导入和 Worker 启动。
+领域接口依赖 PostgreSQL 17。正式启动时必须配置 `GLOBUY_DATABASE_URL`；未配置时生产启动会失败。代码与 Alembic 迁移已经实现，但接口可访问不代表当前部署已经完成建库、商品导入和 Worker 启动。
 
 应用启动后可访问：
 
@@ -34,7 +34,7 @@ WebSocket 不包含在 OpenAPI 中，以本文档第 8 节为准。
 - 请求模型禁止未声明的额外字段。
 - 路由 ID 仅允许字母、数字、下划线和连字符，长度 1～128。
 - 时间使用 ISO 8601 UTC，例如 `2026-07-21T08:30:00.123Z`。
-- 价格在 MySQL 中为 `DECIMAL(18,2)`，JSON 中为数字或 `null`，必须结合 `currency` 使用。
+- 价格在 PostgreSQL 中为 `NUMERIC(18,2)`，JSON 中为数字或 `null`，必须结合 `currency` 使用。
 - 分页游标是不透明字符串，前端不得解析或自行构造。
 
 推荐封装：
@@ -146,7 +146,16 @@ function readCookie(name: string): string | null {
 无需登录。健康响应 `200`：
 
 ```json
-{"status":"ok","model_provider":"openai","database":"ok"}
+{
+  "status":"ok",
+  "model_provider":"openai-compatible",
+  "database":"ok",
+  "observability_provider":"langfuse",
+  "observability_configured":true,
+  "observability_enabled":true,
+  "observability_status":"ready",
+  "observability_capture_mode":"summary"
+}
 ```
 
 数据库探测失败时当前实现仍返回 HTTP `200`：
@@ -156,6 +165,7 @@ function readCookie(name: string): string | null {
 ```
 
 监控和状态页必须判断响应体 `status`，不能只判断 HTTP 状态码。非生产诊断模式未配置数据库时，响应可能不含 `database`。
+观测字段不包含 Public/Secret Key 或 Hash Salt；`ready` 只表示本地 SDK 配置完成，不代表远端凭据已通过网络验证。
 
 ## 5. 认证接口
 
@@ -366,6 +376,7 @@ interface ThreadDetail extends ThreadSummary {
 ```json
 {
   "status":"starting","thread_id":"thr_example","run_id":"run_example",
+  "trace_id":"0123456789abcdef0123456789abcdef",
   "replaced_run_id":null,"created_at":"2026-07-21T08:30:00.000Z",
   "ws_url":"/api/v1/ws/thr_example?run_id=run_example&after=0",
   "status_url":"/api/v1/threads/thr_example/runs/run_example"
@@ -390,7 +401,8 @@ type RunStatus =
 
 ```json
 {
-  "thread_id":"thr_example","run_id":"run_example","status":"succeeded",
+  "thread_id":"thr_example","run_id":"run_example",
+  "trace_id":"0123456789abcdef0123456789abcdef","status":"succeeded",
   "created_at":"2026-07-21T08:30:00.000Z",
   "started_at":"2026-07-21T08:30:01.000Z",
   "finished_at":"2026-07-21T08:30:10.000Z",
@@ -503,7 +515,7 @@ HTTPS 使用 `wss://`。浏览器自动随同源握手发送会话 Cookie。首�
 
 | `event` | 主要数据 | 前端处理 |
 | --- | --- | --- |
-| `RUN_STARTED` | `started_at` | 标记开始 |
+| `RUN_STARTED` | `started_at`, `trace_id` | 标记开始并提供可观测关联 ID |
 | `STEP_STARTED` / `STEP_FINISHED` | 步骤信息 | 展示步骤进度 |
 | `TOOL_CALL_START` | `tool_call_id`, `tool_name` | 工具开始 |
 | `TOOL_CALL_ARGS` | `tool_call_id`, `arguments` | 可选调试展示 |
@@ -513,7 +525,7 @@ HTTPS 使用 `wss://`。浏览器自动随同源握手发送会话 Cookie。首�
 | `TEXT_MESSAGE_CONTENT` | `message_id`, `delta` | 追加增量文本 |
 | `TEXT_MESSAGE_END` | `message_id`, `partial` | 结束消息 |
 | `CUSTOM` | 见下文 | 结果与控制消息 |
-| `RUN_FINISHED` | `duration_ms`, `metadata` | 成功终态 |
+| `RUN_FINISHED` | `duration_ms`, `trace_id`, `metadata` | 成功终态 |
 | `RUN_ERROR` | `code`, `message`, `retryable` | 失败终态 |
 | `TASK_CANCELLED` | `cancelled_at`, `reason` | 取消终态 |
 
@@ -668,7 +680,7 @@ price_change_percent = price_change / added_price × 100
 
 ## 10. 长期记忆
 
-管理页面直接读 MySQL API。OpenSearch 通过 Outbox 异步同步，搜索索引可短暂滞后，CRUD 响应是权威状态。Agent 识别的偏好不能自动持久化，必须经用户确认后调用创建或修改接口。
+管理页面直接读 PostgreSQL API。OpenSearch 通过 Outbox 异步同步，搜索索引可短暂滞后，CRUD 响应是权威状态。Agent 识别的偏好不能自动持久化，必须经用户确认后调用创建或修改接口。
 
 ### 10.1 数据结构
 
