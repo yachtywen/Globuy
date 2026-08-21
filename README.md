@@ -293,11 +293,11 @@ globuy/
 后续任务、当前差距和每次验证记录见 [docs/ToDo.md](docs/ToDo.md) 与 [docs/project-status.md](docs/project-status.md)。
 
 ## 相关文档
-
+### 以下是我用codex aicoding时生成的相关文档（还有一些都在/docs）
 - [v1 接口文档](docs/globuy接口文档v1.md)
 - [项目状态与验证基线](docs/project-status.md)
 - [向量与检索固定契约](docs/vector-infrastructure.md)
-- [ItemSearch 无训练方案](docs/itemsearch-no-training-implementation-plan.md)
+- [ItemSearch 具体方案](docs/itemsearch-no-training-implementation-plan.md)
 - [AgentLoop 收尾实现](docs/itempicker-agentloop-10-14-implementation.md)
 - [双层评测系统](docs/evaluation-system.md)
 - [PostgreSQL 与 pgvector 迁移](docs/pg迁移.md)
