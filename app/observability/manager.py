@@ -7,8 +7,8 @@ import hashlib
 import hmac
 import logging
 import time
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
@@ -184,7 +184,8 @@ class ObservabilityManager:
             return
         try:
             from langfuse import Langfuse, propagate_attributes
-            from langfuse.langchain import CallbackHandler
+
+            from app.observability.callbacks import GlobuyLangfuseCallbackHandler
 
             self.client = Langfuse(
                 public_key=self.public_key,
@@ -195,7 +196,7 @@ class ObservabilityManager:
                 mask=lambda *, data, **_kwargs: sanitize(data),
                 mask_otel_spans=mask_otel_batch(settings.langfuse_capture_mode),
             )
-            self.callback_factory = CallbackHandler
+            self.callback_factory = GlobuyLangfuseCallbackHandler
             self.propagate_attributes = propagate_attributes
         except Exception as exc:  # noqa: BLE001
             self.enabled = False
@@ -263,6 +264,46 @@ class ObservabilityManager:
         except Exception:  # noqa: BLE001
             logger.warning("LangFuse score publishing failed", exc_info=True)
             return False
+
+    @contextmanager
+    def observe_generation(
+        self,
+        *,
+        trace_id: str,
+        name: str,
+        model: str,
+        input: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> Iterator[Any | None]:
+        """Attach a direct HTTP model call to an existing trace."""
+
+        if not self.enabled or self.client is None:
+            yield None
+            return
+        stack = ExitStack()
+        try:
+            generation = stack.enter_context(
+                self.client.start_as_current_observation(
+                    trace_context={"trace_id": trace_id},
+                    name=name,
+                    as_type="generation",
+                    model=model,
+                    input=sanitize(input),
+                    metadata=sanitize(metadata or {}),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            stack.close()
+            logger.warning("LangFuse manual generation initialization failed", exc_info=True)
+            yield None
+            return
+        try:
+            yield generation
+        finally:
+            try:
+                stack.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("LangFuse manual generation close failed", exc_info=True)
 
     async def shutdown(self) -> None:
         if self.client is None:

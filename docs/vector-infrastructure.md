@@ -144,6 +144,9 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
   `BAAI/bge-reranker-v2-m3` HTTP 端点也尚未配置。生产抽取缺失会返回 not_configured；需要精排
   且端点不可用时返回 partial，候选不足时旁路精排。任何路径都不得由模型常识静默补全。
 - 长期记忆复用冻结 BGE-M3 模型实例，但使用 PostgreSQL 独立事实表、`vector(1024)` 投影、HNSW/COSINE、关键词 GIN 和独立生命周期；不得复用商品索引、ItemSearch RRF Pipeline 或 Category Pipeline。
+- 长期记忆 v2 在保留 `key/category/content` 的同时增加 `subject/predicate/value_json/polarity/scope/evidence/fact_slot`。普通偏好按 `user_id + fact_slot` 去重或替代；黑名单与普通偏好冲突时返回硬冲突，不允许静默覆盖。
+- v2 召回仍使用无权重 RRF，再乘 `confidence × time_decay`；只增加确定性的作用域过滤与注入顺序，不引入人工相关性权重。active 黑名单全量返回且不计入普通记忆 Prompt 预算；普通记忆默认最多 10 条、估算 1200 Token。
+- 投影元数据不兼容时不得混用向量空间：向量 lane 显式标记 `vector_metadata_mismatch` 并降级到关键词 lane。关闭 `GLOBUY_MEMORY_RETRIEVAL_V2_ENABLED` 可恢复旧 `key/content + RRF` 读取路径，新字段与版本数据保留。
 
 ## 8. 变更控制
 

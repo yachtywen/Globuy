@@ -10,7 +10,7 @@
 在不替换现有 AG-UI、Monitor、WebSocket 和双层 Eval 的前提下，接入 LangFuse Cloud，形成：
 
 - 一次 `run_id` 对应一棵完整 Trace。
-- 主 Agent、Think/Reflect、九个业务工具、ShoppingSummary 模型调用和同质 fork 都能看到父子关系。
+- 主 Agent、Think/Reflect、八个业务工具、ShoppingSummary 模型调用和同质 fork 都能看到父子关系。
 - 统计每次模型调用的输入、输出、缓存及总 Token。
 - 统计 Run、阶段、工具、模型和 fork 的 RT、状态及错误类型。
 - Eval 结果可以反向关联到真实 Trace。
@@ -28,6 +28,16 @@
 request-scoped Callback、ContextVar fork 继承、确定性 Trace ID、HMAC 用户标识、三档采集、OTEL
 export-stage 二次脱敏、健康检查、进程关闭 flush、流式 usage 请求、live Eval Trace ID 和显式 Score
 发布。`POST /api/v1/tasks`、run status、`RUN_STARTED` 与 `RUN_FINISHED` 都提供同一个 `trace_id`。
+
+2026-08-23 已补齐细粒度指标：主协调器、fork、ShoppingSummary 和 CategoryInsight extractor 使用稳定
+generation 名称并记录消息数、字符数、System/历史/工具结果估算 Token；LangFuse v4 Callback 适配器在
+原 generation 内把 DeepSeek prompt cache hit/miss 和 reasoning usage 转成互斥 bucket，不创建重复节点。
+工具 observation 增加状态、真实 RT、结果估算 Token 和业务缓存摘要；提前拒绝使用同一 Callback 生命周期
+闭合唯一工具节点，fork child graph 继承 `dispatch_tool` 的 child callback manager，保持正确父子关系；
+`context.compress` 输出压缩前后估算值、实际移除消息数和保留工具组数。显式 live Eval 的独立 HTTP Judge 以
+`eval.judge` generation 关联
+到该 case 最后一条任务 Trace，并写入同一套互斥 usage。默认 summary 仅保留这些安全标量，实际计费仍只
+采用 Provider usage。
 
 本次没有真实 LangFuse 项目 Key，因此没有连接 Cloud、创建远端看板或执行付费 live Eval。Cloud 烟雾
 与五分钟定位仍是部署验收项，不能把“代码接入完成”写成“生产数据已经验证”。

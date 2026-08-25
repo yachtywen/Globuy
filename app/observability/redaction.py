@@ -9,12 +9,60 @@ from collections.abc import Mapping
 from typing import Any
 
 _SENSITIVE_KEY = re.compile(
-    r"(?:api[_-]?key|authorization|cookie|password|secret|token|credential)", re.I
+    r"(?:api[_-]?key|authorization|cookie|password|secret|token|credential|database.*url|reasoning_content)",
+    re.I,
 )
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
 _URL_QUERY = re.compile(r"(https?://[^\s?#]+)[?#][^\s]+", re.I)
 _MAX_STRING = 2_000
+_SAFE_TOKEN_METRICS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_input_tokens",
+        "cache_miss_input_tokens",
+        "reasoning_tokens",
+        "estimated_tokens",
+        "system_estimated_tokens",
+        "history_estimated_tokens",
+        "tool_result_estimated_tokens",
+        "context_estimated_tokens",
+        "before_estimated_tokens",
+        "after_estimated_tokens",
+    }
+)
+_SUMMARY_SCALARS = frozenset(
+    {
+        "status",
+        "duration_ms",
+        "phase",
+        "model_role",
+        "fork_depth",
+        "cache_type",
+        "cache_name",
+        "cache_hit",
+        "cache_hit_ratio",
+        "cache_key_hash",
+        "cache_ttl_seconds",
+        "partial",
+        "degraded_reason",
+        "result_count",
+        "candidate_count",
+        "message_count",
+        "character_count",
+        "context_message_count",
+        "context_character_count",
+        "tool_message_count",
+        "compression_triggered",
+        "before_estimated_tokens",
+        "after_estimated_tokens",
+        "removed_message_count",
+        "retained_tool_group_count",
+        *_SAFE_TOKEN_METRICS,
+    }
+)
 
 
 def _safe_text(value: str) -> str:
@@ -27,7 +75,7 @@ def _safe_text(value: str) -> str:
 def sanitize(value: Any, *, key: str = "", depth: int = 0) -> Any:
     """Return a bounded JSON-safe value with common secrets and PII removed."""
 
-    if _SENSITIVE_KEY.search(key):
+    if _SENSITIVE_KEY.search(key) and key not in _SAFE_TOKEN_METRICS:
         return "[REDACTED]"
     if depth >= 8:
         return "[MAX_DEPTH]"
@@ -58,6 +106,24 @@ def summarize(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         result["keys"] = sorted(str(key)[:64] for key in list(value)[:50])
         result["item_count"] = len(value)
+        metrics = {
+            str(key): cleaned[key]
+            for key in value
+            if key in _SUMMARY_SCALARS
+            and key in cleaned
+            and isinstance(cleaned[key], (str, int, float, bool, type(None)))
+        }
+        nested = cleaned.get("compression_metrics")
+        if isinstance(nested, Mapping):
+            metrics.update(
+                {
+                    str(key): nested[key]
+                    for key in nested
+                    if key in _SUMMARY_SCALARS
+                    and isinstance(nested[key], (str, int, float, bool, type(None)))
+                }
+            )
+        result["metrics"] = metrics
     elif isinstance(value, (list, tuple, set)):
         result["item_count"] = len(value)
     elif isinstance(value, str):

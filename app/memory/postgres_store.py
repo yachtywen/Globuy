@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Iterable
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -19,7 +20,7 @@ from langgraph.store.base import (
     SearchItem,
     SearchOp,
 )
-from sqlalchemy import select
+from sqlalchemy import and_, func, not_, select
 
 from app.config import Settings
 from app.database.models import MemoryEmbedding, MemoryEntry, User
@@ -30,6 +31,35 @@ from app.search.encoder import EmbeddingEncoder
 
 _RRF_K = 60
 _MEMORY_TEXT_VERSION = "memory-content-v1"
+_recall_metrics: ContextVar[dict[str, int | str] | None] = ContextVar(
+    "globuy_memory_recall_metrics", default=None
+)
+_SCOPE_ALIASES = {
+    "headphones": ("耳机", "headphone", "headphones"),
+    "jeans": ("牛仔裤", "jeans"),
+    "keyboard": ("键盘", "keyboard"),
+}
+
+
+def _scope_rank(entry: MemoryEntry, query: str) -> int:
+    if not entry.scope_type or entry.scope_type == "global" or not entry.scope_value:
+        return 1
+    normalized = query.casefold()
+    values = _SCOPE_ALIASES.get(entry.scope_value.casefold(), (entry.scope_value.casefold(),))
+    return 2 if any(value in normalized for value in values) else 0
+
+
+def _injection_rank(entry: MemoryEntry, query: str) -> int:
+    scope = _scope_rank(entry, query)
+    if scope == 0:
+        return 0
+    if entry.category == "history":
+        return 1
+    return 3 if scope == 2 else 2
+
+
+def current_memory_recall_metrics() -> dict[str, int | str]:
+    return dict(_recall_metrics.get() or {})
 
 
 class PostgresMemoryStore(BaseStore):
@@ -100,6 +130,13 @@ class PostgresMemoryStore(BaseStore):
                 "source": entry.source,
                 "keywords": list(entry.keywords or []),
                 "lifecycle_status": entry.lifecycle_status,
+                "subject": entry.subject,
+                "predicate": entry.predicate,
+                "value_json": entry.value_json,
+                "polarity": entry.polarity,
+                "scope_type": entry.scope_type,
+                "scope_value": entry.scope_value,
+                "fact_slot": entry.fact_slot,
             },
             created_at=entry.created_at.replace(tzinfo=UTC),
             updated_at=entry.updated_at.replace(tzinfo=UTC),
@@ -154,11 +191,18 @@ class PostgresMemoryStore(BaseStore):
 
     async def _vector_lane(
         self, user_id: str, vector: list[float], limit: int
-    ) -> list[tuple[MemoryEntry, float]]:
+    ) -> tuple[list[tuple[MemoryEntry, float]], int]:
         metadata = self.encoder.metadata
         async with self.database.sessions() as session:
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 distance = MemoryEmbedding.embedding.cosine_distance(vector)
+                compatible = and_(
+                    MemoryEmbedding.embedding_model == metadata.model_id,
+                    MemoryEmbedding.embedding_revision == metadata.revision,
+                    MemoryEmbedding.dimensions == metadata.dimensions,
+                    MemoryEmbedding.normalized.is_(True),
+                    MemoryEmbedding.semantic_text_version == _MEMORY_TEXT_VERSION,
+                )
                 rows = (
                     await session.execute(
                         select(MemoryEntry, (1 - distance).label("similarity"))
@@ -168,17 +212,30 @@ class PostgresMemoryStore(BaseStore):
                             MemoryEntry.status == "active",
                             MemoryEntry.lifecycle_status == "active",
                             MemoryEntry.category != "blacklist",
-                            MemoryEmbedding.embedding_model == metadata.model_id,
-                            MemoryEmbedding.embedding_revision == metadata.revision,
-                            MemoryEmbedding.dimensions == metadata.dimensions,
-                            MemoryEmbedding.normalized.is_(True),
-                            MemoryEmbedding.semantic_text_version == _MEMORY_TEXT_VERSION,
+                            compatible,
                         )
                         .order_by(distance)
                         .limit(limit)
                     )
                 ).all()
-                return [(entry, max(0.0, float(score))) for entry, score in rows]
+                mismatch_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(MemoryEmbedding)
+                        .join(MemoryEntry, MemoryEntry.memory_id == MemoryEmbedding.memory_id)
+                        .where(
+                            MemoryEntry.user_id == user_id,
+                            MemoryEntry.status == "active",
+                            MemoryEntry.lifecycle_status == "active",
+                            not_(compatible),
+                        )
+                    )
+                    or 0
+                )
+                return (
+                    [(entry, max(0.0, float(score))) for entry, score in rows],
+                    mismatch_count,
+                )
 
             rows = (
                 await session.execute(
@@ -193,10 +250,20 @@ class PostgresMemoryStore(BaseStore):
                 )
             ).all()
         scored: list[tuple[MemoryEntry, float]] = []
+        mismatch_count = 0
         for entry, embedding in rows:
+            if (
+                embedding.embedding_model != metadata.model_id
+                or embedding.embedding_revision != metadata.revision
+                or embedding.dimensions != metadata.dimensions
+                or not embedding.normalized
+                or embedding.semantic_text_version != _MEMORY_TEXT_VERSION
+            ):
+                mismatch_count += 1
+                continue
             dot = sum(a * b for a, b in zip(vector, embedding.embedding, strict=False))
             scored.append((entry, max(0.0, dot)))
-        return sorted(scored, key=lambda pair: pair[1], reverse=True)[:limit]
+        return sorted(scored, key=lambda pair: pair[1], reverse=True)[:limit], mismatch_count
 
     async def _keyword_lane(
         self,
@@ -259,11 +326,23 @@ class PostgresMemoryStore(BaseStore):
                 active,
                 key=lambda item: (item.category != "blacklist", -item.updated_at.timestamp()),
             )[op.offset : op.offset + op.limit]
+            _recall_metrics.set(
+                {
+                    "vector_hits": 0,
+                    "keyword_hits": 0,
+                    "fused_count": 0,
+                    "final_count": len(ordered),
+                    "hard_rule_count": sum(
+                        item.category == "blacklist" for item in ordered
+                    ),
+                    "vector_metadata_mismatches": 0,
+                }
+            )
             return [self._search_item(item, None) for item in ordered]
 
         pool = max(self.settings.memory_recall_candidate_pool, limit * 5)
         vector = self.encoder.encode_query(op.query)
-        vector_lane = await self._vector_lane(user_id, vector, pool)
+        vector_lane, metadata_mismatches = await self._vector_lane(user_id, vector, pool)
         query_keywords = set(extract_keywords(op.query))
         keyword_lane = await self._keyword_lane(user_id, query_keywords, active, pool)
 
@@ -272,18 +351,50 @@ class PostgresMemoryStore(BaseStore):
             for rank, (entry, _lane_score) in enumerate(lane, start=1):
                 previous = fused.get(entry.memory_id, (entry, 0.0))[1]
                 fused[entry.memory_id] = (entry, previous + 1 / (_RRF_K + rank))
+        ranked_v2 = bool(self.settings.memory_retrieval_v2_enabled)
         ranked = sorted(
             (
-                (entry, score * float(entry.confidence) * self._decay(entry, now))
+                (
+                    entry,
+                    score * float(entry.confidence) * self._decay(entry, now),
+                    _injection_rank(entry, op.query),
+                )
                 for entry, score in fused.values()
+                if not ranked_v2 or _injection_rank(entry, op.query) > 0
             ),
-            key=lambda pair: (pair[1], pair[0].updated_at),
+            key=(
+                lambda pair: (pair[2], pair[1], pair[0].updated_at)
+                if ranked_v2
+                else (pair[1], pair[0].updated_at)
+            ),
             reverse=True,
         )
         hard = [
             (entry, None) for entry in sorted(hard_rules, key=lambda x: x.updated_at, reverse=True)
         ]
-        selected = (hard + ranked)[op.offset : op.offset + op.limit]
+        normal = [(entry, score) for entry, score, _scope in ranked]
+        # V2 keeps all hard rules outside the ordinary Top-K budget. The disabled
+        # path preserves the original key/content + RRF slicing semantics.
+        selected = (
+            hard + normal[op.offset : op.offset + op.limit]
+            if ranked_v2
+            else (hard + normal)[op.offset : op.offset + op.limit]
+        )
+        _recall_metrics.set(
+            {
+                "vector_hits": len(vector_lane),
+                "keyword_hits": len(keyword_lane),
+                "fused_count": len(fused),
+                "final_count": len(selected),
+                "hard_rule_count": len(hard),
+                "vector_metadata_mismatches": metadata_mismatches,
+                **(
+                    {"degraded_reason": "vector_metadata_mismatch"}
+                    if metadata_mismatches
+                    else {}
+                ),
+            }
+        )
         return [self._search_item(entry, score) for entry, score in selected]
 
     def _search_item(self, entry: MemoryEntry, score: float | None) -> SearchItem:
@@ -303,3 +414,6 @@ class PostgresMemoryStore(BaseStore):
             )
         namespaces = [("users", user_id, "memories") for user_id in user_ids]
         return namespaces[op.offset : op.offset + op.limit]
+
+
+__all__ = ["PostgresMemoryStore", "current_memory_recall_metrics"]

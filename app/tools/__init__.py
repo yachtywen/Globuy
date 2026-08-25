@@ -1,4 +1,4 @@
-"""Nine core shopping tools and their runtime registry."""
+"""Eight core shopping tools and their runtime registry."""
 
 from collections.abc import Iterable
 
@@ -11,7 +11,6 @@ from app.tools.item_picker import item_picker
 from app.tools.item_search import item_search
 from app.tools.planner import planner
 from app.tools.price_compare import price_compare
-from app.tools.shipping_calc import shipping_calc
 from app.tools.shopping_summary import build_shopping_summary_tool
 from app.tools.web_search import web_search
 
@@ -23,7 +22,6 @@ CORE_TOOL_NAMES: tuple[str, ...] = (
     "item_search",
     "item_picker",
     "price_compare",
-    "shipping_calc",
     "shopping_summary",
 )
 
@@ -42,7 +40,6 @@ TOOL_PHASES: dict[str, frozenset[str]] = {
         {
             "category_insight",
             "price_compare",
-            "shipping_calc",
             "item_picker",
             "shopping_summary",
             "chat_fallback",
@@ -63,7 +60,6 @@ def build_core_tools(model: BaseChatModel | None = None) -> tuple[BaseTool, ...]
         item_search,
         item_picker,
         price_compare,
-        shipping_calc,
         build_shopping_summary_tool(model),
     )
 

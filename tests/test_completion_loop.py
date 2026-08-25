@@ -1,12 +1,14 @@
 import asyncio
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.store.base import SearchItem
 from pydantic import ValidationError
 
 from app.agent.llm import build_chat_model
@@ -34,6 +36,47 @@ def test_fork_depth_configuration_is_fixed_to_one() -> None:
     assert Settings().fork_max_depth == 1
     with pytest.raises(ValidationError):
         Settings(fork_max_depth=2)
+
+
+@pytest.mark.asyncio
+async def test_memory_prompt_budget_never_truncates_blacklists(
+    monkeypatch, tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+
+    class FakeMemoryStore:
+        async def asearch(self, namespace, *, query: str, limit: int):
+            del namespace, query, limit
+            return [
+                SearchItem(
+                    namespace=("users", "user-1", "memories"),
+                    key="hard-rule",
+                    value={"category": "blacklist", "content": "never recommend in-ear"},
+                    created_at=now,
+                    updated_at=now,
+                ),
+                *[
+                    SearchItem(
+                        namespace=("users", "user-1", "memories"),
+                        key=f"ordinary-{index}",
+                        value={"category": "preference", "content": "x" * 400},
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    for index in range(10)
+                ],
+            ]
+
+    monkeypatch.setattr(
+        "app.agent.main_agent.get_settings",
+        lambda: SimpleNamespace(memory_recall_limit=10, memory_prompt_token_limit=128),
+    )
+    loop = AgentLoop(model=None, tools=[], store=FakeMemoryStore(), enable_dispatch=False)
+    with thread_scope("thread", tmp_path, run_id="run", user_id="user-1"):
+        state = await loop._state_with_memory("headphones")
+    assert "hard-rule" in state["memory_context"]
+    assert state["memory_metrics"]["hard_rule_count"] == 1
+    assert state["memory_metrics"]["injected_estimated_tokens"] <= 128
 
 
 def test_cross_phase_tool_calls_are_removed_before_history() -> None:
@@ -143,6 +186,7 @@ class StructuredRunner:
 class ScriptedModel:
     def __init__(self, responses: Sequence[AIMessage] = ()) -> None:
         self.responses = list(responses)
+        self.model_configs: list[dict[str, Any]] = []
         self.summary_calls = 0
         self.summary_configs: list[dict[str, Any]] = []
         self.summary_delay = 0.0
@@ -158,6 +202,7 @@ class ScriptedModel:
         return StructuredRunner(self, schema)
 
     async def ainvoke(self, messages, config=None):
+        self.model_configs.append(config or {})
         return self.responses.pop(0)
 
 
@@ -281,6 +326,13 @@ async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
                             "category": "blacklist",
                             "content": "不要塑料",
                             "confidence": 1,
+                            "subject": "headphones",
+                            "predicate": "material",
+                            "value_json": "plastic",
+                            "polarity": "negative",
+                            "scope_type": "category",
+                            "scope_value": "headphones",
+                            "evidence_type": "explicit",
                         }
                     ],
                 },
@@ -300,6 +352,9 @@ async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
     assert payload["picks"][0]["sales"] == 1280
     assert payload["learned_preferences"][0]["source_session"] == "thread-1"
     assert model.summary_configs[0]["metadata"]["model_role"] == "shopping_summary"
+    assert model.summary_configs[0]["run_name"] == "shopping_summary.generation"
+    assert model.summary_configs[0]["metadata"]["context_message_count"] == 2
+    assert model.summary_configs[0]["metadata"]["context_estimated_tokens"] > 0
     assert "config" not in summary.args_schema.model_json_schema()["properties"]
 
 
@@ -382,10 +437,10 @@ async def test_shopping_summary_propagates_cancellation() -> None:
     assert model.summary_calls == 1
 
 
-def test_registry_has_nine_business_tools_and_phase_contracts() -> None:
+def test_registry_has_eight_business_tools_and_phase_contracts() -> None:
     tools = build_core_tools(None)
     assert tuple(tool.name for tool in tools) == CORE_TOOL_NAMES
-    assert len(tools) == 9
+    assert len(tools) == 8
     assert "dispatch_tool" not in CORE_TOOL_NAMES
     assert TERMINAL_TOOLS == {"shopping_summary", "chat_fallback"}
     assert "dispatch_tool" in TOOL_PHASES["think"]
@@ -520,6 +575,9 @@ async def test_explicit_phase_graph_terminates_on_chat_fallback(tmp_path: Path) 
     assert answer == "请补充预算"
     assert metadata["phase"] == "done"
     assert metadata["iteration"] == 1
+    assert model.model_configs[0]["run_name"] == "coordinator.think"
+    assert model.model_configs[0]["metadata"]["phase"] == "think"
+    assert model.model_configs[0]["metadata"]["context_message_count"] == 3
 
 
 @pytest.mark.asyncio

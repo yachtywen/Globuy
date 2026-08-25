@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from langchain_core.callbacks.base import AsyncCallbackHandler
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
@@ -14,6 +15,18 @@ from app.tools import item_search as exported_item_search
 from app.utils.thread_ctx import thread_scope
 
 item_search_module = importlib.import_module("app.tools.item_search")
+
+
+class ToolLifecycleRecorder(AsyncCallbackHandler):
+    def __init__(self) -> None:
+        self.starts: list[dict] = []
+        self.ends: list[object] = []
+
+    async def on_tool_start(self, _serialized, _input_str, **kwargs) -> None:
+        self.starts.append(kwargs)
+
+    async def on_tool_end(self, output, **_kwargs) -> None:
+        self.ends.append(output)
 
 
 class FakeSearchService:
@@ -37,6 +50,31 @@ class FakeSearchService:
             catalog_candidate_count=3,
             truncated=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_middleware_rejection_emits_exactly_one_tool_lifecycle() -> None:
+    recorder = ToolLifecycleRecorder()
+    call = {
+        "name": "item_search",
+        "type": "tool_call",
+        "id": "rejected-call-1",
+        "args": {"query": "耳机", "platform": "jingdong"},
+    }
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", build_dispatch_node([exported_item_search]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+
+    state = await builder.compile().ainvoke(
+        {"messages": [AIMessage(content="", tool_calls=[call])]},
+        config={"callbacks": [recorder]},
+    )
+
+    assert json.loads(state["messages"][-1].content)["status"] == "needs_planning"
+    assert len(recorder.starts) == 1
+    assert len(recorder.ends) == 1
+    assert recorder.starts[0]["tool_call_id"] == "rejected-call-1"
 
 
 class FakeCoordinator:
@@ -115,6 +153,12 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
     ]
     assert any(item.type == EventType.CUSTOM for _, item in events)
     assert all(channel == "root" for channel, _ in events)
+    tool_end = next(item for _, item in events if item.type == EventType.TOOL_CALL_END)
+    tool_result = next(
+        item for _, item in events if item.type == EventType.TOOL_CALL_RESULT
+    )
+    assert tool_end.data["duration_ms"] >= 0
+    assert tool_result.data["result"]["tool_result_estimated_tokens"] > 0
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,31 @@ from app.eval.reporting import append_high_value_trace, render_report, sanitize
 from app.eval.runner import fixture_evidence, load_case_file
 from app.eval.schemas import CaseEvidence, EvaluationCase
 from app.eval.scoring import score_evidence
+
+
+def test_judge_config_loads_gitignored_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GLOBUY_EVAL_JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("GLOBUY_EVAL_JUDGE_BASE_URL", raising=False)
+    monkeypatch.delenv("GLOBUY_EVAL_JUDGE_API_KEY", raising=False)
+    monkeypatch.delenv("GLOBUY_EVAL_JUDGE_TIMEOUT_SECONDS", raising=False)
+    (tmp_path / ".env").write_text(
+        "GLOBUY_EVAL_JUDGE_MODEL=deepseek-v4-pro\n"
+        "GLOBUY_EVAL_JUDGE_BASE_URL=https://api.deepseek.com\n"
+        "GLOBUY_EVAL_JUDGE_API_KEY=judge-secret\n"
+        "GLOBUY_EVAL_JUDGE_TIMEOUT_SECONDS=150\n",
+        encoding="utf-8",
+    )
+
+    config = JudgeConfig.from_env()
+
+    assert config is not None
+    assert config.model == "deepseek-v4-pro"
+    assert config.base_url == "https://api.deepseek.com"
+    assert config.api_key == "judge-secret"
+    assert config.timeout_seconds == 150
 
 
 def case_payload(*, llm: bool = False) -> dict:
@@ -158,8 +184,28 @@ async def test_llm_judge_validates_exact_criterion_ids_and_retries() -> None:
         terminal_status="complete",
         result={"final_text": "回答", "picks": []},
         transcript="[用户] 问题\n[Globuy] 回答",
+        trace_ids=["a" * 32],
     )
     calls = 0
+
+    class FakeGeneration:
+        def __init__(self) -> None:
+            self.updates: list[dict] = []
+
+        def update(self, **kwargs) -> None:
+            self.updates.append(kwargs)
+
+    class FakeObservability:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.generation = FakeGeneration()
+
+        @contextmanager
+        def observe_generation(self, **kwargs):
+            self.calls.append(kwargs)
+            yield self.generation
+
+    observability = FakeObservability()
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -175,7 +221,20 @@ async def test_llm_judge_validates_exact_criterion_ids_and_retries() -> None:
             },
             ensure_ascii=False,
         )
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": content}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "prompt_cache_hit_tokens": 60,
+                    "prompt_cache_miss_tokens": 40,
+                    "completion_tokens_details": {"reasoning_tokens": 5},
+                },
+            },
+        )
 
     result = await call_llm_judge(
         case,
@@ -187,9 +246,19 @@ async def test_llm_judge_validates_exact_criterion_ids_and_retries() -> None:
             retry_base_seconds=0,
         ),
         transport=httpx.MockTransport(handler),
+        observability=observability,
     )
     assert calls == 2
     assert result["behavior_ok"][0] is True
+    assert observability.calls[0]["name"] == "eval.judge"
+    assert observability.calls[0]["trace_id"] == "a" * 32
+    assert observability.generation.updates[-1]["usage_details"] == {
+        "input": 40,
+        "output": 15,
+        "total": 120,
+        "input_cache_read": 60,
+        "output_reasoning": 5,
+    }
 
 
 @pytest.mark.asyncio

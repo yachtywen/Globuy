@@ -35,24 +35,29 @@
 
 ## 3. 运行方式
 
+长期记忆使用独立严格 Schema `eval/memory-cases.yaml`，当前基线为 50 条确定性 P0 case。`memory_integration` 在隔离 SQLite test double 或通过 `GLOBUY_TEST_POSTGRES_URL` 指定的 PostgreSQL/pgvector 中运行真实 `MemoryService`、BaseStore、Outbox 与 Fake Encoder，不调用模型；报告包含候选、正式记忆、版本、投影、召回 lane、迁移、Prompt 和 Embedding 指纹。
+
 默认零外部调用：
 
 ```powershell
 conda activate globuy
 python scripts/eval_regression.py --suite offline
+python scripts/eval_regression.py --suite offline --domain memory
+python scripts/eval_regression.py --suite offline --domain all
 ```
 
-真实层要求后端已经运行，并使用专用评测账号。账号凭据和 Judge 配置只通过环境变量传入，不写入
-用例或报告：
+真实层要求后端已经运行，并使用专用评测账号。账号凭据不写入用例或报告：
 
 ```powershell
 $env:GLOBUY_EVAL_EMAIL='<专用评测账号>'
 $env:GLOBUY_EVAL_PASSWORD='<密码>'
 python scripts/eval_regression.py --suite live --allow-model-calls
+python scripts/eval_regression.py --suite live --domain memory --allow-model-calls --allow-external-tools
 ```
 
-启用独立 Judge 时还需配置 `GLOBUY_EVAL_JUDGE_MODEL`、`GLOBUY_EVAL_JUDGE_BASE_URL` 和
-`GLOBUY_EVAL_JUDGE_API_KEY`，然后增加 `--judge`。Judge 不会隐式复用主模型凭据。服务端若报告
+启用独立 Judge 时，在项目根目录被 Git 忽略的 `.env` 中配置
+`GLOBUY_EVAL_JUDGE_MODEL`、`GLOBUY_EVAL_JUDGE_BASE_URL`、`GLOBUY_EVAL_JUDGE_API_KEY` 和可选的
+`GLOBUY_EVAL_JUDGE_TIMEOUT_SECONDS`，然后增加 `--judge`。进程环境变量可以覆盖 `.env`；Judge 不会隐式复用主模型凭据。服务端若报告
 Tavily 或商品 Provider 已配置，运行器默认拒绝启动；只有明确增加 `--allow-external-tools` 才会继续。
 
 live runner 会把每轮 API 返回的确定性 `trace_id` 写入 evidence 和报告。只有显式增加

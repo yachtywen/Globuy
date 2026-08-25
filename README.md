@@ -45,7 +45,7 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 
 | 模块 | 当前实现 |
 |---|---|
-| AgentLoop | 使用 LangGraph 显式建模 `Think → Act → Observe → Reflect`，九个业务工具按阶段白名单调用 |
+| AgentLoop | 使用 LangGraph 显式建模 `Think → Act → Observe → Reflect`，八个业务工具按阶段白名单调用 |
 | 同质 fork | 主 Agent 通过 `dispatch_tool` 按需派生子任务；fork 继承完整工具集与 System Prompt，拥有独立 thread/checkpoint，最大深度固定为 1 |
 | Harness 防护 | 决策预算、循环指纹检测、主循环递归上限、fork 90 秒超时、候选截断与确定性终结，避免无效自旋和上下文膨胀 |
 | Cache Breakpoint | 在 Observe 后压缩旧历史，保留最近 3 个完整工具调用组和合法的 tool-call/tool-result 配对 |
@@ -56,15 +56,15 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 | 用户系统 | Argon2id 密码哈希、服务端可撤销会话、HttpOnly Cookie、CSRF、幂等写入和资源归属校验 |
 | 产品闭环 | React 工作台、会话归档、商品卡片、比较、来源链接、心愿库、价格历史、长期记忆管理和响应式布局 |
 | 评测体系 | YAML 双层用例、P0 确定性事实/安全门禁、可选独立 LLM Judge、正式 HTTP/WS live runner、脱敏轨迹和 Markdown 报告 |
-| Agent 可观测 | 可选 LangFuse v4 全链路 Trace；关联主图、模型、九工具与同质 fork，采集 Token/RT，并支持 Eval Score 回写；默认脱敏摘要且 fail-open |
+| Agent 可观测 | 可选 LangFuse v4 全链路 Trace；关联主图、模型、八个工具与同质 fork，采集 Token/RT，并支持 Eval Score 回写；默认脱敏摘要且 fail-open |
 
 ## 核心技术亮点
 
-### 1. 主 Agent + 同质 fork，而不是九个独立 Agent
+### 1. 主 Agent + 同质 fork，而不是八个独立 Agent
 
-九个工具属于主 AgentLoop 的行动空间。单平台需求由主 Loop 直接处理；明确的多平台任务由 `dispatch_tool` 创建同质 fork 并行执行。子任务共享模型实例、工具定义和 System Prompt，但使用独立 `thread_id` 与 checkpointer，结果压缩后回流父 Loop 的 Observe/Reflect 阶段。
+八个工具属于主 AgentLoop 的行动空间。单平台需求由主 Loop 直接处理；明确的多平台任务由 `dispatch_tool` 创建同质 fork 并行执行。子任务共享模型实例、工具定义和 System Prompt，但使用独立 `thread_id` 与 checkpointer，结果压缩后回流父 Loop 的 Observe/Reflect 阶段。
 
-当前九个业务工具为：`Planner`、`ChatFallback`、`WebSearch`、`CategoryInsight`、`ItemSearch`、`ItemPicker`、`PriceCompare`、`ShippingCalc` 和 `ShoppingSummary`；`dispatch_tool` 是 fork 元工具，不计入九个业务工具。
+当前八个业务工具为：`Planner`、`ChatFallback`、`WebSearch`、`CategoryInsight`、`ItemSearch`、`ItemPicker`、`PriceCompare` 和 `ShoppingSummary`；`dispatch_tool` 是 fork 元工具，不计入八个业务工具。
 
 ### 2. 可收敛的生产型 AgentLoop
 
@@ -101,7 +101,7 @@ flowchart LR
     REFLECT -->|完成| RESULT[ShoppingSummary]
 
     ACT -->|dispatch_tool| FORK[同质 fork]
-    FORK --> TOOLS[九个业务工具]
+    FORK --> TOOLS[八个业务工具]
     ACT --> TOOLS
 
     TOOLS --> CATALOG[PostgreSQL Product / Offer]
@@ -190,13 +190,21 @@ alembic upgrade head
 ID；`/healthz` 可检查 `observability_configured/enabled/status`，但不会回显凭据。完整配置、看板字段和
 排障流程见 [Agent 可观测实施与运维文档](docs/agent-observability-langfuse-implementation-plan.md)。
 
+LangFuse 中的 generation 使用稳定名称 `coordinator.think`、`coordinator.reflect`、
+`fork.think`、`fork.reflect`、`shopping_summary.generation` 和
+`category_insight.extractor`；显式 live Eval Judge 以 `eval.judge` 关联回对应任务 Trace。每次调用同时
+记录 Provider 实际 usage 与调用前上下文估算；DeepSeek
+`prompt_cache_hit_tokens/prompt_cache_miss_tokens` 会转换为互斥的 cache-read/input bucket，避免成本
+重复计算。工具 observation 保留真实 RT、状态、结果估算大小和安全的业务缓存指标；
+`context.compress` 单独记录 Cache Breakpoint，三类缓存不会混为一个 `cache_hit`。
+
 ### 3. 启动前后端
 
 终端 A：
 
 ```powershell
 conda activate globuy
-python -m uvicorn app.api.server:app --host 127.0.0.1 --port 8000 --reload
+python -m app.api
 ```
 
 终端 B：
@@ -227,6 +235,15 @@ PostgreSQL 迁移、长期记忆衰减和 Worker 运维见 [PostgreSQL 迁移实
 
 ## 测试与评测
 
+一次执行提交门禁（Ruff、compileall、后端全量测试、shopping + memory 离线评测、前端 Vitest 与生产构建）：
+
+```powershell
+conda activate globuy
+python scripts/test_all.py --output output/test-runs/latest
+```
+
+如需同时验证隔离 PostgreSQL/pgvector，设置 `GLOBUY_TEST_POSTGRES_URL`；脚本不会允许模型或 Provider 调用，每个子命令默认有 300 秒硬超时。
+
 ### 后端与前端验证
 
 ```powershell
@@ -249,8 +266,17 @@ Pop-Location
 # 默认离线契约层：合成事实，不访问模型、Provider、数据库或向量服务
 python scripts/eval_regression.py --suite offline
 
+# 只运行长期记忆 integration cases
+python scripts/eval_regression.py --suite offline --domain memory
+
+# 合并 shopping 与 memory 报告
+python scripts/eval_regression.py --suite offline --domain all
+
 # 真实质量层必须使用隔离账号，并显式授权模型调用
 python scripts/eval_regression.py --suite live --allow-model-calls
+
+# 只运行长期记忆跨会话 live case；Provider 已配置时还需第二个显式开关
+python scripts/eval_regression.py --suite live --domain memory --allow-model-calls --allow-external-tools
 
 # 仅在明确希望向 LangFuse 写入分数时增加此开关
 python scripts/eval_regression.py --suite live --allow-model-calls --publish-langfuse-scores
@@ -265,7 +291,7 @@ globuy/
 ├─ app/
 │  ├─ agent/          # LangGraph 主图、同质 fork、循环与压缩中间件
 │  ├─ api/            # FastAPI、RunRegistry、EventBroker、WebSocket
-│  ├─ tools/          # 九个业务工具
+│  ├─ tools/          # 八个业务工具
 │  ├─ products/       # Product/Offer、Provider、目录、Outbox、价格 Worker
 │  ├─ search/         # BGE-M3、OpenSearch Hybrid、索引生命周期
 │  ├─ memory/         # BaseStore、记忆索引与 Outbox Worker

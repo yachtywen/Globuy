@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 from statistics import fmean
@@ -42,6 +43,8 @@ class CategoryQueryTrace:
     index_build_id: str = ""
     data_as_of: str | None = None
     degraded_reason: str | None = None
+    cache_key_hash: str | None = None
+    cache_ttl_seconds: int | None = None
 
 
 class CategorySearchNotConfiguredError(RuntimeError):
@@ -230,6 +233,8 @@ class CategorySearchService:
             index_build_id=trace.index_build_id,
             prompt_version=self.extractor.prompt_version,
         )
+        trace.cache_key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        trace.cache_ttl_seconds = self.settings.category_cache_ttl_seconds
         cached = await self.cache.get(key)
         if cached is not None:
             trace.cache_hit = True

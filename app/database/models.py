@@ -474,12 +474,44 @@ class MemoryEntry(Base):
     reinforcement_count: Mapped[int] = mapped_column(Integer, default=1)
     archived_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
     purge_after: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    subject: Mapped[str | None] = mapped_column(String(128))
+    predicate: Mapped[str | None] = mapped_column(String(64))
+    value_json: Mapped[Any | None] = mapped_column(JSON)
+    polarity: Mapped[str | None] = mapped_column(String(16))
+    scope_type: Mapped[str | None] = mapped_column(String(16))
+    scope_value: Mapped[str | None] = mapped_column(String(128))
+    evidence_type: Mapped[str | None] = mapped_column(String(16))
+    fact_slot: Mapped[str | None] = mapped_column(String(64), index=True)
+    supersedes_memory_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    extraction_version: Mapped[str | None] = mapped_column(String(32))
 
     __table_args__ = (
         CheckConstraint("category IN ('blacklist','preference','history')"),
         CheckConstraint("source IN ('user','agent_confirmed','import')"),
         CheckConstraint("lifecycle_status IN ('active','archived','deleted')"),
-        UniqueConstraint("user_id", "key", name="uq_memory_user_key"),
+        CheckConstraint(
+            "polarity IS NULL OR polarity IN ('positive','negative')",
+            name="ck_memory_entries_polarity",
+        ),
+        CheckConstraint(
+            "scope_type IS NULL OR scope_type IN ('global','category','brand','product')",
+            name="ck_memory_entries_scope_type",
+        ),
+        CheckConstraint(
+            "evidence_type IS NULL OR evidence_type IN ('explicit','inferred','imported')",
+            name="ck_memory_entries_evidence_type",
+        ),
+        Index(
+            "ix_memory_entries_active_fact_slot",
+            "user_id",
+            "fact_slot",
+            postgresql_where=(
+                (status == "active")
+                & (lifecycle_status == "active")
+                & (category != "history")
+                & fact_slot.is_not(None)
+            ),
+        ),
     )
 
 
@@ -518,11 +550,37 @@ class MemoryCandidate(Base):
     created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     expires_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
     decided_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
+    subject: Mapped[str | None] = mapped_column(String(128))
+    predicate: Mapped[str | None] = mapped_column(String(64))
+    value_json: Mapped[Any | None] = mapped_column(JSON)
+    polarity: Mapped[str | None] = mapped_column(String(16))
+    scope_type: Mapped[str | None] = mapped_column(String(16))
+    scope_value: Mapped[str | None] = mapped_column(String(128))
+    evidence_type: Mapped[str | None] = mapped_column(String(16))
+    persistence_scope: Mapped[str] = mapped_column(String(16), default="long_term")
+    fact_slot: Mapped[str | None] = mapped_column(String(64), index=True)
+    conflicts_with_memory_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    extraction_version: Mapped[str | None] = mapped_column(String(32))
 
     __table_args__ = (
         CheckConstraint("category IN ('blacklist','preference','history')"),
         CheckConstraint("status IN ('pending','confirmed','rejected','expired')"),
-        UniqueConstraint("user_id", "content_hash", "status", name="uq_memory_candidate_state"),
+        CheckConstraint(
+            "persistence_scope IN ('long_term','session_only')",
+            name="ck_memory_candidates_persistence_scope",
+        ),
+        CheckConstraint(
+            "polarity IS NULL OR polarity IN ('positive','negative')",
+            name="ck_memory_candidates_polarity",
+        ),
+        CheckConstraint(
+            "scope_type IS NULL OR scope_type IN ('global','category','brand','product')",
+            name="ck_memory_candidates_scope_type",
+        ),
+        CheckConstraint(
+            "evidence_type IS NULL OR evidence_type IN ('explicit','inferred','imported')",
+            name="ck_memory_candidates_evidence_type",
+        ),
     )
 
 

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from langchain_core.callbacks.manager import AsyncCallbackManager
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -22,6 +25,9 @@ from langgraph.types import Command
 from app.api.monitor import current_monitor
 from app.compress.breakpoint import estimate_tokens
 from app.config import get_settings
+from app.observability.metrics import estimate_value_tokens, tool_observation_scope
+
+logger = logging.getLogger(__name__)
 
 
 def _json(value: Any) -> str:
@@ -139,9 +145,17 @@ def _result_summary(tool_name: str, content: Any) -> dict[str, Any]:
     try:
         payload = json.loads(content) if isinstance(content, str) else content
     except ValueError:
-        return {"status": "ok", "content_length": len(content)}
+        return {
+            "status": "ok",
+            "content_length": len(content),
+            "tool_result_estimated_tokens": estimate_value_tokens(content),
+        }
     if not isinstance(payload, dict):
-        return {"status": "ok", "result_type": type(payload).__name__}
+        return {
+            "status": "ok",
+            "result_type": type(payload).__name__,
+            "tool_result_estimated_tokens": estimate_value_tokens(payload),
+        }
     summary: dict[str, Any] = {"status": payload.get("status", "ok")}
     for key in ("platform", "terminal", "truncated", "total_recall"):
         if key in payload:
@@ -149,8 +163,61 @@ def _result_summary(tool_name: str, content: Any) -> dict[str, Any]:
     for key in ("candidates", "picks", "offers", "results", "tool_results"):
         if isinstance(payload.get(key), list):
             summary[f"{key}_count"] = len(payload[key])
+    for key in (
+        "cache_type",
+        "cache_name",
+        "cache_hit",
+        "cache_key_hash",
+        "cache_ttl_seconds",
+        "partial",
+        "degraded_reason",
+    ):
+        if key in payload:
+            summary[key] = payload[key]
+    summary["tool_result_estimated_tokens"] = estimate_value_tokens(payload)
     summary["tool_name"] = tool_name
     return summary
+
+
+async def _observe_rejected_tool(
+    request: ToolCallRequest,
+    message: ToolMessage,
+    *,
+    started_at: float,
+    phase: str | None,
+) -> None:
+    """Close one callback-backed tool observation when middleware short-circuits."""
+
+    config = request.runtime.config
+    try:
+        callback_manager = AsyncCallbackManager.configure(
+            config.get("callbacks"),
+            None,
+            False,
+            config.get("tags"),
+            None,
+            config.get("metadata"),
+            None,
+        )
+        with tool_observation_scope(
+            str(message.name or "unknown"),
+            str(message.tool_call_id),
+            phase,
+            started_at=started_at,
+        ):
+            run_manager = await callback_manager.on_tool_start(
+                {
+                    "name": str(message.name or "unknown"),
+                    "description": "middleware-rejected tool call",
+                },
+                str(request.tool_call.get("args") or {}),
+                name=str(message.name or "unknown"),
+                inputs=_safe_arguments(request.tool_call.get("args") or {}),
+                tool_call_id=str(message.tool_call_id),
+            )
+            await run_manager.on_tool_end(message, name=str(message.name or "unknown"))
+    except Exception:  # noqa: BLE001 - telemetry cannot change the tool result
+        logger.warning("Rejected tool observation failed", exc_info=True)
 
 
 async def guarded_tool_call(
@@ -179,9 +246,20 @@ async def guarded_tool_call(
         rejected = ToolMessage(
             content=_json(payload), name=name, tool_call_id=call_id, status="error"
         )
+        await _observe_rejected_tool(
+            request,
+            rejected,
+            started_at=started,
+            phase=state.get("decision_phase"),
+        )
         if monitor is not None:
             await monitor.report_tool_end(
-                call_id, {"status": "needs_planning", "tool_name": name, "duration_ms": 0}
+                call_id,
+                {
+                    "status": "needs_planning",
+                    "tool_name": name,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
             )
         return rejected
     if (
@@ -194,9 +272,25 @@ async def guarded_tool_call(
             "status": "needs_planning",
             "message": "商品检索分支必须继承 planner 已验证的结构化购物意图。",
         }
-        return ToolMessage(
+        rejected = ToolMessage(
             content=_json(payload), name=name, tool_call_id=call_id, status="error"
         )
+        await _observe_rejected_tool(
+            request,
+            rejected,
+            started_at=started,
+            phase=state.get("decision_phase"),
+        )
+        if monitor is not None:
+            await monitor.report_tool_end(
+                call_id,
+                {
+                    "status": "needs_planning",
+                    "tool_name": name,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
+        return rejected
     decision_phase = state.get("decision_phase")
     if decision_phase in {"think", "reflect"}:
         from app.tools import TOOL_PHASES
@@ -212,19 +306,45 @@ async def guarded_tool_call(
                 tool_call_id=call_id,
                 status="error",
             )
+            await _observe_rejected_tool(
+                request,
+                rejected,
+                started_at=started,
+                phase=state.get("decision_phase"),
+            )
             if monitor is not None:
                 await monitor.report_tool_end(
                     call_id,
-                    {"status": "phase_rejected", "tool_name": name, "duration_ms": 0},
+                    {
+                        "status": "phase_rejected",
+                        "tool_name": name,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                    },
                 )
             return rejected
     try:
-        result = await execute(request)
-    except BaseException:
+        with tool_observation_scope(
+            name,
+            call_id,
+            state.get("decision_phase"),
+            started_at=started,
+        ):
+            result = await execute(request)
+    except BaseException as exc:
         if monitor is not None:
+            if isinstance(exc, asyncio.CancelledError):
+                status = "cancelled"
+            elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                status = "timeout"
+            else:
+                status = "error"
             await monitor.report_tool_end(
                 call_id,
-                {"status": "error", "tool_name": name, "duration_ms": 0},
+                {
+                    "status": status,
+                    "tool_name": name,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
             )
         raise
     duration_ms = int((time.perf_counter() - started) * 1000)

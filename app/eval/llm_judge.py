@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.config import Settings
 from app.eval.schemas import CaseEvidence, EvaluationCase
+from app.observability.manager import ObservabilityManager
+from app.observability.metrics import context_metrics, normalize_generation_usage
+from app.observability.redaction import summarize
 
 JUDGE_SYSTEM_PROMPT = """你是严格的购物 Agent 质量评测员。
 你只评估给定的 P1 行为命中和 P2 表达标准；P0 事实与安全由程序判定，不属于你的职责。
@@ -45,16 +50,23 @@ class JudgeConfig:
 
     @classmethod
     def from_env(cls) -> JudgeConfig | None:
-        model = os.getenv("GLOBUY_EVAL_JUDGE_MODEL", "").strip()
-        base_url = os.getenv("GLOBUY_EVAL_JUDGE_BASE_URL", "").strip()
-        api_key = os.getenv("GLOBUY_EVAL_JUDGE_API_KEY", "").strip()
+        # Settings loads the repository-local, gitignored .env and still gives
+        # real process environment variables the normal higher precedence.
+        settings = Settings()
+        model = (settings.eval_judge_model or "").strip()
+        base_url = (settings.eval_judge_base_url or "").strip()
+        api_key = (
+            settings.eval_judge_api_key.get_secret_value().strip()
+            if settings.eval_judge_api_key is not None
+            else ""
+        )
         if not model or not base_url or not api_key:
             return None
         return cls(
             model=model,
             base_url=base_url,
             api_key=api_key,
-            timeout_seconds=float(os.getenv("GLOBUY_EVAL_JUDGE_TIMEOUT_SECONDS", "120")),
+            timeout_seconds=settings.eval_judge_timeout_seconds,
         )
 
 
@@ -117,6 +129,7 @@ async def call_llm_judge(
     config: JudgeConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    observability: ObservabilityManager | None = None,
 ) -> dict[str, tuple[bool, str]]:
     expected_ids = {item["criterion_id"] for item in _criteria(case)}
     if not expected_ids:
@@ -135,31 +148,87 @@ async def call_llm_judge(
     }
     endpoint = f"{config.base_url.rstrip('/')}/chat/completions"
     last_error: Exception | None = None
-    async with httpx.AsyncClient(transport=transport, timeout=config.timeout_seconds) as client:
-        for attempt in range(config.max_retries):
-            try:
-                response = await client.post(
-                    endpoint,
-                    headers={"Authorization": f"Bearer {config.api_key}"},
-                    json=body,
-                )
-                if response.status_code == 429 or response.status_code >= 500:
-                    response.raise_for_status()
-                if response.status_code >= 400:
-                    raise JudgeProtocolError(
-                        f"LLM Judge 请求失败：HTTP {response.status_code}"
+    trace_id = evidence.trace_ids[-1] if evidence.trace_ids else None
+    messages = [
+        SystemMessage(content=JUDGE_SYSTEM_PROMPT),
+        HumanMessage(content=body["messages"][1]["content"]),
+    ]
+    scope = (
+        observability.observe_generation(
+            trace_id=trace_id,
+            name="eval.judge",
+            model=config.model,
+            input=summarize(body["messages"]),
+            metadata={"model_role": "judge", **context_metrics(messages).metadata()},
+        )
+        if observability is not None and trace_id is not None
+        else nullcontext(None)
+    )
+    with scope as generation:
+        async with httpx.AsyncClient(
+            transport=transport, timeout=config.timeout_seconds
+        ) as client:
+            for attempt in range(config.max_retries):
+                try:
+                    response = await client.post(
+                        endpoint,
+                        headers={"Authorization": f"Bearer {config.api_key}"},
+                        json=body,
                     )
-                return _parse_response(response.json(), expected_ids)
-            except JudgeProtocolError:
-                raise
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as exc:
-                last_error = exc
-                retryable = not isinstance(exc, httpx.HTTPStatusError) or (
-                    exc.response.status_code == 429 or exc.response.status_code >= 500
-                )
-                if not retryable or attempt == config.max_retries - 1:
+                    if response.status_code == 429 or response.status_code >= 500:
+                        response.raise_for_status()
+                    if response.status_code >= 400:
+                        raise JudgeProtocolError(
+                            f"LLM Judge 请求失败：HTTP {response.status_code}"
+                        )
+                    payload = response.json()
+                    result = _parse_response(payload, expected_ids)
+                    if generation is not None:
+                        usage = normalize_generation_usage(payload.get("usage"))
+                        generation.update(
+                            output=summarize(payload.get("choices", [])),
+                            usage_details=usage.langfuse_usage_details(),
+                            metadata={
+                                "model_role": "judge",
+                                **context_metrics(messages).metadata(),
+                                **usage.metadata(),
+                            },
+                        )
+                    return result
+                except JudgeProtocolError as exc:
+                    if generation is not None:
+                        generation.update(
+                            level="ERROR",
+                            status_message=type(exc).__name__,
+                            metadata={"model_role": "judge", "status": "validation_error"},
+                        )
                     raise
-                await asyncio.sleep(config.retry_base_seconds * (2**attempt))
+                except (
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                    httpx.HTTPStatusError,
+                ) as exc:
+                    last_error = exc
+                    retryable = not isinstance(exc, httpx.HTTPStatusError) or (
+                        exc.response.status_code == 429
+                        or exc.response.status_code >= 500
+                    )
+                    if not retryable or attempt == config.max_retries - 1:
+                        if generation is not None:
+                            generation.update(
+                                level="ERROR",
+                                status_message=type(exc).__name__,
+                                metadata={
+                                    "model_role": "judge",
+                                    "status": (
+                                        "timeout"
+                                        if isinstance(exc, httpx.TimeoutException)
+                                        else "provider_error"
+                                    ),
+                                },
+                            )
+                        raise
+                    await asyncio.sleep(config.retry_base_seconds * (2**attempt))
     raise last_error or RuntimeError("LLM Judge 重试耗尽")
 
 

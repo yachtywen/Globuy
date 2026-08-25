@@ -33,6 +33,9 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         session_db_path=tmp_path / "sessions.sqlite3",
         legacy_sqlite_enabled=True,
         model_provider="mock",
+        observability_provider="none",
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
         ws_ping_interval=1,
     )
     with TestClient(create_app(settings, agent_runner=fake_agent)) as test_client:

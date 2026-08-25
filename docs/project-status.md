@@ -1,10 +1,56 @@
 # globuy 项目状态
 
+## 2026-08-23：LLM Judge 支持从 `.env` 独立配置
+
+- `GLOBUY_EVAL_JUDGE_MODEL/BASE_URL/API_KEY/TIMEOUT_SECONDS` 已正式接入 `Settings`，评测 CLI 可直接读取项目根目录、被 Git 忽略的 `.env`，同时保留进程环境变量优先覆盖；Judge 仍不回退或复用主 Agent 凭据。`.env.example` 与评测文档已同步，新增 `.env` 读取回归测试。验证：相关 Ruff、compileall 通过，`tests/test_eval_system.py` 共 9 项通过；轮换后的配置已由真实 `deepseek-v4-pro` Judge 调用验证，报告不包含密钥。
+
+## 2026-08-23：完成长期记忆 v2、独立评测域与统一测试门禁
+
+- Alembic head 升级为 `20260823_0004`，在保留 `key/category/content` 和历史数据的前提下，为正式记忆与候选增量增加结构化事实、极性、作用域、证据、稳定槽位、冲突/替代关系和抽取版本；active 非 history 槽位使用 PostgreSQL partial index。旧记录只做 `imported/legacy-v1` 幂等标记，不回填无法证明的事实，也不保存原始聊天全文。
+- `learned_preferences` 已升级为严格 `memory-fact-v2`：long-term 必须有完整结构化事实；一次性条件、密钥模式和外部指令注入在候选入库前被确定性过滤。安全边界仍是“Agent 只生成候选，用户确认后才永久写入”，explicit 与 inferred 均不自动确认。
+- 普通偏好按 `user_id + fact_slot` 去重和冲突替代：同事实重复确认只增加 reinforcement；同槽不同值在同一事务内归档旧版本、写审计/Outbox 并创建带 `supersedes_memory_id` 的新记录；普通偏好覆盖 active 黑名单返回 `409 MEMORY_HARD_RULE_CONFLICT`。history 不参与槽位替代。
+- v2 召回继续使用 pgvector COSINE + 关键词 GIN 的无权重 RRF，再乘 `confidence × time_decay`；增加确定性 scope 过滤与“黑名单、同 scope 偏好、global 偏好、history”顺序。黑名单不占普通 Prompt 预算；普通记忆默认最多 10 条、估算 1200 Token。向量元数据不兼容时显式记录 `vector_metadata_mismatch` 并降级关键词 lane，不混用向量空间。
+- 新增三个独立 Feature Flag：structured facts、conflict resolution、retrieval v2；关闭 v2 读取恢复旧 key/content + RRF 切片路径，新字段和审计数据保留。新增脱敏 `memory_metrics` 与 recall lane 证据，只含数量、Token 估算和降级原因，不包含记忆原文、完整 query、向量或内部 Prompt。
+- 新增严格 `eval/memory-cases.yaml`、真实 `MemoryService/BaseStore/Outbox + Fake Encoder` 的 memory integration driver，以及 `--domain shopping|memory|all`。当前 50 个可执行 P0 case 覆盖确认边界、session-only 语言变体、explicit/inferred/imported、否定语义、强化、Unicode/大小写/空白规范化、冲突替代、黑名单硬冲突、category/brand/product 作用域、history 稳定事件、删除即时失效、跨用户隔离和密钥/PII/注入变体过滤；报告包含候选、正式记忆、版本、投影、lane 指标和迁移/Prompt/Embedding 指纹。memory live 复用正式认证、HTTP 202 与 WebSocket driver，仅选择 `live-memory-*` case，仍要求显式模型与外部工具开关。
+- 新增 `scripts/test_all.py` 统一执行 Ruff、compileall、后端全量测试、shopping + memory 离线评测、前端 Vitest 和生产构建；每个子命令有默认 300 秒上限并使用独立 workspace 临时目录。缺失且被 Git 忽略的 `datasets.onebound_headphones` 改为 module-level `importorskip`；WebSocket 正常取消不再把 `CancelledError` 冒泡为测试失败。
+- 已验证：统一无付费流水线 `output/test-runs/memory-50-release/manifest.json` 全部通过；全仓 Ruff 与 compileall 通过，后端 `182 passed, 1 skipped`，shopping offline `6/6 PASS`，SQLite 与真实 PostgreSQL/pgvector memory integration 均为 `50/50 PASS`，隔离库从零升级和重复 `alembic upgrade head` 均到 `20260823_0004`，前端 Vitest `4 files / 15 tests PASS`，TypeScript + Vite build 退出码 0。真实 `deepseek-v4-flash` 主模型、`deepseek-v4-pro` 独立 Judge、正式认证、PostgreSQL、HTTP 202 与 WebSocket memory live 用例结果为 `PASS / 0.850`，P0 与 P1 通过；P2 指出降级回答应用了头戴式偏好但没有明确说明偏好来源，报告为 `output/eval/memory-50-live-judge/report.md`。JustOne/Tavily 在验收环境中均被识别为已配置，但本轮商品检索未返回可用候选。Windows API 入口使用 `python -m app.api` 并禁止 Uvicorn 覆盖 Psycopg 所需的 Selector loop；专用评测账号、记忆 Outbox 与隔离数据库均已清理。
+
+## 2026-08-23：补齐 LangFuse 全链路 Token、上下文、缓存与工具耗时指标
+
+- 新增统一可观测指标与 LangFuse v4 Callback 适配器；主协调器和 fork 的 Think/Reflect、
+  ShoppingSummary、CategoryInsight extractor 使用稳定 generation 名称，每次调用记录消息数、字符数、
+  System/历史/工具结果估算 Token。估算值只用于上下文趋势，计费 Token 仍只读取 Provider usage。
+- DeepSeek `prompt_cache_hit_tokens/prompt_cache_miss_tokens` 与 reasoning tokens 已归一化为互斥 usage
+  bucket，避免 prompt 总量、cache hit/miss 和 reasoning 重复计费；缺失 cache 字段时保持 unknown，不推断
+  未命中。Callback 只更新 LangChain 已创建的 generation/tool observation，不重复建 span。
+- 显式 live Eval 的独立 HTTP Judge 使用 `eval.judge` generation 关联到 case 最后一条任务 Trace，复用
+  上下文估算、脱敏和互斥 usage 口径；未配置 LangFuse 或离线评测时保持原有行为。
+- 工具链统一保留成功、提前拒绝、异常、超时和取消的真实墙钟耗时，并输出脱敏状态、结果估算 Token、
+  结果数量与业务缓存指标；中间件提前拒绝也通过同一 Callback 生命周期产生且只产生一个 tool observation。
+  CategoryInsight 仅暴露缓存键摘要、TTL、命中和降级原因，不暴露原始 query；fork metadata 增加父子 thread、
+  深度和目标平台，child graph 优先继承 `dispatch_tool` 的 child callback manager，确保 observation 嵌套在
+  对应工具下。
+- Cache Breakpoint 节点固定为 `context.compress`，记录触发状态、压缩前后估算 Token、移除消息数和保留
+  工具组数，与 LLM Prompt Cache、应用缓存分开。summary 脱敏白名单允许安全指标，但继续删除密钥、
+  Cookie、数据库 URL、PII、完整 Prompt、商品数组和 `reasoning_content`。
+- 已验证：相关 Ruff 与 compileall 通过；可观测、Eval、AgentLoop、CategoryInsight、dispatch 和
+  ItemSearch 定向回归 59 项通过，未调用真实模型、Provider 或 LangFuse Cloud。全量 pytest 在收集阶段仍被仓库现有
+  `datasets.*` 模块缺失阻断，共 5 个数据集测试文件；真实 Cloud ingestion、看板、cache 烟雾和隐私搜索
+  仍属于部署验收项，不能标记为已验证。排除这 5 个文件后的扩展回归运行超过 120 秒无输出，已手动
+  终止；未据此扩大通过范围，仓库既有 WebSocket/TestClient 偶发挂起仍需单独排查。
+
+## 2026-08-21：移除未使用的 ShippingCalc 工具
+
+- 根据当前业务链路移除 `app/tools/shipping_calc.py`，并从 Agent 的核心工具注册表、Think/Reflect 阶段工具集合和相关测试中清理。
+- `PriceCompare` 继续复用费用计算纯函数，并保留“运费未知不参与最低总价判断”的业务约束；商品字段中的 `shipping_fee` 仍作为事实数据保留，不代表恢复独立运费工具。
+- 当前 Agent 为八个业务工具加一个 `dispatch_tool` fork 元工具；历史实施计划中的 ShippingCalc 描述不再代表当前运行时能力。
+- 同步 README 的工具数量、可观测性说明、AgentLoop 章节、架构图和目录注释；README 当前不再声明独立关税/运费计算工具。
+
 ## 2026-08-21：完成 Agent 全链路可观测代码接入
 
 - 接入 LangFuse Python SDK v4：每个 RunRegistry run 使用 `run_id` 生成稳定的 32 位 W3C Trace ID，
   创建根 `globuy.agent_run`；同一个 request-scoped LangChain Callback 通过 RunnableConfig 与 ContextVar
-  进入 LangGraph 主图、模型、九个业务工具、ShoppingSummary 和同质 fork，不改变 AG-UI 与 WebSocket。
+  进入 LangGraph 主图、八个业务工具、ShoppingSummary 和同质 fork，不改变 AG-UI 与 WebSocket。
 - 新增默认关闭的 `none | langfuse` provider、Cloud 日本区配置、100% 首期采样和 `none/summary/full`
   采集档。默认 summary 只导出结构、长度和摘要哈希；SDK mask 与 OTEL export-stage mask 双层覆盖
   LangChain span，用户 ID 使用带 Salt 的 HMAC。初始化、发送和关闭异常全部 fail-open。
@@ -283,7 +329,6 @@ React 彩铅品牌封面 + 三栏购物工作台
 | ItemSearch | Think / 外部 | 异步单平台 BM25 + BGE-M3 + RRF，支持结构化过滤和 monitor | 数据为离线快照，尚未接实时 Provider |
 | ItemPicker | Reflect / 内部 | 严格 Schema；有证据硬约束后按 retrieval rank、rating、price、输入顺序选择，最多 3 项；运行前会读取当前用户已确认的长期记忆并注入 Prompt | 偏好仍需用户通过记忆 CRUD 明确确认，不自动持久化 Agent 推断 |
 | PriceCompare | Reflect / 外部 | 使用国内 CNY 费用契约比较完整报价；未知运费单列且不得胜出 | 未接入实时跨平台报价和规格对齐 |
-| ShippingCalc | Act / 外部 | 国内单报价确定性计算：商品价 × 数量 + 已知运费；未知运费不按零处理 | 未接入平台实时运费来源 |
 | ShoppingSummary | Reflect / 内部 | 工具内额外调用一次共享 LLM 生成严格 `final_text`；DeepSeek V4 使用非思考模式 function calling；最终商品按平台与商品 ID 从已验证本地快照确定性补齐缺失 `image_url`，成功结构化输出才终结 | 报告未持久化；额外调用需要真实模型配置 |
 
 当前 LangGraph 已显式建模 `Think -> Act -> Observe -> Reflect`。Think 与 Reflect 分别绑定允许
@@ -335,7 +380,7 @@ sequence 去重；45 秒陈旧连接检测、1/2/4/8/15 秒抖动重连、replay
 - 端到端目标：文字/图片购物意图 -> 结构化约束 -> 按需同质 fork 并行跨平台检索 ->
   到手成本比较 -> 偏好/黑名单筛选 -> 带理由、来源和风险的购物清单。
 - 主循环目标：`Think -> Act -> Observe -> Reflect`，信息不足继续循环，充分后才调用
-  `ShoppingSummary`；`dispatch_tool(demands)` 是 fork 元工具，不属于九个业务工具。
+  `ShoppingSummary`；`dispatch_tool(demands)` 是 fork 元工具，不属于八个业务工具。
 - 任务生命周期目标：HTTP 立即返回任务标识，`active_tasks` 管理后台协程，WebSocket 持续
   推送，支持心跳、同 thread 新任务取消旧任务、取消传播和全路径清理。
 - 上下文目标：`thread_id` 贯穿连接、任务、checkpoint、事件、`session_dir` 和记忆来源；

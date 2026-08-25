@@ -3,7 +3,10 @@ import json
 from pathlib import Path
 
 import pytest
+from langchain_core.callbacks.base import AsyncCallbackHandler
+from langchain_core.callbacks.manager import AsyncCallbackManager
 from langchain_core.messages import AIMessage
+from langchain_core.runnables.config import set_config_context
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from app.agent.dispatch_tool import build_dispatch_node
@@ -19,6 +22,7 @@ def dispatch_tool(loop: AgentLoop):
 
 class ForkCompletionModel:
     def __init__(self) -> None:
+        self.configs = []
         self.responses = [
             AIMessage(
                 content="",
@@ -38,7 +42,7 @@ class ForkCompletionModel:
         return self
 
     async def ainvoke(self, _messages, config=None):
-        del config
+        self.configs.append(config or {})
         return self.responses.pop(0)
 
 @pytest.mark.asyncio
@@ -86,11 +90,26 @@ async def test_real_model_style_fork_can_return_without_parent_terminal_tool(
     )
 
     with thread_scope("root", tmp_path, run_id="run-fork-completion"):
-        payload = await parent.dispatch("检索一款耳机")
+        payload = await parent.dispatch("检索一款耳机", target_platform="jingdong")
 
     assert payload["status"] == "ok"
     assert payload["answer"] == "子任务检索完成。"
+    assert parent.model.configs[0]["run_name"] == "fork.think"
+    assert parent.model.configs[0]["metadata"]["parent_thread_id"] == "root"
+    assert parent.model.configs[0]["metadata"]["target_platform"] == "jingdong"
+    assert parent.model.configs[0]["metadata"]["context_estimated_tokens"] > 0
     assert parent.active_children == {}
+
+
+def test_child_config_inherits_current_dispatch_callback_manager() -> None:
+    parent = AgentLoop(model=None)
+    handler = AsyncCallbackHandler()
+    callback_manager = AsyncCallbackManager.configure([handler])
+
+    with set_config_context({"callbacks": callback_manager}) as context:
+        config = context.run(parent._config, "root-fork-child", child=True)
+
+    assert config["callbacks"].handlers == [handler]
 
 
 @pytest.mark.asyncio

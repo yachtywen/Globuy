@@ -20,7 +20,7 @@
 - 九业务工具由统一工厂构建，ShoppingSummary 在构建时绑定共享模型；AgentLoop 再追加动态
   DispatchTool。父子 Loop 共享业务工具对象和完整 System Prompt，子 Loop 使用独立 checkpoint。
 - Think 允许 Planner、ChatFallback、WebSearch、CategoryInsight、ItemSearch、DispatchTool；
-  Reflect 允许 CategoryInsight、PriceCompare、ShippingCalc、ItemPicker、ShoppingSummary、
+  Reflect 允许 CategoryInsight、PriceCompare、ItemPicker、ShoppingSummary、
   ChatFallback；ToolNode 包装器拒绝跨阶段调用。
 - ShoppingSummary 只有在 picks 非空、来源链接完整、嵌套 LLM 结构化输出有效时返回
   `status=complete, terminal=true`。未配置、超时、错误或证据不完整均不终结，也不生成占位清单。

@@ -28,6 +28,12 @@ from app.database.models import (
     WishlistItem,
 )
 from app.database.session import Database
+from app.memory.facts import (
+    build_fact_slot,
+    durable_candidate_allowed,
+    same_fact,
+    valid_fact_fields,
+)
 from app.memory.keywords import extract_keywords
 from app.products.schedule import next_daily_refresh
 
@@ -64,6 +70,16 @@ def _memory_snapshot(item: MemoryEntry) -> dict[str, Any]:
         "reinforcement_count": item.reinforcement_count,
         "archived_at": _iso(item.archived_at),
         "purge_after": _iso(item.purge_after),
+        "subject": item.subject,
+        "predicate": item.predicate,
+        "value_json": item.value_json,
+        "polarity": item.polarity,
+        "scope_type": item.scope_type,
+        "scope_value": item.scope_value,
+        "evidence_type": item.evidence_type,
+        "fact_slot": item.fact_slot,
+        "supersedes_memory_id": item.supersedes_memory_id,
+        "extraction_version": item.extraction_version,
     }
 
 
@@ -352,8 +368,14 @@ class WishlistService:
 
 
 class MemoryService:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, settings: Any | None = None) -> None:
         self.database = database
+        self.structured_facts_enabled = bool(
+            getattr(settings, "memory_structured_facts_enabled", True)
+        )
+        self.conflict_resolution_enabled = bool(
+            getattr(settings, "memory_conflict_resolution_enabled", True)
+        )
 
     async def list(self, user_id: str, *, lifecycle_status: str = "active") -> list[dict[str, Any]]:
         async with self.database.sessions() as session:
@@ -382,6 +404,14 @@ class MemoryService:
         confidence: Decimal,
         source_thread_id: str | None,
         source_run_id: str | None,
+        subject: str | None = None,
+        predicate: str | None = None,
+        value_json: Any | None = None,
+        polarity: str | None = None,
+        scope_type: str | None = None,
+        scope_value: str | None = None,
+        evidence_type: str | None = "explicit",
+        extraction_version: str | None = "memory-fact-v2",
     ) -> dict[str, Any]:
         now = utc_naive()
         async with self.database.sessions.begin() as session:
@@ -408,7 +438,12 @@ class MemoryService:
                     raise ApiError(404, "RUN_NOT_FOUND", "记忆来源运行不存在")
             existing = await session.scalar(
                 select(MemoryEntry)
-                .where(MemoryEntry.user_id == user_id, MemoryEntry.key == key)
+                .where(
+                    MemoryEntry.user_id == user_id,
+                    MemoryEntry.key == key,
+                    MemoryEntry.status == "active",
+                    MemoryEntry.lifecycle_status == "active",
+                )
                 .with_for_update()
             )
             if existing is not None:
@@ -431,6 +466,20 @@ class MemoryService:
                 lifecycle_status="active",
                 last_reinforced_at=now,
                 reinforcement_count=1,
+                subject=subject,
+                predicate=predicate,
+                value_json=value_json,
+                polarity=polarity,
+                scope_type=scope_type,
+                scope_value=scope_value,
+                evidence_type=evidence_type,
+                fact_slot=build_fact_slot(
+                    subject=subject,
+                    predicate=predicate,
+                    scope_type=scope_type,
+                    scope_value=scope_value,
+                ),
+                extraction_version=extraction_version,
             )
             session.add(item)
             snapshot = _memory_snapshot(item)
@@ -579,12 +628,67 @@ class MemoryService:
         source_thread_id: str | None,
         source_run_id: str | None,
         ttl_days: int = 30,
+        subject: str | None = None,
+        predicate: str | None = None,
+        value_json: Any | None = None,
+        polarity: str | None = None,
+        scope_type: str | None = None,
+        scope_value: str | None = None,
+        evidence_type: str | None = "explicit",
+        persistence_scope: str = "long_term",
+        extraction_version: str | None = "memory-fact-v2",
     ) -> dict[str, Any]:
         now = utc_naive()
+        allowed, reason = durable_candidate_allowed(
+            content=content,
+            persistence_scope=persistence_scope,
+            evidence_type=evidence_type or "inferred",
+        )
+        if not allowed:
+            code = (
+                "MEMORY_SESSION_ONLY"
+                if reason == "session_only"
+                else "MEMORY_CANDIDATE_REJECTED"
+            )
+            raise ApiError(422, code, "候选不符合长期记忆安全策略")
+        if not valid_fact_fields(
+            polarity=polarity, scope_type=scope_type, evidence_type=evidence_type
+        ):
+            raise ApiError(422, "MEMORY_FACT_INVALID", "长期记忆结构化字段不合法")
+        fact_slot = None
+        if self.structured_facts_enabled and category != "history":
+            fact_slot = build_fact_slot(
+                subject=subject,
+                predicate=predicate,
+                scope_type=scope_type,
+                scope_value=scope_value,
+            )
         content_hash = hashlib.sha256(
-            f"{category}\0{key}\0{' '.join(content.split())}".encode()
+            json.dumps(
+                {
+                    "category": category,
+                    "key": key,
+                    "content": " ".join(content.split()),
+                    "fact_slot": fact_slot,
+                    "value": value_json,
+                    "polarity": polarity,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
         ).hexdigest()
         async with self.database.sessions.begin() as session:
+            conflict = None
+            if fact_slot:
+                conflict = await session.scalar(
+                    select(MemoryEntry).where(
+                        MemoryEntry.user_id == user_id,
+                        MemoryEntry.fact_slot == fact_slot,
+                        MemoryEntry.status == "active",
+                        MemoryEntry.lifecycle_status == "active",
+                    )
+                )
             existing = await session.scalar(
                 select(MemoryCandidate).where(
                     MemoryCandidate.user_id == user_id,
@@ -608,6 +712,17 @@ class MemoryService:
                 status="pending",
                 created_at=now,
                 expires_at=now + timedelta(days=ttl_days),
+                subject=subject,
+                predicate=predicate,
+                value_json=value_json,
+                polarity=polarity,
+                scope_type=scope_type or ("global" if fact_slot else None),
+                scope_value=scope_value,
+                evidence_type=evidence_type,
+                persistence_scope=persistence_scope,
+                fact_slot=fact_slot,
+                conflicts_with_memory_id=conflict.memory_id if conflict else None,
+                extraction_version=extraction_version,
             )
             session.add(candidate)
         return self._candidate_snapshot(candidate)
@@ -646,11 +761,80 @@ class MemoryService:
             resolved_category = category or candidate.category
             resolved_key = key or candidate.key
             resolved_content = content or candidate.content
-            item = await session.scalar(
+            slot_item = None
+            if self.conflict_resolution_enabled and candidate.fact_slot:
+                slot_item = await session.scalar(
+                    select(MemoryEntry)
+                    .where(
+                        MemoryEntry.user_id == user_id,
+                        MemoryEntry.fact_slot == candidate.fact_slot,
+                        MemoryEntry.status == "active",
+                        MemoryEntry.lifecycle_status == "active",
+                    )
+                    .with_for_update()
+                )
+            item = slot_item or await session.scalar(
                 select(MemoryEntry)
-                .where(MemoryEntry.user_id == user_id, MemoryEntry.key == resolved_key)
+                .where(
+                    MemoryEntry.user_id == user_id,
+                    MemoryEntry.key == resolved_key,
+                    MemoryEntry.status == "active",
+                    MemoryEntry.lifecycle_status == "active",
+                )
                 .with_for_update()
             )
+            if (
+                self.conflict_resolution_enabled
+                and item is not None
+                and item.category == "blacklist"
+                and resolved_category != "blacklist"
+            ):
+                raise ApiError(
+                    409,
+                    "MEMORY_HARD_RULE_CONFLICT",
+                    "新偏好与现有黑名单冲突，请先明确删除黑名单",
+                    details={"memory_id": item.memory_id},
+                )
+            identical = bool(
+                self.conflict_resolution_enabled
+                and item is not None
+                and candidate.fact_slot
+                and same_fact(
+                    left_value=item.value_json,
+                    left_polarity=item.polarity,
+                    right_value=candidate.value_json,
+                    right_polarity=candidate.polarity,
+                )
+            )
+            superseded = None
+            if (
+                self.conflict_resolution_enabled
+                and item is not None
+                and candidate.fact_slot
+                and resolved_category != "history"
+                and not identical
+            ):
+                superseded = item
+                item.lifecycle_status = "archived"
+                item.archived_at = now
+                item.purge_after = now + timedelta(
+                    days=365 if item.category == "history" else 730
+                )
+                item.updated_at = now
+                item.version += 1
+                old_snapshot = _memory_snapshot(item)
+                session.add(
+                    MemoryVersion(
+                        memory_version_id=uuid4().hex,
+                        memory_id=item.memory_id,
+                        version=item.version,
+                        operation="superseded",
+                        snapshot_json=old_snapshot,
+                        created_at=now,
+                    )
+                )
+                session.add(self._outbox(item, "memory.deleted", old_snapshot, now))
+                item = None
             if item is None:
                 item = MemoryEntry(
                     memory_id=uuid4().hex,
@@ -670,6 +854,16 @@ class MemoryService:
                     last_reinforced_at=now,
                     created_at=now,
                     updated_at=now,
+                    subject=candidate.subject,
+                    predicate=candidate.predicate,
+                    value_json=candidate.value_json,
+                    polarity=candidate.polarity,
+                    scope_type=candidate.scope_type,
+                    scope_value=candidate.scope_value,
+                    evidence_type=candidate.evidence_type,
+                    fact_slot=candidate.fact_slot,
+                    supersedes_memory_id=(superseded.memory_id if superseded else None),
+                    extraction_version=candidate.extraction_version,
                 )
                 session.add(item)
                 operation = "create"
@@ -737,6 +931,17 @@ class MemoryService:
             "created_at": _iso(item.created_at),
             "expires_at": _iso(item.expires_at),
             "decided_at": _iso(item.decided_at),
+            "subject": item.subject,
+            "predicate": item.predicate,
+            "value_json": item.value_json,
+            "polarity": item.polarity,
+            "scope_type": item.scope_type,
+            "scope_value": item.scope_value,
+            "evidence_type": item.evidence_type,
+            "persistence_scope": item.persistence_scope,
+            "fact_slot": item.fact_slot,
+            "conflicts_with_memory_id": item.conflicts_with_memory_id,
+            "extraction_version": item.extraction_version,
         }
 
     @staticmethod

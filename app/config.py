@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_temperature: float = Field(default=0.3, ge=0, le=2)
 
+    # Independent P1/P2 evaluation model. These settings intentionally do not
+    # fall back to the main Agent model or its credentials.
+    eval_judge_model: str | None = None
+    eval_judge_base_url: str | None = None
+    eval_judge_api_key: SecretStr | None = None
+    eval_judge_timeout_seconds: float = Field(default=120.0, gt=0, le=1800)
+
     output_dir: Path = Path("output")
     uploaded_dir: Path = Path("uploaded")
     prompt_file: Path = Path("app/prompt/prompts.yml")
@@ -110,6 +117,9 @@ class Settings(BaseSettings):
         "langfuse_public_key",
         "langfuse_secret_key",
         "observability_hash_salt",
+        "eval_judge_model",
+        "eval_judge_base_url",
+        "eval_judge_api_key",
         mode="before",
     )
     @classmethod
@@ -158,6 +168,10 @@ class Settings(BaseSettings):
     memory_history_archive_days: int = Field(default=180, ge=1)
     memory_recall_limit: int = Field(default=10, ge=1, le=50)
     memory_recall_candidate_pool: int = Field(default=50, ge=10, le=500)
+    memory_prompt_token_limit: int = Field(default=1_200, ge=128, le=20_000)
+    memory_structured_facts_enabled: bool = True
+    memory_conflict_resolution_enabled: bool = True
+    memory_retrieval_v2_enabled: bool = True
     opensearch_url: str = "http://127.0.0.1:9200"
     opensearch_product_index: str = "globuy-products-v2-initial"
     opensearch_product_index_prefix: str = "globuy-products-v2-"

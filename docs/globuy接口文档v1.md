@@ -719,6 +719,9 @@ interface MemoryEntry {
 {
   "category":"preference","key":"headphone_preference",
   "content":"偏好轻量、主动降噪的头戴式耳机","confidence":1.0,
+  "subject":"headphones","predicate":"wearing_style",
+  "value_json":"over-ear","polarity":"positive",
+  "scope_type":"category","scope_value":"headphones",
   "source_thread_id":"thr_example","source_run_id":"run_example"
 }
 ```
@@ -726,9 +729,12 @@ interface MemoryEntry {
 | 字段 | 约束 |
 | --- | --- |
 | `category` | 必填：`blacklist`、`preference`、`history` |
-| `key` | 必填，1～128 字符，同一用户内唯一 |
+| `key` | 必填，1～128 字符；active v2 记忆以 `fact_slot` 处理同槽冲突，旧数据仍兼容 key 路径 |
 | `content` | 必填，1～4000 字符 |
 | `confidence` | 可选，0～1，默认 1 |
+| `subject/predicate/value_json` | 可选的结构化事实；Agent v2 长期候选必须提供 |
+| `polarity` | 可选：`positive`、`negative` |
+| `scope_type/scope_value` | 可选作用域：`global/category/brand/product` 及其值 |
 | 来源 ID | 可选，若提供必须属于当前用户 |
 
 响应 `201`，返回完整 `MemoryEntry`。
@@ -743,7 +749,17 @@ interface MemoryEntry {
 
 `DELETE /api/v1/memories/{memory_id}`
 
-要求 CSRF。响应 `204`。当前为软删除并记录版本及搜索同步事件，首版无恢复接口。
+要求 CSRF。响应 `204`。当前为软删除并记录版本及搜索同步事件；已归档但未删除的记忆可通过恢复接口重建投影。
+
+### 10.6 候选确认、拒绝、归档与恢复
+
+- `GET /api/v1/memory-candidates?status=pending`：查询当前用户候选。
+- `POST /api/v1/memory-candidates/{candidate_id}/confirm`：要求 CSRF，可兼容原有 category/key/content 编辑字段。相同结构化事实只强化原记录；普通同槽冲突会归档旧记录并返回新的 active 记忆。
+- `POST /api/v1/memory-candidates/{candidate_id}/reject`：要求 CSRF，响应 `204`。
+- `GET /api/v1/memories?status=archived`：查询已归档记忆。
+- `POST /api/v1/memories/{memory_id}/restore`：要求 CSRF，强化并恢复记忆，Outbox 异步重建 pgvector 投影。
+
+普通偏好试图覆盖 active 黑名单时返回 `409`，错误码 `MEMORY_HARD_RULE_CONFLICT`。响应新增的 `subject/predicate/value_json/polarity/scope_type/scope_value/fact_slot/conflicts_with_memory_id/supersedes_memory_id/extraction_version` 均为兼容性可选字段。
 
 ## 11. 兼容接口
 

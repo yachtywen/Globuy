@@ -1,4 +1,6 @@
-# PriceCompare、ShippingCalc、DispatchTool、CategoryInsight 实现计划
+# PriceCompare、ShippingCalc、DispatchTool、CategoryInsight 实现计划（历史方案）
+
+> 历史实施方案：当前运行时已移除独立 `ShippingCalc` 工具；费用纯函数仍由 `PriceCompare` 复用。
 
 > 状态：主体实现完成；生产 DeepSeek 制卡与本机 Reranker 端点待外部验收
 > 确认日期：2026-07-20

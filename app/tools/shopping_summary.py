@@ -4,21 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.agent.prompts import get_shopping_summary_prompt
 from app.config import get_settings
+from app.observability.metrics import context_metrics
 from app.presentation import sanitize_shopping_markdown, visible_unresolved
 from app.search.catalog_images import enrich_product_images
 from app.tools.item_picker import PickedItem
-from app.utils.thread_ctx import current_thread_id
+from app.utils.thread_ctx import current_fork_depth, current_thread_id
 
 
 class PreferenceCandidate(BaseModel):
@@ -31,6 +32,30 @@ class PreferenceCandidate(BaseModel):
     content: str = Field(min_length=1, max_length=500)
     source_session: str | None = None
     confidence: float = Field(default=1.0, ge=0, le=1)
+    persistence_scope: Literal["long_term", "session_only"] = "long_term"
+    subject: str | None = Field(default=None, max_length=128)
+    predicate: str | None = Field(default=None, max_length=64)
+    value_json: Any | None = None
+    polarity: Literal["positive", "negative"] | None = None
+    scope_type: Literal["global", "category", "brand", "product"] | None = None
+    scope_value: str | None = Field(default=None, max_length=128)
+    evidence_type: Literal["explicit", "inferred"] = "explicit"
+    extraction_version: Literal["memory-fact-v2"] = "memory-fact-v2"
+
+    @model_validator(mode="after")
+    def require_durable_fact(self) -> PreferenceCandidate:
+        if self.persistence_scope == "session_only":
+            return self
+        required = (
+            self.subject,
+            self.predicate,
+            self.value_json,
+            self.polarity,
+            self.scope_type,
+        )
+        if any(value is None for value in required):
+            raise ValueError("long_term candidates require a complete structured fact")
+        return self
 
 
 class SummaryNarrative(BaseModel):
@@ -53,12 +78,18 @@ class ShoppingSummaryOutput(BaseModel):
     message: str | None = None
 
 
-def _model_config(config: RunnableConfig | None) -> RunnableConfig:
+def _model_config(
+    config: RunnableConfig | None, messages: list[SystemMessage | HumanMessage]
+) -> RunnableConfig:
     inherited: RunnableConfig = dict(config or {})
+    inherited["run_name"] = "shopping_summary.generation"
     inherited["tags"] = [*inherited.get("tags", []), "shopping_summary"]
     inherited["metadata"] = {
         **inherited.get("metadata", {}),
         "model_role": "shopping_summary",
+        "phase": "reflect",
+        "fork_depth": current_fork_depth(),
+        **context_metrics(messages).metadata(),
     }
     return inherited
 
@@ -161,15 +192,14 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
             method="function_calling",
         )
         try:
+            model_messages = [
+                SystemMessage(content=get_shopping_summary_prompt()),
+                HumanMessage(content=json.dumps(facts, ensure_ascii=False, sort_keys=True)),
+            ]
             async with asyncio.timeout(settings.summary_timeout_seconds):
                 response = await structured_model.ainvoke(
-                    [
-                        SystemMessage(content=get_shopping_summary_prompt()),
-                        HumanMessage(
-                            content=json.dumps(facts, ensure_ascii=False, sort_keys=True)
-                        ),
-                    ],
-                    config=_model_config(config),
+                    model_messages,
+                    config=_model_config(config, model_messages),
                 )
             narrative = (
                 response

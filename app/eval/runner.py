@@ -158,6 +158,17 @@ class LiveEvaluationClient:
         return {"X-CSRF-Token": self.csrf_token}
 
     async def _create_thread(self) -> str:
+        if self.current_thread_id is None:
+            # Live suites are deliberately rerunnable with the same dedicated
+            # account. Reuse the server's active-thread pointer so creating the
+            # next isolated thread also archives the previous evaluation run.
+            active = await self.client.get(
+                "/api/v1/threads", params={"status": "active", "limit": 1}
+            )
+            active.raise_for_status()
+            items = active.json().get("items", [])
+            if items:
+                self.current_thread_id = str(items[0]["thread_id"])
         response = await self.client.post(
             "/api/v1/threads",
             headers=self.write_headers,

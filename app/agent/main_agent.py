@@ -17,6 +17,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import ensure_config
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -34,17 +35,40 @@ from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import EventType, current_monitor
 from app.config import get_settings
 from app.observability import current_observability_config
+from app.observability.metrics import compression_metrics, context_metrics
 from app.products.catalog.intent import ShoppingIntent
 from app.search.schemas import Platform
 from app.tools import TERMINAL_TOOLS, TOOL_PHASES
 from app.utils.thread_ctx import (
     current_fork_depth,
+    current_fork_target_platform,
+    current_parent_thread_id,
     current_thread_id,
     current_user_id,
     fork_scope,
 )
 
 type Phase = Literal["think", "act", "observe", "reflect", "done"]
+
+
+def _model_call_config(
+    config: RunnableConfig,
+    phase: Literal["think", "reflect"],
+    messages: Sequence[BaseMessage],
+) -> RunnableConfig:
+    """Name one generation and attach pre-call context estimates."""
+
+    inherited: RunnableConfig = dict(config)
+    depth = current_fork_depth()
+    inherited["run_name"] = f"{'fork' if depth else 'coordinator'}.{phase}"
+    inherited["metadata"] = {
+        **inherited.get("metadata", {}),
+        "phase": phase,
+        "model_role": "coordinator",
+        "fork_depth": depth,
+        **context_metrics(messages).metadata(),
+    }
+    return inherited
 
 
 class AgentState(TypedDict, total=False):
@@ -60,8 +84,10 @@ class AgentState(TypedDict, total=False):
     loop_detected: bool
     memory_context: str | None
     memory_status: str
+    memory_metrics: dict[str, int | str] | None
     shopping_intent: dict[str, Any] | None
     catalog_summary: dict[str, Any] | None
+    compression_metrics: dict[str, Any] | None
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -300,9 +326,10 @@ class AgentLoop:
             prompt = self.system_prompt
             if state.get("memory_context"):
                 prompt += "\n\n用户已确认的长期记忆：\n" + str(state["memory_context"])
+            model_messages = [SystemMessage(content=prompt), phase_prompt, *state["messages"]]
             response = await think_model.ainvoke(
-                [SystemMessage(content=prompt), phase_prompt, *state["messages"]],
-                config=config,
+                model_messages,
+                config=_model_call_config(config, "think", model_messages),
             )
             response, _ = _normalize_phase_tool_calls(response, TOOL_PHASES["think"])
             await _report_phase("think", started=False, iteration=iteration)
@@ -344,8 +371,12 @@ class AgentLoop:
                 _forced_termination_response(state)
                 if force_root_termination
                 else await reflect_model.ainvoke(
-                    [SystemMessage(content=prompt), phase_prompt, *state["messages"]],
-                    config=config,
+                    (model_messages := [
+                        SystemMessage(content=prompt),
+                        phase_prompt,
+                        *state["messages"],
+                    ]),
+                    config=_model_call_config(config, "reflect", model_messages),
                 )
             )
             allowed_tools = (
@@ -464,7 +495,11 @@ class AgentLoop:
 
         async def compress(state: AgentState) -> dict[str, Any]:
             update = cache_breakpoint_update(state["messages"])
-            return {"messages": update} if update is not None else {}
+            metrics = compression_metrics(state["messages"], update)
+            result: dict[str, Any] = {"compression_metrics": metrics.metadata()}
+            if update is not None:
+                result["messages"] = update
+            return result
 
         def route_decision(state: AgentState) -> Literal["act", "reflect", "think", "__end__"]:
             phase = state.get("phase", "think")
@@ -474,13 +509,13 @@ class AgentLoop:
         builder.add_node("think", think)
         builder.add_node("act", build_dispatch_node(self.tools))
         builder.add_node("observe", observe)
-        builder.add_node("compress", compress)
+        builder.add_node("context.compress", compress)
         builder.add_node("reflect", reflect)
         builder.add_edge(START, "think")
         builder.add_conditional_edges("think", route_decision)
         builder.add_edge("act", "observe")
-        builder.add_edge("observe", "compress")
-        builder.add_conditional_edges("compress", route_decision)
+        builder.add_edge("observe", "context.compress")
+        builder.add_conditional_edges("context.compress", route_decision)
         builder.add_conditional_edges("reflect", route_decision)
         return builder.compile(checkpointer=self.checkpointer, store=self.store)
 
@@ -527,8 +562,10 @@ class AgentLoop:
             "loop_detected": False,
             "memory_context": None,
             "memory_status": "not_configured" if self.store is None else "ready",
+            "memory_metrics": None,
             "shopping_intent": None,
             "catalog_summary": None,
+            "compression_metrics": None,
         }
 
     async def _state_with_memory(self, content: str) -> AgentState:
@@ -537,25 +574,70 @@ class AgentLoop:
         if self.store is None or not user_id:
             return state
         try:
+            settings = get_settings()
             memories = await self.store.asearch(
-                ("users", user_id, "memories"), query=content, limit=10
+                ("users", user_id, "memories"),
+                query=content,
+                limit=settings.memory_recall_limit,
             )
-            lines = []
+            hard_lines: list[str] = []
+            ordinary_lines: list[str] = []
+            ordinary_tokens = 0
+            budget = settings.memory_prompt_token_limit
             for memory in memories:
                 category = str(memory.value.get("category") or "preference")
                 content_value = str(memory.value.get("content") or "").strip()
                 if content_value:
-                    lines.append(f"- [{category}] {memory.key}: {content_value}")
-            state["memory_context"] = "\n".join(lines) or None
+                    line = f"- [{category}] {memory.key}: {content_value}"
+                    if category == "blacklist":
+                        hard_lines.append(line)
+                        continue
+                    if len(ordinary_lines) >= settings.memory_recall_limit:
+                        continue
+                    estimated = max(1, len(line) // 4)
+                    if ordinary_tokens + estimated <= budget:
+                        ordinary_lines.append(line)
+                        ordinary_tokens += estimated
+            state["memory_context"] = "\n".join([*hard_lines, *ordinary_lines]) or None
             state["memory_status"] = "ready"
+            state["memory_metrics"] = {
+                "recalled_count": len(memories),
+                "hard_rule_count": len(hard_lines),
+                "injected_ordinary_count": len(ordinary_lines),
+                "dropped_ordinary_count": max(
+                    0, len(memories) - len(hard_lines) - len(ordinary_lines)
+                ),
+                "injected_estimated_tokens": ordinary_tokens,
+            }
         except Exception:
             state["memory_status"] = "partial"
+            state["memory_metrics"] = {"degraded_reason": "memory_recall_error"}
         return state
 
     def _config(self, thread_id: str, *, child: bool = False) -> RunnableConfig:
         settings = get_settings()
         observation = current_observability_config()
-        metadata = {"model_role": "coordinator", **observation.get("metadata", {})}
+        active_config = ensure_config()
+        callbacks = (
+            active_config.get("callbacks")
+            if child and active_config.get("callbacks") is not None
+            else observation.get("callbacks")
+        )
+        depth = current_fork_depth()
+        metadata = {
+            "model_role": "coordinator",
+            "fork_depth": depth,
+            "thread_id": thread_id,
+            **observation.get("metadata", {}),
+        }
+        if depth:
+            metadata.update(
+                {
+                    "parent_thread_id": current_parent_thread_id(),
+                    "child_thread_id": thread_id,
+                    "target_platform": current_fork_target_platform(),
+                }
+            )
         return {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": (
@@ -563,7 +645,7 @@ class AgentLoop:
             ),
             "metadata": metadata,
             "tags": ["globuy", "agent-fork" if child else "agent-root"],
-            **({"callbacks": observation["callbacks"]} if observation.get("callbacks") else {}),
+            **({"callbacks": callbacks} if callbacks is not None else {}),
         }
 
     async def _invoke(
@@ -653,7 +735,10 @@ class AgentLoop:
                 tool_names=[registered.name for registered in child.business_tools],
             )
         try:
-            with fork_scope(child_thread_id):
+            with fork_scope(
+                child_thread_id,
+                target_platform=str(target_platform) if target_platform else None,
+            ):
                 state = await child._invoke(
                     demand,
                     child_thread_id,
@@ -721,6 +806,7 @@ class AgentLoop:
             "phase": state.get("phase"),
             "iteration": state.get("iteration", 0),
             "memory_status": state.get("memory_status", "not_configured"),
+            "memory_metrics": state.get("memory_metrics"),
             "learned_preferences": state.get("learned_preferences", []),
         }
         return answer, metadata

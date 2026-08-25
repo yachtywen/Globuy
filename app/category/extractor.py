@@ -12,6 +12,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from app.category.schemas import CategoryCard, InsightExtractionPayload
+from app.observability import current_observability_config
+from app.observability.metrics import context_metrics
+from app.utils.thread_ctx import current_fork_depth
 
 CARD_PROMPT_VERSION = "category-card-extract-v1"
 INSIGHT_PROMPT_VERSION = "category-insight-extract-v1"
@@ -87,11 +90,28 @@ class DeepSeekCategoryExtractor:
         if self.model is None:
             raise CategoryExtractionNotConfigured("CategoryInsight 需要已配置的 DeepSeek 模型")
         runnable = self.model.bind(response_format={"type": "json_object"})
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+        ]
+        observation = current_observability_config()
         response = await runnable.ainvoke(
-            [
-                SystemMessage(content=system),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
-            ]
+            messages,
+            config={
+                "run_name": "category_insight.extractor",
+                "tags": ["globuy", "category-insight", "extractor"],
+                "metadata": {
+                    "model_role": "extractor",
+                    "fork_depth": current_fork_depth(),
+                    **context_metrics(messages).metadata(),
+                    **observation.get("metadata", {}),
+                },
+                **(
+                    {"callbacks": observation["callbacks"]}
+                    if observation.get("callbacks")
+                    else {}
+                ),
+            },
         )
         try:
             parsed = json.loads(_json_text(_message_text(response)))

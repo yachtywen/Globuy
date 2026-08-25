@@ -11,7 +11,6 @@ from app.recall import rank_items
 from app.tools.item_picker import item_picker
 from app.tools.planner import planner
 from app.tools.price_compare import price_compare
-from app.tools.shipping_calc import shipping_calc
 
 
 def test_planner_exposes_an_ordered_tool_plan() -> None:
@@ -63,11 +62,6 @@ def test_candidate_tools_rank_and_calculate_cost() -> None:
         }
     )
     assert compared["best_offer"]["title"] == "B"
-
-    shipping = shipping_calc.invoke(
-        {"item_price": 100, "quantity": 2, "shipping_fee": 20}
-    )
-    assert shipping["total_cost"] == 220
 
 
 def test_preference_store_and_prompt_injection(tmp_path: Path) -> None:

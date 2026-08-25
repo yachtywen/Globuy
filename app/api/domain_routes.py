@@ -112,6 +112,12 @@ async def create_memory(
         confidence=payload.confidence,
         source_thread_id=payload.source_thread_id,
         source_run_id=payload.source_run_id,
+        subject=payload.subject,
+        predicate=payload.predicate,
+        value_json=payload.value_json,
+        polarity=payload.polarity,
+        scope_type=payload.scope_type,
+        scope_value=payload.scope_value,
     )
 
 

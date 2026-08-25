@@ -5,6 +5,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+pytest.importorskip("datasets.onebound_headphones", reason="optional ignored dataset is absent")
+
 from datasets.onebound_headphones.collector import (
     AuthenticationError,
     BudgetExceeded,

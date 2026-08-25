@@ -653,6 +653,7 @@ class RunRegistry:
                 "learned_preferences", metadata.get("learned_preferences", [])
             ),
             "memory_status": memory_status,
+            "memory_metrics": metadata.get("memory_metrics"),
             "source_kind": "offline_snapshot",
             "artifacts": [],
         }

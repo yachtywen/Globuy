@@ -52,7 +52,7 @@ async def category_insight(
 
     normalized = category.strip()
     try:
-        output, _trace = await get_category_search_service().query_with_trace(
+        output, trace = await get_category_search_service().query_with_trace(
             normalized, depth
         )
     except Exception as exc:
@@ -65,4 +65,15 @@ async def category_insight(
             retrieval_mode="none",
             message=str(exc),
         )
-    return output.model_dump(mode="json")
+        trace = None
+    result = output.model_dump(mode="json")
+    result.update(
+        {
+            "cache_type": "application",
+            "cache_name": "category_insight",
+            "cache_key_hash": trace.cache_key_hash if trace else None,
+            "cache_ttl_seconds": trace.cache_ttl_seconds if trace else None,
+            "degraded_reason": trace.degraded_reason if trace else None,
+        }
+    )
+    return result

@@ -65,6 +65,9 @@ def test_registration_does_not_misreport_a_child_constraint_as_existing_email(
         output_dir=tmp_path / "output",
         uploaded_dir=tmp_path / "uploaded",
         model_provider="mock",
+        observability_provider="none",
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
         web_search_provider="none",
         redis_url=None,
     )
@@ -100,6 +103,9 @@ def test_registration_flushes_user_before_foreign_key_children(tmp_path) -> None
         output_dir=tmp_path / "output",
         uploaded_dir=tmp_path / "uploaded",
         model_provider="mock",
+        observability_provider="none",
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
         web_search_provider="none",
         redis_url=None,
     )
@@ -180,6 +186,9 @@ def test_authenticated_user_data_flow(tmp_path) -> None:
         output_dir=tmp_path / "output",
         uploaded_dir=tmp_path / "uploaded",
         model_provider="mock",
+        observability_provider="none",
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
         web_search_provider="none",
         redis_url=None,
     )

@@ -65,6 +65,7 @@ from app.config import Settings, get_settings
 from app.database.services import MemoryService, WishlistService
 from app.database.session import Database
 from app.database.session_store import SQLAlchemySessionStore
+from app.memory.facts import durable_candidate_allowed
 from app.memory.postgres_store import PostgresMemoryStore
 from app.observability import ObservabilityManager
 from app.search.catalog_images import enrich_task_result
@@ -136,7 +137,7 @@ def create_app(
             refresh_hours=settings.price_refresh_interval_hours,
             refresh_local_hour=settings.price_refresh_local_hour,
         )
-        memory_service = MemoryService(database)
+        memory_service = MemoryService(database, settings=settings)
         if agent_runner is run_agent:
             main_agent.store = PostgresMemoryStore(
                 database,
@@ -171,11 +172,31 @@ def create_app(
                 category = str(candidate.get("category") or "")
                 key = str(candidate.get("key") or "").strip()
                 content = str(candidate.get("content") or "").strip()
+                persistence_scope = str(candidate.get("persistence_scope") or "long_term")
+                evidence_type = str(candidate.get("evidence_type") or "inferred")
+                allowed, _reason = durable_candidate_allowed(
+                    content=content,
+                    persistence_scope=persistence_scope,
+                    evidence_type=evidence_type,
+                )
+                structured_values = (
+                    candidate.get("subject"),
+                    candidate.get("predicate"),
+                    candidate.get("value_json"),
+                    candidate.get("polarity"),
+                    candidate.get("scope_type"),
+                )
                 if (
                     confidence < Decimal(str(settings.memory_candidate_min_confidence))
                     or category not in {"blacklist", "preference", "history"}
                     or not key
                     or not content
+                    or not allowed
+                    or (
+                        settings.memory_structured_facts_enabled
+                        and persistence_scope == "long_term"
+                        and any(value is None for value in structured_values)
+                    )
                 ):
                     continue
                 persisted.append(
@@ -188,6 +209,16 @@ def create_app(
                         source_thread_id=thread_id,
                         source_run_id=run_id,
                         ttl_days=settings.memory_candidate_ttl_days,
+                        subject=candidate.get("subject"),
+                        predicate=candidate.get("predicate"),
+                        value_json=candidate.get("value_json"),
+                        polarity=candidate.get("polarity"),
+                        scope_type=candidate.get("scope_type"),
+                        scope_value=candidate.get("scope_value"),
+                        evidence_type=evidence_type,
+                        persistence_scope=persistence_scope,
+                        extraction_version=candidate.get("extraction_version")
+                        or "memory-fact-v2",
                     )
                 )
             except (TypeError, ValueError):
@@ -496,7 +527,7 @@ def create_app(
             await asyncio.gather(*pending, return_exceptions=True)
             for task in done:
                 task.result()
-        except (WebSocketDisconnect, RuntimeError):
+        except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
             pass
         finally:
             await broker.unsubscribe(subscriber)

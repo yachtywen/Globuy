@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langfuse.langchain import CallbackHandler
 from langfuse.types import MaskOtelSpansParams, OtelSpanData
 
 from app.config import Settings
@@ -11,6 +14,12 @@ from app.observability import (
     ObservabilityManager,
     current_observability_config,
     trace_id_for_run,
+)
+from app.observability.callbacks import _raw_usage
+from app.observability.metrics import (
+    compression_metrics,
+    context_metrics,
+    normalize_generation_usage,
 )
 from app.observability.redaction import mask_otel_batch, sanitize, summarize
 
@@ -131,6 +140,25 @@ def test_score_publication_is_explicit_and_fail_open() -> None:
     assert "secret" not in manager.health()
 
 
+def test_manual_generation_attaches_to_existing_trace() -> None:
+    client = FakeClient()
+    manager = _manager(client)
+
+    with manager.observe_generation(
+        trace_id="b" * 32,
+        name="eval.judge",
+        model="judge-test",
+        input={"kind": "summary"},
+        metadata={"model_role": "judge"},
+    ) as generation:
+        assert generation is client.root
+        generation.update(usage_details={"input": 2, "output": 1, "total": 3})
+
+    assert client.starts[0]["trace_context"] == {"trace_id": "b" * 32}
+    assert client.starts[0]["as_type"] == "generation"
+    assert client.starts[0]["name"] == "eval.judge"
+
+
 def test_disabled_manager_has_safe_health() -> None:
     manager = ObservabilityManager(Settings(observability_provider="none"))
     assert manager.health() == {
@@ -164,3 +192,155 @@ def test_callback_failure_does_not_escape_business_scope() -> None:
     ):
         assert current_observability_config()["metadata"]["observability_trace_id"]
     assert current_observability_config() == {}
+
+
+def test_context_metrics_separate_system_history_and_tool_results() -> None:
+    messages = [
+        SystemMessage(content="system" * 8),
+        HumanMessage(content="history" * 8),
+        ToolMessage(content='{"status":"ok"}', tool_call_id="tool-1"),
+    ]
+
+    metrics = context_metrics(messages)
+
+    assert metrics.message_count == 3
+    assert metrics.tool_message_count == 1
+    assert metrics.estimated_tokens == (
+        metrics.system_estimated_tokens
+        + metrics.history_estimated_tokens
+        + metrics.tool_result_estimated_tokens
+    )
+    assert "input_tokens" not in metrics.metadata()
+    assert metrics.metadata()["context_estimated_tokens"] == metrics.estimated_tokens
+    assert metrics.metadata()["system_estimated_tokens"] == metrics.system_estimated_tokens
+    assert "context_system_estimated_tokens" not in metrics.metadata()
+
+
+def test_deepseek_usage_is_normalized_into_exclusive_langfuse_buckets() -> None:
+    usage = normalize_generation_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_cache_hit_tokens": 60,
+            "prompt_cache_miss_tokens": 40,
+            "completion_tokens_details": {"reasoning_tokens": 5},
+        }
+    )
+
+    assert usage.cache_hit is True
+    assert usage.cache_hit_ratio == 0.6
+    assert usage.cache_read_input_tokens == 60
+    assert usage.cache_miss_input_tokens == 40
+    parser = CallbackHandler.on_llm_end.__globals__["_parse_usage_model"]
+    buckets = parser(usage.langchain_usage_metadata())
+    assert buckets == {
+        "total": 120,
+        "input": 40,
+        "output": 15,
+        "input_cache_read": 60,
+        "output_reasoning": 5,
+    }
+    assert usage.langfuse_usage_details() == buckets
+
+
+def test_missing_provider_cache_fields_remain_unknown() -> None:
+    usage = normalize_generation_usage(
+        {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+    )
+
+    assert usage.cache_hit is None
+    assert usage.cache_hit_ratio is None
+    assert usage.cache_read_input_tokens is None
+    assert usage.metadata()["cache_hit"] is None
+    assert usage.metadata()["cache_hit_ratio"] is None
+
+
+def test_usage_falls_back_to_chat_message_response_metadata() -> None:
+    response = SimpleNamespace(
+        llm_output=None,
+        generations=[
+            [
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        response_metadata={
+                            "token_usage": {
+                                "prompt_tokens": 12,
+                                "completion_tokens": 3,
+                                "total_tokens": 15,
+                                "prompt_cache_hit_tokens": 7,
+                                "prompt_cache_miss_tokens": 5,
+                            }
+                        },
+                        usage_metadata=None,
+                    )
+                )
+            ]
+        ],
+    )
+
+    usage = normalize_generation_usage(_raw_usage(response))
+
+    assert usage.cache_read_input_tokens == 7
+    assert usage.cache_miss_input_tokens == 5
+
+
+def test_compression_metrics_distinguish_breakpoint_from_prompt_cache() -> None:
+    old = HumanMessage(content="x" * 100)
+    retained_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "search", "args": {}, "id": "call-1", "type": "tool_call"}],
+    )
+    retained_result = ToolMessage(content="{}", tool_call_id="call-1")
+    before = [old, retained_call, retained_result]
+
+    unchanged = compression_metrics(before, None)
+    compressed = compression_metrics(
+        before,
+        [HumanMessage(content="summary"), retained_call, retained_result],
+    )
+
+    assert unchanged.metadata()["cache_type"] == "context_breakpoint"
+    assert unchanged.compression_triggered is False
+    assert compressed.compression_triggered is True
+    assert compressed.removed_message_count == 1
+    assert compressed.retained_tool_group_count == 1
+
+
+def test_summary_retains_safe_metrics_without_exposing_token_values() -> None:
+    payload = {
+        "status": "ok",
+        "cache_type": "application",
+        "cache_hit": True,
+        "tool_result_estimated_tokens": 42,
+        "token": "private-provider-token",
+        "reasoning_content": "private reasoning",
+    }
+
+    result = summarize(payload)
+    encoded = json.dumps(result, ensure_ascii=False)
+
+    assert result["metrics"]["cache_hit"] is True
+    assert result["metrics"]["tool_result_estimated_tokens"] == 42
+    assert "private-provider-token" not in encoded
+    assert "private reasoning" not in encoded
+
+
+def test_summary_exposes_nested_cache_breakpoint_metrics() -> None:
+    result = summarize(
+        {
+            "compression_metrics": {
+                "cache_type": "context_breakpoint",
+                "compression_triggered": False,
+                "before_estimated_tokens": 120,
+                "after_estimated_tokens": 120,
+            }
+        }
+    )
+
+    assert result["metrics"] == {
+        "cache_type": "context_breakpoint",
+        "compression_triggered": False,
+        "before_estimated_tokens": 120,
+        "after_estimated_tokens": 120,
+    }

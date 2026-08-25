@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from app.search.catalog_images import enrich_product_images, enrich_task_result
 from app.products.identity import offer_id, product_id
+from app.search.catalog_images import enrich_product_images, enrich_task_result
 
 
 def _catalog(tmp_path: Path) -> Path:
