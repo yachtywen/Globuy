@@ -1,4 +1,4 @@
-"""Langfuse v4 callback adapter for DeepSeek usage and safe tool metrics."""
+"""Langfuse v4 callback adapter for OpenAI-compatible usage and safe tool metrics."""
 
 from __future__ import annotations
 

@@ -72,7 +72,7 @@ LLM 决策之外还存在确定性控制层：阶段工具白名单阻止跨阶�
 
 ### 3. Cache Breakpoint 上下文压缩
 
-长对话不会在每轮无边界累积。系统在 Observe 后识别历史边界，保留稳定 Prompt 前缀、当前约束和最近 3 个完整工具调用组，用摘要替换更旧历史，同时保证未完成工具调用及其结果不会被拆散。该机制已经接入主图，而不是独立演示脚本。
+长对话不会在每轮无边界累积。Kimi K2.6 的上下文窗口按 256K 配置：消息估算达到 75%（196,608 Token）才触发压缩，并尽量压回 50%（131,072 Token）；另外为最多 32K 输出以及 System Prompt、工具声明和估算误差保留 16K 安全空间。系统在 Observe 后识别历史边界，保留稳定 Prompt 前缀、当前约束和最近 3 个完整工具调用组，用确定性摘要替换更旧历史，同时保证未完成工具调用及其结果不会被拆散。摘要只在越过高水位时变化，不会每轮重写前缀；如显式设置 `GLOBUY_COMPRESSION_TOKEN_LIMIT`，则继续使用该兼容阈值。
 
 ### 4. PostgreSQL 事实库 + pgvector/OpenSearch 检索
 
@@ -132,7 +132,7 @@ flowchart LR
 
 | 层级 | 技术 |
 |---|---|
-| Agent | LangChain 1.x、LangGraph 1.x、OpenAI-compatible Chat Model |
+| Agent | LangChain 1.x、LangGraph 1.x、Kimi K2.6（OpenAI-compatible） |
 | Backend | Python 3.12、FastAPI、Uvicorn、Pydantic、SQLAlchemy Async、Alembic |
 | Retrieval | OpenSearch 3.7、BGE-M3、BM25、Lucene HNSW、RRF；Faiss 仅作实验性 ANN |
 | Data | PostgreSQL 17、pgvector 0.8、Redis 7、Transactional Outbox |
@@ -143,7 +143,7 @@ flowchart LR
 
 ## 快速开始
 
-默认演示模式使用 `mock` 模型，不调用 DeepSeek、Tavily 或商品 Provider。完整商品检索还需要 OpenSearch、Redis、BGE-M3 模型缓存和有权使用的商品数据。
+默认演示模式使用 `mock` 模型，不调用 Kimi、阿里云 IQS 或商品 Provider。完整商品检索还需要 OpenSearch、Redis、BGE-M3 模型缓存和有权使用的商品数据。
 
 ### 环境要求
 
@@ -155,35 +155,37 @@ flowchart LR
 
 ### 1. 克隆与安装
 
-```powershell
+```cmd
 git clone https://github.com/yachtywen/Globuy.git
-Set-Location Globuy
+cd /d Globuy
 
 conda env create -f environment.yml
 conda activate globuy
 
-Push-Location frontend
+pushd frontend
 npm ci
-Pop-Location
+popd
 ```
 
 ### 2. 配置 PostgreSQL 与本地环境
 
 项目正式接口依赖 PostgreSQL 17 + pgvector；未配置数据库时后端会拒绝启动。先复制配置模板，将模板中的 PostgreSQL 密码替换为本地随机密码，再启动数据库并执行迁移：
 
-```powershell
-Copy-Item .env.example .env
+```cmd
+copy .env.example .env
 
-# 在 .env 中为下列三项设置同一个随机本地密码；URL 中的密码需要 URL 编码。
-# GLOBUY_POSTGRES_PASSWORD
-# GLOBUY_DATABASE_URL（主机通过 127.0.0.1:5433 连接）
-# GLOBUY_DOCKER_DATABASE_URL（Compose 服务通过 postgres:5432 连接）
+REM 在 .env 中为下列三项设置同一个随机本地密码；URL 中的密码需要 URL 编码。
+REM GLOBUY_POSTGRES_PASSWORD
+REM GLOBUY_DATABASE_URL（主机通过 127.0.0.1:5433 连接）
+REM GLOBUY_DOCKER_DATABASE_URL（Compose 服务通过 postgres:5432 连接）
 
 docker compose up -d --wait postgres
 alembic upgrade head
 ```
 
 开发演示可设置 `GLOBUY_MODEL_PROVIDER=mock`、`GLOBUY_WEB_SEARCH_PROVIDER=none`，这样不会调用付费模型或商品 Provider。不要提交 `.env`、密码、Token、数据库卷或真实 Provider 响应。
+
+联网搜索使用阿里云 IQS UnifiedSearch。启用时在本地 `.env` 设置 `GLOBUY_WEB_SEARCH_PROVIDER=iqs` 与 `GLOBUY_IQS_API_KEY`；默认采用 `LiteAdvanced`、最多 10 条结果，关闭增强摘要和网页正文，只返回来源摘要与重排分数。接口与计费边界以[阿里云 IQS 联网搜索官方文档](https://help.aliyun.com/zh/document_detail/2883041.html)为准。
 
 可选启用 Agent 全链路观测：在 LangFuse 日本区项目中创建 API Key，把 Key 写入本地 `.env`，设置
 `GLOBUY_OBSERVABILITY_PROVIDER=langfuse`。默认 `summary` 模式不会上传完整 Prompt、商品数组或用户
@@ -193,8 +195,7 @@ ID；`/healthz` 可检查 `observability_configured/enabled/status`，但不会�
 LangFuse 中的 generation 使用稳定名称 `coordinator.think`、`coordinator.reflect`、
 `fork.think`、`fork.reflect`、`shopping_summary.generation` 和
 `category_insight.extractor`；显式 live Eval Judge 以 `eval.judge` 关联回对应任务 Trace。每次调用同时
-记录 Provider 实际 usage 与调用前上下文估算；DeepSeek
-`prompt_cache_hit_tokens/prompt_cache_miss_tokens` 会转换为互斥的 cache-read/input bucket，避免成本
+记录 Provider 实际 usage 与调用前上下文估算；Provider 返回的可核验 Prompt Cache usage 会归一化为互斥的 cache-read/input bucket，避免成本
 重复计算。工具 observation 保留真实 RT、状态、结果估算大小和安全的业务缓存指标；
 `context.compress` 单独记录 Cache Breakpoint，三类缓存不会混为一个 `cache_hit`。
 
@@ -202,15 +203,15 @@ LangFuse 中的 generation 使用稳定名称 `coordinator.think`、`coordinator
 
 终端 A：
 
-```powershell
+```cmd
 conda activate globuy
 python -m app.api
 ```
 
 终端 B：
 
-```powershell
-Set-Location frontend
+```cmd
+cd /d frontend
 npm run dev -- --host 127.0.0.1
 ```
 
@@ -218,14 +219,14 @@ npm run dev -- --host 127.0.0.1
 
 ### 4. 启用完整检索（可选）
 
-```powershell
+```cmd
 docker compose up -d --wait --wait-timeout 300 postgres opensearch redis
 
-# 需要有权使用的 Candidate 数据包
+REM 需要有权使用的 Candidate 数据包
 python -m app.products.import_snapshot
 python -m app.search.build_index
 
-# 可选：构建确定性品类知识卡片
+REM 可选：构建确定性品类知识卡片
 python -m app.category.build_index --deterministic
 ```
 
@@ -237,7 +238,7 @@ PostgreSQL 迁移、长期记忆衰减和 Worker 运维见 [PostgreSQL 迁移实
 
 一次执行提交门禁（Ruff、compileall、后端全量测试、shopping + memory 离线评测、前端 Vitest 与生产构建）：
 
-```powershell
+```cmd
 conda activate globuy
 python scripts/test_all.py --output output/test-runs/latest
 ```
@@ -246,39 +247,39 @@ python scripts/test_all.py --output output/test-runs/latest
 
 ### 后端与前端验证
 
-```powershell
+```cmd
 conda activate globuy
 python -m ruff check app datasets tests
 python -m compileall -q app datasets tests
 python -m pytest -q
 
-Push-Location frontend
+pushd frontend
 npm run test
 npm run build
-Pop-Location
+popd
 ```
 
 测试使用 Fake/Mock Encoder、OpenSearch、Agent 和 Provider，不应访问真实付费服务。最近一次记录的离线评测为 6/6 case PASS、平均分 1.000；完整验证基线和已知例外以 [项目状态](docs/project-status.md) 为准。
 
 ### 双层评测
 
-```powershell
-# 默认离线契约层：合成事实，不访问模型、Provider、数据库或向量服务
+```cmd
+REM 默认离线契约层：合成事实，不访问模型、Provider、数据库或向量服务
 python scripts/eval_regression.py --suite offline
 
-# 只运行长期记忆 integration cases
+REM 只运行长期记忆 integration cases
 python scripts/eval_regression.py --suite offline --domain memory
 
-# 合并 shopping 与 memory 报告
+REM 合并 shopping 与 memory 报告
 python scripts/eval_regression.py --suite offline --domain all
 
-# 真实质量层必须使用隔离账号，并显式授权模型调用
+REM 真实质量层必须使用隔离账号，并显式授权模型调用
 python scripts/eval_regression.py --suite live --allow-model-calls
 
-# 只运行长期记忆跨会话 live case；Provider 已配置时还需第二个显式开关
+REM 只运行长期记忆跨会话 live case；Provider 已配置时还需第二个显式开关
 python scripts/eval_regression.py --suite live --domain memory --allow-model-calls --allow-external-tools
 
-# 仅在明确希望向 LangFuse 写入分数时增加此开关
+REM 仅在明确希望向 LangFuse 写入分数时增加此开关
 python scripts/eval_regression.py --suite live --allow-model-calls --publish-langfuse-scores
 ```
 

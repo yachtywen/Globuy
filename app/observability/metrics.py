@@ -219,7 +219,7 @@ def compression_metrics(
 
 
 def normalize_generation_usage(raw: Mapping[str, Any] | None) -> GenerationUsage:
-    """Normalize OpenAI/DeepSeek usage while preserving mutually exclusive buckets."""
+    """Normalize OpenAI-compatible usage while preserving mutually exclusive buckets."""
 
     if not raw:
         return GenerationUsage()

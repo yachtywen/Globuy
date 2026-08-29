@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.agent.llm import model_request_kwargs
 from app.agent.prompts import get_shopping_summary_prompt
 from app.config import get_settings
 from app.observability.metrics import context_metrics
@@ -95,11 +96,16 @@ def _model_config(
 
 
 def _structured_summary_model(model: BaseChatModel) -> BaseChatModel:
-    """Use DeepSeek V4 function calling in non-thinking mode for forced schemas."""
+    """Keep forced-schema calls in portable non-thinking mode."""
 
     base_url = str(getattr(model, "openai_api_base", "") or "")
     hostname = (urlparse(base_url).hostname or "").lower()
-    if hostname == "api.deepseek.com" or hostname.endswith(".api.deepseek.com"):
+    if (
+        hostname == "api.deepseek.com"
+        or hostname.endswith(".api.deepseek.com")
+        or hostname == "api.moonshot.cn"
+        or hostname.endswith(".api.moonshot.cn")
+    ):
         extra_body = dict(getattr(model, "extra_body", None) or {})
         extra_body["thinking"] = {"type": "disabled"}
         return model.model_copy(update={"extra_body": extra_body})
@@ -185,7 +191,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 "不要增加统一的数据说明、快照徽标、快照免责声明或下单提示段落",
             ],
         }
-        # DeepSeek's OpenAI-compatible endpoint supports tool calling but may reject
+        # Kimi/DeepSeek-compatible endpoints support tool calling but may reject
         # LangChain's default response_format=json_schema mode.
         structured_model = _structured_summary_model(model).with_structured_output(
             SummaryNarrative,
@@ -200,6 +206,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 response = await structured_model.ainvoke(
                     model_messages,
                     config=_model_config(config, model_messages),
+                    **model_request_kwargs(current_thread_id(), model=model),
                 )
             narrative = (
                 response

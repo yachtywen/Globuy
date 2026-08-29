@@ -111,7 +111,12 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
   const [saved, setSaved] = useState<string[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
   const [wishlistError, setWishlistError] = useState<string | null>(null);
-  if (!result && artifacts.length === 0) return null;
+  const showEmptyShortlist = Boolean(
+    result?.search_attempted
+    && result.search_candidate_count === 0
+    && products.length === 0,
+  );
+  if (products.length === 0 && !showEmptyShortlist) return null;
   const toggle = (id: string) => setSelected((items) => items.includes(id) ? items.filter((item) => item !== id) : items.length < 4 ? [...items, id] : items);
   const compared = products.filter((product) => selected.includes(product.id));
   return (
@@ -124,7 +129,7 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
           <div className="product-copy"><div className="product-meta"><span>{platformLabel(product.platform)}</span>{product.rating !== null && <span>评分 {product.rating.toFixed(1)}</span>}{product.sales !== null && <span>销量 {product.sales.toLocaleString("zh-CN")}</span>}</div><h3>{product.title}</h3><ul>{(product.reasons.length ? product.reasons : ["按检索顺位与已知约束筛选"]).map((reason) => <li key={reason}><Check size={14} weight="bold" />{reason}</li>)}</ul>{product.warnings.length > 0 && <p className="product-warning">{product.warnings.join(" · ")}</p>}</div>
           <div className="product-actions"><div><small>快照价格</small><strong>{product.price === null ? "待核验" : `${product.currency === "CNY" ? "¥" : product.currency} ${product.price.toFixed(2)}`}</strong></div><button aria-pressed={checked} className={`compare-toggle ${checked ? "selected" : ""}`} onClick={() => toggle(product.id)}>{checked ? <Check size={15} weight="bold" /> : <Scales size={15} />} {checked ? "已加入对比" : "加入对比"}</button><button className={`wishlist-toggle ${saved.includes(product.id) ? "selected" : ""}`} disabled={!product.offerId || saving === product.id || saved.includes(product.id)} onClick={async () => { if (!product.offerId) return; const clientRequestId = `wishlist_${crypto.randomUUID()}`; setSaving(product.id); setWishlistError(null); try { await wishlistApi.add(product.offerId, sourceThreadId, sourceRunId, clientRequestId); setSaved((items) => [...items, product.id]); } catch (reason) { setWishlistError(reason instanceof Error ? reason.message : "加入心愿库失败"); } finally { setSaving(null); } }} title={!product.offerId ? "当前商品缺少稳定报价标识，暂时无法加入心愿库。" : undefined}><Heart size={15} weight={saved.includes(product.id) ? "fill" : "regular"} />{saved.includes(product.id) ? "已加入心愿库" : saving === product.id ? "正在加入…" : "加入心愿库"}</button>{product.productUrl && /^https?:\/\//i.test(product.productUrl) ? <a href={product.productUrl} rel="noopener noreferrer" target="_blank">前往来源 <ArrowSquareOut size={15} /></a> : <span className="source-unavailable">来源链接未提供</span>}</div>
         </article>;
-      })}</div> : result && <div className="result-empty"><strong>暂未形成结构化商品清单</strong><span>完整建议仍保留在上方回答中。</span></div>}
+      })}</div> : showEmptyShortlist && <div className="result-empty"><strong>暂未形成结构化商品清单</strong><span>完整建议仍保留在上方回答中。</span></div>}
       {selected.length > 0 && <div aria-live="polite" className="compare-bar"><span>已选 {selected.length} / 4 件</span><button disabled={selected.length < 2} onClick={() => setComparisonOpen(true)}><Scales size={17} />对比商品</button></div>}
       {wishlistError && <div className="result-note" role="alert"><strong>心愿库操作失败</strong><p>{wishlistError}</p></div>}
       {unresolved.length ? <div className="result-note"><strong>仍需确认</strong><p>{unresolved.join(" · ")}</p></div> : null}

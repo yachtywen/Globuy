@@ -425,6 +425,8 @@ interface TaskResult {
   learned_preferences: unknown[];
   memory_status: string;
   source_kind: "offline_snapshot";
+  search_attempted: boolean;
+  search_candidate_count: number;
   artifacts: unknown[];
 }
 
@@ -446,6 +448,8 @@ interface ProductPick {
   retrieval_rank?: number | null;
 }
 ```
+
+`search_attempted` 只有在直接或同质 fork 的 `item_search` 真正完成检索时才为 `true`；澄清门禁、未配置和失败不计为完成。`search_candidate_count` 是这些已完成检索返回的候选数量。前端据此只在“真实检索完成且候选数为 0”时展示空 Shortlist；未搜索时不展示商品结果区。
 
 - 加入心愿库必须使用稳定 `offer_id`，不能只提交兼容 `item_id`。
 - `product_id` 是归一化商品；`offer_id` 是具体平台报价，心愿库按 Offer 跟踪。

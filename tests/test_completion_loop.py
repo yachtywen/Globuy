@@ -11,23 +11,26 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.store.base import SearchItem
 from pydantic import ValidationError
 
-from app.agent.llm import build_chat_model
+from app.agent.llm import build_chat_model, model_request_kwargs
 from app.agent.main_agent import (
     AgentLoop,
     _decision_budget_exhausted,
+    _deterministic_summary_fallback,
     _forced_termination_response,
     _normalize_phase_tool_calls,
+    _single_summary_tool_call,
 )
 from app.agent.middleware import (
     cache_breakpoint_update,
     compact_tool_content,
     loop_detected,
+    repair_incomplete_tool_groups,
     tool_records,
 )
-from app.api.run_registry import _accumulate_final_state
+from app.api.run_registry import _accumulate_final_state, _product_search_summary
 from app.config import Settings
 from app.tools import CORE_TOOL_NAMES, TERMINAL_TOOLS, TOOL_PHASES, build_core_tools
-from app.tools.item_picker import item_picker
+from app.tools.item_picker import PickedItem, item_picker
 from app.tools.shopping_summary import SummaryNarrative, build_shopping_summary_tool
 from app.utils.thread_ctx import thread_scope
 
@@ -36,6 +39,60 @@ def test_fork_depth_configuration_is_fixed_to_one() -> None:
     assert Settings().fork_max_depth == 1
     with pytest.raises(ValidationError):
         Settings(fork_max_depth=2)
+
+
+def test_product_search_summary_ignores_conversation_only_results() -> None:
+    state = {
+        "messages": [
+            ToolMessage(
+                content=json.dumps({"status": "needs_clarification"}),
+                name="chat_fallback",
+                tool_call_id="chat-1",
+            )
+        ]
+    }
+
+    assert _product_search_summary(state) == (False, 0)
+
+
+def test_product_search_summary_tracks_direct_empty_search() -> None:
+    state = {
+        "messages": [
+            ToolMessage(
+                content=json.dumps({"status": "ok", "candidates": []}),
+                name="item_search",
+                tool_call_id="search-1",
+            )
+        ]
+    }
+
+    assert _product_search_summary(state) == (True, 0)
+
+
+def test_product_search_summary_reads_fork_search_results() -> None:
+    state = {
+        "messages": [
+            ToolMessage(
+                content=json.dumps(
+                    {
+                        "status": "ok",
+                        "search_results": [
+                            {"status": "partial", "candidates": [{"item_id": "one"}]},
+                            {
+                                "status": "partial",
+                                "provider_status": "blocked",
+                                "candidates": [],
+                            },
+                        ],
+                    }
+                ),
+                name="dispatch_tool",
+                tool_call_id="dispatch-1",
+            )
+        ]
+    }
+
+    assert _product_search_summary(state) == (True, 1)
 
 
 @pytest.mark.asyncio
@@ -97,9 +154,125 @@ def test_cross_phase_tool_calls_are_removed_before_history() -> None:
     assert [call["name"] for call in normalized.tool_calls] == ["category_insight"]
 
 
+def test_summary_is_the_only_and_single_terminal_call() -> None:
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "price_compare", "args": {}, "id": "price", "type": "tool_call"},
+            {
+                "name": "shopping_summary",
+                "args": {"goal": "one", "picks": []},
+                "id": "summary-1",
+                "type": "tool_call",
+            },
+            {
+                "name": "shopping_summary",
+                "args": {"goal": "two", "picks": []},
+                "id": "summary-2",
+                "type": "tool_call",
+            },
+        ],
+    )
+
+    normalized = _single_summary_tool_call(response)
+
+    assert [call["id"] for call in normalized.tool_calls] == ["summary-1"]
+
+
+def test_incomplete_tool_group_is_repaired_before_next_human_message() -> None:
+    messages = [
+        HumanMessage(content="old turn"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "shopping_summary",
+                    "args": {"goal": "old", "picks": []},
+                    "id": "summary-interrupted",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        HumanMessage(content="new turn"),
+    ]
+
+    update = repair_incomplete_tool_groups(messages)
+
+    assert update is not None
+    repaired = update[1:]
+    assert isinstance(repaired[2], ToolMessage)
+    assert repaired[2].tool_call_id == "summary-interrupted"
+    assert json.loads(repaired[2].content)["status"] == "interrupted"
+    assert isinstance(repaired[3], HumanMessage)
+    assert repaired[3].content == "new turn"
+
+
+def test_complete_tool_group_is_not_rewritten() -> None:
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "planner", "args": {}, "id": "planner-1", "type": "tool_call"}
+            ],
+        ),
+        ToolMessage(content='{"status":"ok"}', name="planner", tool_call_id="planner-1"),
+    ]
+
+    assert repair_incomplete_tool_groups(messages) is None
+
+
+def test_partial_parallel_tool_group_gets_only_missing_response() -> None:
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "planner", "args": {}, "id": "planner-1", "type": "tool_call"},
+                {
+                    "name": "category_insight",
+                    "args": {},
+                    "id": "category-1",
+                    "type": "tool_call",
+                },
+            ],
+        ),
+        ToolMessage(content='{"status":"ok"}', name="planner", tool_call_id="planner-1"),
+        HumanMessage(content="next"),
+    ]
+
+    update = repair_incomplete_tool_groups(messages)
+
+    assert update is not None
+    tool_messages = [message for message in update if isinstance(message, ToolMessage)]
+    assert [message.tool_call_id for message in tool_messages] == ["planner-1", "category-1"]
+    assert json.loads(tool_messages[1].content)["status"] == "interrupted"
+
+
 def test_decision_budget_stops_before_graph_recursion_limit() -> None:
     assert _decision_budget_exhausted(7, repeat_threshold=4) is False
     assert _decision_budget_exhausted(8, repeat_threshold=4) is True
+
+
+def test_missing_source_link_requires_deterministic_fallback() -> None:
+    state = {
+        "messages": [
+            HumanMessage(content="buy"),
+            ToolMessage(
+                name="item_picker",
+                tool_call_id="picker-missing-link",
+                content=json.dumps(
+                    {
+                        "status": "ok",
+                        "picks": [{"item_id": "one", "product_url": None}],
+                    }
+                ),
+            ),
+        ]
+    }
+
+    message = _deterministic_summary_fallback(state)
+
+    assert message is not None
+    assert "来源链接" in message
 
 
 def test_forced_termination_selects_verified_candidates_then_summarizes() -> None:
@@ -252,6 +425,104 @@ def test_non_deepseek_main_agent_keeps_provider_defaults() -> None:
 
     assert model is not None
     assert model.extra_body is None
+
+
+def test_kimi_k26_uses_non_thinking_tools_and_window_budget() -> None:
+    model = build_chat_model(
+        Settings(
+            model_provider="openai-compatible",
+            llm_model="kimi-k2.6",
+            llm_api_key="test-key",
+            llm_base_url="https://api.moonshot.cn/v1",
+            llm_temperature=0.3,
+            llm_context_window_tokens=262_144,
+            llm_max_output_tokens=32_768,
+        )
+    )
+
+    assert model is not None
+    assert model.extra_body == {"thinking": {"type": "disabled"}}
+    assert model.temperature is None
+    assert model.max_tokens == 32_768
+
+
+def test_kimi_request_uses_thread_as_prompt_cache_key() -> None:
+    settings = Settings(
+        model_provider="openai-compatible",
+        llm_api_key="test-key",
+        llm_base_url="https://api.moonshot.cn/v1",
+    )
+
+    model = build_chat_model(settings)
+    assert model_request_kwargs("thread-123", model=model, settings=settings) == {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "prompt_cache_key": "thread-123",
+        }
+    }
+    assert model_request_kwargs(None, model=model, settings=settings) == {}
+
+
+def test_chat_model_can_apply_configured_request_throttle() -> None:
+    from langchain_openai import ChatOpenAI
+
+    settings = Settings(
+        model_provider="openai-compatible",
+        llm_api_key="test-key",
+        llm_base_url="https://api.moonshot.cn/v1",
+        llm_requests_per_minute=2,
+    )
+
+    model = build_chat_model(settings)
+
+    assert isinstance(model, ChatOpenAI)
+    assert model.rate_limiter is not None
+
+
+def test_picked_item_truncates_extra_model_generated_reasons() -> None:
+    item = PickedItem.model_validate(
+        {
+            "item_id": "item-1",
+            "platform": "jingdong",
+            "title": "Headphones",
+            "price": 699,
+            "reasons": ["one", "two", "three", "four"],
+        }
+    )
+
+    assert item.reasons == ["one", "two", "three"]
+
+
+def test_non_kimi_request_does_not_add_prompt_cache_key() -> None:
+    settings = Settings(
+        model_provider="openai-compatible",
+        llm_api_key="test-key",
+        llm_base_url="https://llm.example.com/v1",
+    )
+
+    model = build_chat_model(settings)
+    assert model_request_kwargs("thread-123", model=model, settings=settings) == {}
+
+
+def test_kimi_context_window_derives_cache_breakpoint_watermarks() -> None:
+    settings = Settings(
+        llm_context_window_tokens=262_144,
+        llm_max_output_tokens=32_768,
+        compression_token_limit=None,
+        compression_trigger_ratio=0.75,
+        compression_target_ratio=0.50,
+        compression_safety_margin_tokens=16_384,
+    )
+
+    assert settings.compression_trigger_tokens == 196_608
+    assert settings.compression_target_tokens == 131_072
+
+
+def test_explicit_legacy_compression_limit_overrides_window_ratio() -> None:
+    settings = Settings(compression_token_limit=20_000)
+
+    assert settings.compression_trigger_tokens == 20_000
+    assert settings.compression_target_tokens == 18_976
 
 
 def test_item_picker_applies_hard_constraints_without_score() -> None:
@@ -615,6 +886,136 @@ async def test_explicit_phase_graph_runs_nested_summary_once(tmp_path: Path) -> 
     assert answer.startswith("## 精选清单")
     assert metadata["phase"] == "done"
     assert model.summary_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_summary_falls_back_without_model_retry(tmp_path: Path) -> None:
+    picked = {
+        **candidate("one", rank=1, price=199),
+        "reasons": ["verified"],
+        "flags": [],
+        "category_annotations": {},
+    }
+    model = ScriptedModel(
+        [
+            AIMessage(content="reflect"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "shopping_summary",
+                        "args": {"goal": "buy", "picks": [picked]},
+                        "id": "summary-once",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+    loop = AgentLoop(
+        model,
+        tools=build_core_tools(None),
+        enable_dispatch=False,
+    )
+    with thread_scope("summary-failure-thread", tmp_path, run_id="summary-failure-run"):
+        answer, metadata = await loop.run("buy headphones", "summary-failure-thread")
+        snapshot = await loop.graph.aget_state(loop._config("summary-failure-thread"))
+
+    tool_messages = [
+        message for message in snapshot.values["messages"] if isinstance(message, ToolMessage)
+    ]
+    assert metadata["phase"] == "done"
+    assert answer
+    assert [message.name for message in tool_messages].count("shopping_summary") == 1
+    assert [message.name for message in tool_messages].count("chat_fallback") == 1
+    assert model.responses == []
+
+
+@pytest.mark.asyncio
+async def test_empty_picker_goes_directly_to_fallback(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            AIMessage(content="reflect"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "item_picker",
+                        "args": {"items": [], "constraints": {}, "limit": 3},
+                        "id": "empty-picker",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+    loop = AgentLoop(model, enable_dispatch=False)
+    with thread_scope("empty-picker-thread", tmp_path, run_id="empty-picker-run"):
+        answer, metadata = await loop.run("buy headphones", "empty-picker-thread")
+        snapshot = await loop.graph.aget_state(loop._config("empty-picker-thread"))
+
+    tool_names = [
+        message.name
+        for message in snapshot.values["messages"]
+        if isinstance(message, ToolMessage)
+    ]
+    assert metadata["phase"] == "done"
+    assert answer
+    assert tool_names.count("item_picker") == 1
+    assert "shopping_summary" not in tool_names
+    assert tool_names.count("chat_fallback") == 1
+    assert model.responses == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_node_persists_repaired_tool_group(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "chat_fallback",
+                        "args": {"message": "recovered"},
+                        "id": "fallback-after-repair",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    loop = AgentLoop(model, enable_dispatch=False)
+    state = loop._initial_state("new turn")
+    state["messages"] = [
+        HumanMessage(content="old turn"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "shopping_summary",
+                    "args": {"goal": "old", "picks": []},
+                    "id": "old-summary",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        HumanMessage(content="new turn"),
+    ]
+    with thread_scope("repair-thread", tmp_path, run_id="repair-run"):
+        result = await loop.graph.ainvoke(state, config=loop._config("repair-thread"))
+
+    messages = result["messages"]
+    old_call_index = next(
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, AIMessage)
+        and any(call.get("id") == "old-summary" for call in message.tool_calls)
+    )
+    assert isinstance(messages[old_call_index + 1], ToolMessage)
+    assert messages[old_call_index + 1].tool_call_id == "old-summary"
+    assert isinstance(messages[old_call_index + 2], HumanMessage)
+    assert messages[old_call_index + 2].content == "new turn"
+    assert result["phase"] == "done"
 
 
 @pytest.mark.asyncio

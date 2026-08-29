@@ -13,7 +13,7 @@
 
 主要技术栈：Python 3.12、Conda、FastAPI、Uvicorn、WebSocket、LangChain、LangGraph、
 React、TypeScript、Vite 和 OpenSearch；Faiss 仅保留为实验性 ANN 能力。对话模型通过 OpenAI
-兼容接口接入 DeepSeek。
+兼容接口接入 Kimi K2.6，模型标识固定为 `kimi-k2.6`，上下文窗口按 256K 计算。
 
 ## 2. 事实来源和严格程度
 
@@ -134,6 +134,10 @@ Loop、fork、工具和 monitor 从上下文读取，不在多层函数间手工
 Breakpoint：尽量保持 System Prompt、工具声明和已稳定历史前缀不变以提高 Prompt Cache
 命中率，只压缩越过阈值的旧历史，同时保留最近 K 轮/工具调用、当前用户约束以及尚未完成的
 tool-call/tool-result 配对。压缩前后必须保持消息协议合法，摘要要标注其来源和边界。
+
+阈值必须从当前模型的上下文窗口推导，而不是固定为某个小窗口常量。Kimi K2.6 默认以 75%
+高水位触发、压回约 50% 低水位，并为最大输出、System Prompt、工具声明及估算误差留出独立
+空间。摘要只在越过高水位时更新，不得逐轮重写稳定前缀。
 
 长期记忆存储的是从对话中提炼出的结构化结论，不保存整段原始聊天。逻辑上的
 `PreferenceEntry` 至少包含：

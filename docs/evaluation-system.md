@@ -58,7 +58,7 @@ python scripts/eval_regression.py --suite live --domain memory --allow-model-cal
 启用独立 Judge 时，在项目根目录被 Git 忽略的 `.env` 中配置
 `GLOBUY_EVAL_JUDGE_MODEL`、`GLOBUY_EVAL_JUDGE_BASE_URL`、`GLOBUY_EVAL_JUDGE_API_KEY` 和可选的
 `GLOBUY_EVAL_JUDGE_TIMEOUT_SECONDS`，然后增加 `--judge`。进程环境变量可以覆盖 `.env`；Judge 不会隐式复用主模型凭据。服务端若报告
-Tavily 或商品 Provider 已配置，运行器默认拒绝启动；只有明确增加 `--allow-external-tools` 才会继续。
+阿里云 IQS 或商品 Provider 已配置，运行器默认拒绝启动；只有明确增加 `--allow-external-tools` 才会继续。
 
 live runner 会把每轮 API 返回的确定性 `trace_id` 写入 evidence 和报告。只有显式增加
 `--publish-langfuse-scores` 时，才向对应 Trace 写入 `globuy.eval.score` 与

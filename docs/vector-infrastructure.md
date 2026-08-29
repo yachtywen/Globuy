@@ -47,7 +47,7 @@ CategoryInsight(query, depth)
     -> KNN(content_vector) + BM25(category^2, summary)
     -> query-sensitive min_max / arithmetic_mean Pipeline
     -> 可选本机 BGE-Reranker-v2-m3 Top-30 -> Top-8/15
-    -> DeepSeek 严格 JSON 提炼
+    -> Kimi K2.6 严格 JSON 提炼
     -> 仅缓存 status=ok 的结构化结果
 ```
 
@@ -140,7 +140,7 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
 - 长期记忆已接入 LangGraph BaseStore + PostgreSQL/pgvector；黑名单全量优先，普通记忆使用向量与关键词无权重 RRF，并乘置信度和时间软衰减。
 - CategoryInsight 已建立独立知识索引和 RAG。当前 `globuy-category` 指向包含 7 张耳机卡片的
   确定性验收索引，三条 Category Pipeline 和真实 BGE-M3 Hybrid Query 已通过本机验证。
-- 生产 DeepSeek 制卡发布尚需对“向外部兼容端点发送聚合卡片草稿”进行知情授权；本机冻结
+- 生产 Kimi K2.6 制卡发布尚需配置 Moonshot API Key，并对“向外部兼容端点发送聚合卡片草稿”进行知情授权；本机冻结
   `BAAI/bge-reranker-v2-m3` HTTP 端点也尚未配置。生产抽取缺失会返回 not_configured；需要精排
   且端点不可用时返回 partial，候选不足时旁路精排。任何路径都不得由模型常识静默补全。
 - 长期记忆复用冻结 BGE-M3 模型实例，但使用 PostgreSQL 独立事实表、`vector(1024)` 投影、HNSW/COSINE、关键词 GIN 和独立生命周期；不得复用商品索引、ItemSearch RRF Pipeline 或 Category Pipeline。

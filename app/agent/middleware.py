@@ -395,6 +395,69 @@ def loop_detected(records: Sequence[dict[str, str]]) -> bool:
     return False
 
 
+def repair_incomplete_tool_groups(
+    messages: Sequence[BaseMessage],
+) -> list[BaseMessage] | None:
+    """Close interrupted assistant tool calls before the next model request.
+
+    OpenAI-compatible APIs require every assistant tool call to be followed by
+    one matching ToolMessage before any later human/assistant message. A graph
+    interruption can checkpoint the assistant message between those two nodes.
+    Rebuild only those broken groups and persist an explicit interrupted result.
+    """
+
+    repaired: list[BaseMessage] = []
+    changed = False
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            repaired.append(message)
+            index += 1
+            continue
+
+        valid_calls = [call for call in message.tool_calls if str(call.get("id") or "")]
+        if len(valid_calls) != len(message.tool_calls):
+            message = message.model_copy(update={"tool_calls": valid_calls})
+            changed = True
+        repaired.append(message)
+
+        following: list[ToolMessage] = []
+        cursor = index + 1
+        while cursor < len(messages) and isinstance(messages[cursor], ToolMessage):
+            following.append(messages[cursor])
+            cursor += 1
+        by_id = {str(item.tool_call_id): item for item in following}
+        declared_ids = {str(call["id"]) for call in valid_calls}
+        for call in valid_calls:
+            call_id = str(call["id"])
+            existing = by_id.get(call_id)
+            if existing is not None:
+                repaired.append(existing)
+                continue
+            repaired.append(
+                ToolMessage(
+                    name=str(call.get("name") or "interrupted_tool"),
+                    tool_call_id=call_id,
+                    content=_json(
+                        {
+                            "status": "interrupted",
+                            "terminal": False,
+                            "message": "上一轮工具调用在完成前中断，已安全关闭。",
+                        }
+                    ),
+                )
+            )
+            changed = True
+        if any(str(item.tool_call_id) not in declared_ids for item in following):
+            changed = True
+        index = cursor
+
+    if not changed:
+        return None
+    return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *repaired]
+
+
 def _safe_boundary(messages: Sequence[BaseMessage], keep_recent_groups: int) -> int:
     group_starts = [
         index
@@ -410,37 +473,71 @@ def _safe_boundary(messages: Sequence[BaseMessage], keep_recent_groups: int) -> 
     return boundary
 
 
-# 先粗略估算token数，超过12000token才压缩，
-def cache_breakpoint_update(messages: Sequence[BaseMessage]) -> list[BaseMessage] | None:
-    """Replace only old complete message groups when the token boundary is crossed."""
+def _context_breakpoint_limits(settings: Any) -> tuple[int, int]:
+    """Resolve window-derived limits while accepting legacy test settings."""
 
-    settings = get_settings()
-    total = sum(estimate_tokens(message) for message in messages)
-    if total <= settings.compression_token_limit:
-        return None
-    boundary = _safe_boundary(messages, settings.compression_keep_recent)
-    if boundary <= 0:
-        return None
+    trigger = getattr(settings, "compression_trigger_tokens", None)
+    if trigger is None:
+        trigger = settings.compression_token_limit
+    target = getattr(settings, "compression_target_tokens", None)
+    if target is None:
+        target = trigger
+    return int(trigger), min(int(target), int(trigger))
 
+
+def _bounded_history_summary(
+    messages: Sequence[BaseMessage], *, token_budget: int
+) -> SystemMessage | None:
+    header = "以下是 Cache Breakpoint 之前的历史摘要；它不包含当前未完成的工具调用：\n"
     lines: list[str] = []
-    for message in messages[:boundary]:
+    for message in messages:
         role = getattr(message, "type", "message")
         text = str(message.content).replace("\n", " ").strip()
         if text:
             lines.append(f"{role}: {text[:300]}")
     if not lines:
         return None
-    summary = SystemMessage(
-        name="history_summary",
-        content=(
-            "以下是 Cache Breakpoint 之前的历史摘要；它不包含当前未完成的工具调用：\n"
-            + "\n".join(lines)
-        ),
+
+    # Prefer the most recent part of the old prefix. This remains deterministic,
+    # is frozen until the next high-watermark crossing, and keeps the replacement
+    # below the low-watermark budget in ordinary cases.
+    kept: list[str] = []
+    for line in reversed(lines):
+        candidate = [line, *kept]
+        content = header + "\n".join(candidate)
+        if kept and estimate_tokens(SystemMessage(content=content)) > token_budget:
+            break
+        kept = candidate
+    omitted = len(kept) < len(lines)
+    if omitted:
+        kept.insert(0, "[更早的历史已在上一个 Cache Breakpoint 中省略]")
+    return SystemMessage(name="history_summary", content=header + "\n".join(kept))
+
+
+def cache_breakpoint_update(messages: Sequence[BaseMessage]) -> list[BaseMessage] | None:
+    """Compress at a model-window high watermark toward a stable low watermark."""
+
+    settings = get_settings()
+    total = sum(estimate_tokens(message) for message in messages)
+    trigger_tokens, target_tokens = _context_breakpoint_limits(settings)
+    if total <= trigger_tokens:
+        return None
+    boundary = _safe_boundary(messages, settings.compression_keep_recent)
+    if boundary <= 0:
+        return None
+
+    retained = list(messages[boundary:])
+    retained_tokens = sum(estimate_tokens(message) for message in retained)
+    summary = _bounded_history_summary(
+        messages[:boundary],
+        token_budget=max(1_024, target_tokens - retained_tokens),
     )
+    if summary is None:
+        return None
     return [
         RemoveMessage(id=REMOVE_ALL_MESSAGES),
         summary,
-        *messages[boundary:],
+        *retained,
     ]
 
 
@@ -449,5 +546,6 @@ __all__ = [
     "compact_tool_content",
     "guarded_tool_call",
     "loop_detected",
+    "repair_incomplete_tool_groups",
     "tool_records",
 ]

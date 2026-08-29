@@ -1,4 +1,56 @@
 # globuy 项目状态
+## 2026-08-25：WebSearch 从 Tavily 切换为阿里云 IQS UnifiedSearch
+
+- `web_search` 已改为阿里云 IQS 官方 HTTP `POST /search/unified`：Bearer API Key 鉴权，默认 `LiteAdvanced`、最多 10 条、`NoLimit` 时间范围，关闭收费增强摘要以及正文/Markdown，仅启用 `rerankScore`；解析 `pageItems`、`requestId`、`searchInformation.searchTime` 和 `costCredits`，继续输出项目统一的来源摘要结构。
+- 配置已替换为 `GLOBUY_WEB_SEARCH_PROVIDER=iqs` 与 `GLOBUY_IQS_*`，健康检查改读 IQS Key；Prompt、`.env.example`、README 和评测说明已同步。正式凭据只允许写入 Git 忽略的本地 `.env`，不进入文档、日志或测试。
+- 错误映射覆盖官方 403 未开通/未授权/欠费/试用到期、404 Key 不存在和 429 限流/试用量耗尽；响应正文不会透传。已验证 IQS MockTransport、健康检查和 Eval 定向测试共 19 项通过，Ruff 与 compileall 通过，未调用真实 IQS 或其他外部服务。
+- 用户已在本地 `.env` 安全填入 IQS Key。随后使用全新短进程、生产 `IqsSearchService` 和 `LiteAdvanced` 执行一次 `max_results=1` 的真实低成本烟测：返回 `status=ok/provider=iqs/result_count=1`，IQS 服务端搜索耗时 304 ms、计量 1 credit，并收到 request ID；未启用增强摘要或正文，未输出 Key。当前 8000 端口仍是切换前启动的旧进程，`/healthz` 仍显示 Tavily，必须重启后端后才会在正式 API 链路加载 IQS。
+
+## 2026-08-25：完成 Agent 终态收敛与异常 checkpoint 工具组修复
+
+- ShoppingSummary 现在是严格的一次性终态尝试：Reflect 决策中只保留第一个 `shopping_summary` 调用并移除同批其他调用；返回 `complete` 时 Observe 无条件写入 terminal result 并结束主图。返回 `incomplete/not_configured/error` 或工具参数校验错误时，不再回到模型重试，而是确定性调用一次 `chat_fallback` 后结束。
+- ItemPicker 返回空候选或候选缺少 `product_url` 时，Reflect 不再请求模型生成清单，直接进入安全的 `chat_fallback`。降级文案按状态固定生成，不向用户透出内部异常文本。
+- 主图新增 `prepare` 节点。每轮 Think 前扫描全部消息组；若异常 checkpoint 中存在未获得对应 ToolMessage 的 assistant tool call，则在下一条 HumanMessage 之前补写 `status=interrupted` 的合成 ToolMessage，并通过 RemoveMessage + 完整重建把修复结果持久化回 checkpoint。并行调用只补缺失 ID，完整调用组保持不变，孤立或无法对应的 ToolMessage 被移除。
+- 新增单次终态、多 Summary 合并、Summary 失败无模型重试、空候选/缺链接降级、完整/部分/缺失工具组修复和 prepare 节点持久化测试。Ruff 通过，定向 `tests/test_completion_loop.py` 共 40 项通过。该隔离验证发生在本轮稍后的 `.env` provider 切换之前，当时为避免旧 `tavily` 值触发新配置校验，显式使用 `GLOBUY_WEB_SEARCH_PROVIDER=none` 隔离外部搜索；随后 IQS 变更已把本地 provider 更新为 `iqs`。
+
+## 2026-08-25：Shortlist 仅在有商品或真实搜索零候选时展示
+
+- 任务结果新增可持久化的 `search_attempted` 与 `search_candidate_count`：后端只把状态为 `ok/partial` 且未被澄清门禁阻断的直接 `item_search` 或同质 fork 搜索计为真实完成，并汇总其候选数量；v1 接口文档已同步字段与前端语义。
+- 前端不再因任意终态结果包含空 `picks` 就展示 Shortlist。闲聊、澄清、搜索前、搜索未配置/失败，以及搜索返回过候选但尚未形成精选结果时只保留对话内容；已有精选商品照常展示，只有真实搜索完成且候选数为 0 时展示空 Shortlist。
+- 新增后端直接搜索/fork/非搜索判定、API 结果字段和前端三态渲染测试。已验证：`tests/test_completion_loop.py` 32 项通过，API 任务状态定向测试 1 项通过，`ProductResults.test.tsx` 6 项通过，Ruff、前端 TypeScript 与 Vite 生产构建通过；未调用模型、商品 Provider 或其他外部能力。
+
+## 2026-08-25：Kimi 组织额度提升至 200 RPM 后复测 10 轮真实链路
+
+- 使用全新 QA 账号、全新 thread 和隔离的 8001 实例，按 180 RPM 客户端限速重新执行相同 `live-context-cache-10turn` 用例；Kimi、JustOne、Langfuse 与数据库健康检查正常。10 轮总耗时从低额度测试的 1,060,633 ms 降至 392,016 ms，下降约 63.0%，全程没有 HTTP 429，说明 200 RPM 已解决此前的组织级吞吐限制。
+- 结果仍未通过：前三轮成功，第 4～7 轮重复调用 ShoppingSummary 后达到 LangGraph 48 步递归上限，第 8～10 轮因 checkpoint 中存在缺少对应 ToolMessage 的未闭合 `shopping_summary` 调用组而被 Kimi HTTP 400 拒绝。64 次工具 observation 中 ShoppingSummary 占 40 次；这证明当前主要瓶颈已从 RPM 转为 Agent 收敛和异常 checkpoint 修复。
+- 42 次成功 generation 的 Provider usage 为：178,231 uncached input、673,792 cache-read input、852,023 total input、14,963 output，共 866,986 tokens；输入缓存命中率为 79.08%，仍低于 80% 目标。单次最大输入为 65,121 tokens，高于 40K；第 7 轮单轮命中率达到 90.30%，但这是重复循环堆高相同前缀后的结果，不能作为健康长对话命中率证明。机器可读汇总位于 `output/context-cache-live/eval-rpm200/cache-summary.json`。
+- 本次 Agent 仍未进入 `item_search`，因此没有新增 JustOne 调用；此前同日生产 Provider 直连烟测的三平台业务码均为 0，只能证明 JustOne API 可用，不能替代 Agent 端到端 ItemSearch 验收。
+
+## 2026-08-25：README 启动与验证命令改为 Windows CMD 形式
+
+- 根 README 的克隆安装、PostgreSQL 配置、前后端启动、完整检索、测试及双层评测命令块已从 PowerShell 改为 Windows CMD；目录切换、文件复制、目录栈和注释分别使用 `cd /d`、`copy`、`pushd/popd` 与 `REM`，运行语义保持不变。
+- 本轮只调整文档命令格式，没有修改应用代码、配置或依赖，也没有启动服务或调用任何外部能力。
+
+## 2026-08-25：完成 Kimi Prompt Cache / JustOne 真实链路首轮验收并记录未通过项
+
+- Kimi 官方端点的 Think、Reflect、ShoppingSummary 与 CategoryInsight 请求现在按根 `thread_id` 发送稳定的 `prompt_cache_key`；增加可选 `GLOBUY_LLM_REQUESTS_PER_MINUTE` 客户端令牌桶，真实测试按 2 RPM 运行以适配当前组织 3 RPM 上限。模型生成的商品理由超过三条时确定性保留前三条，避免合法候选因工具参数漂移进入重试循环。新增 `eval/context-cache-10turn.yaml` 与脱敏的 `scripts/justone_smoke.py`；相关 29 项测试和 Ruff 通过。
+- 真实 10 轮用例通过正式认证、HTTP 202、WebSocket replay、LangGraph、Kimi K2.6 与 Langfuse 执行，10 个 run 都形成唯一终态事件，耗时 1,060,633 ms。结果未通过：3 轮成功、7 轮失败；第 4、5 轮达到 48 步递归上限，第 6～10 轮从 checkpoint 继承了缺少 ToolMessage 的 `shopping_summary` tool-call 组，Kimi 以 HTTP 400 拒绝。该缺陷说明异常终止后的 checkpoint 尚未保证完整工具调用组，不能把本次结果表述为“10 轮稳定通过”。
+- Langfuse 对同一 thread 的全部成功 generation 给出 78,709 uncached input、272,034 cache-read input、350,743 total input、10,488 output，共 361,231 provider tokens；按 `cache_read / (uncached_input + cache_read)` 计算输入缓存命中率为 77.56%，低于 80% 目标。已被 Provider 接受的单次请求最大输入为 28,122 tokens，低于 40K；后五轮因消息协议 400 没有 usage，不能据此证明完整第十轮上下文仍低于 40K。报告和机器可读汇总位于 `output/context-cache-live/eval-final/`。
+- 该 10 轮 Agent 路由没有进入 `item_search`，因此另用生产 `JustOneProvider` 做三平台真实、脱敏烟测：淘宝 10 条 / 2,499 ms、京东 48 条 / 2,607 ms、抖音 10 条 / 2,983 ms，业务码均为 0。JustOne API 可用，但这不替代 Agent 端到端进入 ItemSearch 的后续回归验收。
+
+## 2026-08-25：完成 Kimi K2.6 代码迁移与 256K 自适应上下文边界
+
+- 主 Agent、同质 fork、ShoppingSummary 与 CategoryInsight 共用的 OpenAI-compatible 模型默认值已切换为官方 `kimi-k2.6` / `https://api.moonshot.cn/v1`；Kimi 请求不再发送项目旧的 `temperature=0.3`，并显式使用 32,768 最大输出。为避免多步工具调用时丢失厂商专用 `reasoning_content` 导致后续请求失败，当前以官方非思考模式运行；若未来要启用思考模式，必须先完整保存并回传该字段。
+- Cache Breakpoint 不再默认使用固定 12,000 Token。新配置根据模型窗口计算：256K 窗口在 75%（196,608）触发，目标压回约 50%（131,072），同时预留 32K 输出和 16K System Prompt、工具声明及估算误差空间。旧的 `GLOBUY_COMPRESSION_TOKEN_LIMIT` 仍可作为显式覆盖。摘要只在越过高水位时变化，保留最近 3 个完整工具调用组，不会逐轮改写上下文前缀。
+- `CompatibleCategoryExtractor` 取代运行时的 Provider 专名，同时保留旧类名兼容导入；`.env.example`、README、长期契约和向量基础设施文档已同步。全量验证结果：Ruff、compileall 通过，后端 `185 passed, 1 skipped`，未发起付费模型或商品 Provider 调用。
+- 本机被 Git 忽略的 `.env` 已切换到 `kimi-k2.6`、Moonshot 官方端点和 256K 动态压缩参数。当前没有 Moonshot/Kimi API Key，因此在文件末尾用空的 `GLOBUY_LLM_API_KEY` 安全覆盖旧 DeepSeek 凭据，确保旧密钥不会被发送到 Moonshot；真实 Kimi 调用及 LangFuse Prompt Cache usage 验收必须在该最终配置项填入 Moonshot Key 后进行。
+- 用户补充 Moonshot Key 后已完成真实验收：配置解析得到 `kimi-k2.6`、非思考模式、32K 最大输出、196,608 高水位和 131,072 低水位；使用项目规定的 `python -m app.api` 在隔离端口启动全新实例，`/healthz` 返回 200，数据库、JustOne、Tavily、Category Cache 与 LangFuse 状态正常。最小真实 Kimi 请求返回严格 `KIMI_OK`，Provider 确认模型为 `kimi-k2.6`，墙钟 741 ms，usage 为输入 18、输出 7、总计 25 Token。验收后已停止隔离实例，未停止或重启宿主 8000 端口上切换前启动的既有进程。
+
+## 2026-08-25：完成本地 PostgreSQL/Redis 配置修复与 Just One 三平台真实耗时验收
+
+- 修复 Git 忽略的本地 `.env` 运行覆盖：默认宿主进程现连接 PostgreSQL `127.0.0.1:5433`，Compose 使用 `postgres:5432`，Redis 使用宿主 `127.0.0.1:6379`；未改动或记录现有模型、Provider、LangFuse 密钥。Redis 缓存容器已重建，宿主 `PING` 通过；FastAPI 使用 `.env` 默认启动后 `/healthz` 返回 `status=ok/database=ok`，Alembic 为 `20260823_0004 (head)`，LangFuse 为 `ready`。
+- 使用“手冲咖啡滤杯”隔离范围进行一次真实 Just One 三平台并行验收。测试进程把目录目标临时限制为每平台 1 条，仅影响该进程；淘宝、京东、抖音均首个请求成功，`attempt_count=1`，Provider RT 分别为 1994 ms、6220 ms、3547 ms。每个平台各持久化并投影 1 条候选，没有执行保护性重试。
+- 端到端 `item_search` 工具 RT 分别为淘宝 2664 ms、京东 6674 ms、抖音 3999 ms，并行墙钟为 6696 ms。LangFuse Cloud Trace `b82e0d28dc4d5e5f64afa5110dcb82c2` 已反查到三个独立 TOOL observation，均包含 `target_platform`、`duration_ms`、`status=ok`、`result_count=1` 和 `fork_depth=1`；未记录 Token、完整响应或请求 ID。
 
 ## 2026-08-23：LLM Judge 支持从 `.env` 独立配置
 
@@ -224,7 +276,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-08-20
+> 最后更新时间：2026-08-25
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件
@@ -273,7 +325,7 @@
 
 核心技术栈：FastAPI、Uvicorn、WebSocket、LangChain、LangGraph、React、TypeScript、Vite。
 ItemSearch 检索栈固定为 OpenSearch Hybrid，Faiss 仅保留实验能力。开发环境采用 Conda
-`globuy`，Python 3.12；对话模型使用 DeepSeek OpenAI 兼容接口。
+`globuy`，Python 3.12；对话模型默认使用 Kimi K2.6 OpenAI 兼容接口，本机真实激活待配置 Moonshot Key。
 
 当前项目范围明确排除自研检索模型的训练与微调，也不建设依赖人工评分标签、负样本和训练
 闭环的学习型排序机制。原三塔目标中的自训练 Query/User/Item 编码不再作为当前项目的实施
@@ -324,12 +376,12 @@ React 彩铅品牌封面 + 三栏购物工作台
 |---|---|---|---|
 | Planner | Think / 内部 | 确定性需求拆解，可直接调用 | 尚未建立显式 Think 状态与动态计划状态 |
 | ChatFallback | Think / 内部 | 返回澄清问题 | 尚未完成购物意图分类路由 |
-| WebSearch | Think / 外部 | Tavily 异步 `POST /search`；返回 URL/摘要/相关度/检索时间/request ID/credit，用量与错误脱敏；真实 `basic` 搜索已通过 | 不负责实时商品报价；对话中暴露过的本地 key 应在验收后轮换 |
-| CategoryInsight | Think / 外部 | 独立 CategoryCard RAG：别名归一、Hybrid 召回、可降级精排、Redis 缓存和严格 JSON 提炼 | 首期仅覆盖耳机快照；本机 Reranker 端点未配置，DeepSeek 最终制卡发布需单独允许聚合数据外发 |
+| WebSearch | Think / 外部 | 阿里云 IQS UnifiedSearch 异步 `POST /search/unified`；返回 URL/摘要/重排分、发布时间、检索时间、request ID 与 credit，用量与错误脱敏 | 真实 IQS Key 尚未写入本地 `.env`，未执行付费烟测；不负责实时商品报价 |
+| CategoryInsight | Think / 外部 | 独立 CategoryCard RAG：别名归一、Hybrid 召回、可降级精排、Redis 缓存和严格 JSON 提炼 | 首期仅覆盖耳机快照；本机 Reranker 端点未配置，Kimi 最终制卡发布需配置密钥并单独允许聚合数据外发 |
 | ItemSearch | Think / 外部 | 异步单平台 BM25 + BGE-M3 + RRF，支持结构化过滤和 monitor | 数据为离线快照，尚未接实时 Provider |
 | ItemPicker | Reflect / 内部 | 严格 Schema；有证据硬约束后按 retrieval rank、rating、price、输入顺序选择，最多 3 项；运行前会读取当前用户已确认的长期记忆并注入 Prompt | 偏好仍需用户通过记忆 CRUD 明确确认，不自动持久化 Agent 推断 |
 | PriceCompare | Reflect / 外部 | 使用国内 CNY 费用契约比较完整报价；未知运费单列且不得胜出 | 未接入实时跨平台报价和规格对齐 |
-| ShoppingSummary | Reflect / 内部 | 工具内额外调用一次共享 LLM 生成严格 `final_text`；DeepSeek V4 使用非思考模式 function calling；最终商品按平台与商品 ID 从已验证本地快照确定性补齐缺失 `image_url`，成功结构化输出才终结 | 报告未持久化；额外调用需要真实模型配置 |
+| ShoppingSummary | Reflect / 内部 | 工具内额外调用一次共享 LLM 生成严格 `final_text`；Kimi K2.6 使用非思考模式 function calling；最终商品按平台与商品 ID 从已验证本地快照确定性补齐缺失 `image_url`，成功结构化输出才终结 | 报告未持久化；额外调用需要真实模型配置 |
 
 当前 LangGraph 已显式建模 `Think -> Act -> Observe -> Reflect`。Think 与 Reflect 分别绑定允许
 工具集合，ToolNode 包装器再次执行阶段校验；信息不足时 Reflect 回到 Think，成功终结工具进入 END。
@@ -406,8 +458,8 @@ sequence 去重；45 秒陈旧连接检测、1/2/4/8/15 秒抖动重连、replay
 完成以下落地：
 
 - `.env.example` 与 `Settings` 包含模型温度、压缩边界、WebSocket 心跳、Faiss 路径和
-  OpenSearch 配置；三塔 HTTP 端点已在无训练 ItemSearch 实施时移除。对话模型仍使用 DeepSeek
-  OpenAI 兼容接口，不复制参考 Qwen 配置。
+  OpenSearch 配置；三塔 HTTP 端点已在无训练 ItemSearch 实施时移除。该阶段曾使用 DeepSeek；
+  2026-08-25 已由用户明确批准切换为 Kimi K2.6。
 - `thread_ctx.py` 现在管理 `thread_id/run_id/user_id/session_dir`，提供自动 reset 的
   `thread_scope()` 和继承会话目录的 `fork_scope()`；HTTP/WS 运行已绑定 `run_id`。
 - `Monitor` 通过注入 publisher 发送标准工具事件和 `CUSTOM` fork/task 事件，工具不依赖
@@ -489,8 +541,8 @@ ItemSearch 后续完成情况见 5.4；LangGraph BaseStore 适配仍属于后续
 - 本机已使用无付费的确定性路径生成并发布 7 张耳机卡片：attribute 4、bestseller 2、
   price_range 1；物理索引为 `globuy-category-v1-20260720111400-94c03755`，稳定别名为
   `globuy-category`。三条 Pipeline、7 条文档及真实 Hybrid 查询均已验证。
-- 默认生产命令仍使用项目现有 DeepSeek 对聚合草稿做 JSON 压缩。本次执行因外部端点数据外发
-  需要知情后的单独授权而未完成，因此当前别名指向确定性验收版本；可选本机
+- 默认生产命令现使用项目共享的 Kimi K2.6 对聚合草稿做 JSON 压缩，但本机仍缺 Moonshot Key，
+  且外部端点数据外发需要知情后的单独授权，因此当前别名继续指向确定性验收版本；可选本机
   `BAAI/bge-reranker-v2-m3` HTTP 端点也尚未配置；当候选多于目标 Top-K、需要精排时，在线路径
   会显式标为 partial，而不是伪装成功，候选不足则按契约旁路精排。
 
@@ -711,6 +763,14 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-08-25：WebSearch 从 Tavily 切换为阿里云 IQS UnifiedSearch；完成官方请求/响应、错误、配置、健康检查、Prompt、README、评测说明和 19 项无外部调用测试。用户安全写入本地 Key 后，生产适配器 `max_results=1` 真实烟测成功，返回 1 条结果、服务端耗时 304 ms并计量 1 credit；正式 8000 后端仍待重启加载新配置。
+
+- 2026-08-25：修复空 Shortlist 过早展示；任务结果持久化真实商品搜索及候选数，前端只在有精选商品或已完成搜索且零候选时渲染 Shortlist，并补直接搜索、fork 与三态组件回归测试。
+
+- 2026-08-25：将 README 中面向使用者的项目启动、完整检索、测试和评测命令统一转换为 Windows CMD 语法，替换 PowerShell 专用命令与注释格式；未改变运行流程。
+
+- 2026-08-25：修复本地 `.env` 的 PostgreSQL/Redis 运行覆盖并完成默认 FastAPI、数据库迁移、Redis 与 LangFuse 健康验证；真实并行调用 Just One 淘宝、京东、抖音各一次，三路均成功且无重试，Provider 与端到端工具耗时已由数据库账本和 LangFuse Cloud Trace 交叉确认。
 
 - 2026-08-20：新增 Agent 全链路可观测体系实施计划，确定 LangFuse Cloud 日本区、默认脱敏摘要和
   生产可用交付深度；计划以现有 Monitor/AG-UI/Eval 为基础增加 Trace/Span、Token/RT、fork 关联、

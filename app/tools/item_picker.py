@@ -6,7 +6,7 @@ import json
 from typing import Any, Literal
 
 from langchain_core.tools import tool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.category.schemas import CategoryInsightOutput
 from app.search.schemas import Platform, Scalar
@@ -71,6 +71,13 @@ class PickedItem(PickerCandidate):
     reasons: list[str] = Field(default_factory=list, max_length=3)
     flags: list[str] = Field(default_factory=list)
     category_annotations: CategoryAnnotations = Field(default_factory=CategoryAnnotations)
+
+    @field_validator("reasons", mode="before")
+    @classmethod
+    def keep_top_reasons(cls, value: Any) -> Any:
+        """Keep tool-call drift from turning a valid shortlist into a retry loop."""
+
+        return value[:3] if isinstance(value, list) else value
 
 
 class ItemPickerOutput(BaseModel):

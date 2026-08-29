@@ -29,8 +29,13 @@ from app.agent.dispatch_tool import (
     fork_dispatch_allowed,
     get_core_tools,
 )
-from app.agent.llm import get_chat_model
-from app.agent.middleware import cache_breakpoint_update, loop_detected, tool_records
+from app.agent.llm import get_chat_model, model_request_kwargs
+from app.agent.middleware import (
+    cache_breakpoint_update,
+    loop_detected,
+    repair_incomplete_tool_groups,
+    tool_records,
+)
 from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import EventType, current_monitor
 from app.config import get_settings
@@ -131,6 +136,68 @@ def _normalize_phase_tool_calls(
     if not had_invalid:
         return response, False
     return response.model_copy(update={"tool_calls": valid}), True
+
+
+def _single_summary_tool_call(response: AIMessage) -> AIMessage:
+    """Make a terminal summary the only tool call in one assistant decision."""
+
+    summaries = [
+        call for call in response.tool_calls if str(call.get("name")) == "shopping_summary"
+    ]
+    if not summaries:
+        return response
+    return response.model_copy(update={"tool_calls": [summaries[0]]})
+
+
+def _chat_fallback_response(message: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "chat_fallback",
+                "args": {"message": message},
+                "id": f"forced-fallback-{uuid4().hex}",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _current_turn_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return list(messages[index + 1 :])
+    return list(messages)
+
+
+def _deterministic_summary_fallback(state: AgentState) -> str | None:
+    """Return a terminal fallback reason when summarization cannot be valid."""
+
+    latest_picker: dict[str, Any] | None = None
+    for message in reversed(_current_turn_messages(state.get("messages", []))):
+        if not isinstance(message, ToolMessage):
+            continue
+        payload = _tool_payload(message)
+        if message.name == "shopping_summary":
+            if payload and payload.get("status") == "complete":
+                return None
+            status = str((payload or {}).get("status") or "error")
+            if status == "not_configured":
+                return "当前清单生成能力尚未配置，已停止重复尝试。"
+            if status == "incomplete":
+                return "当前候选不足以生成可核验清单，请调整条件后重试。"
+            return "本轮清单生成暂时失败，已停止重复尝试；请稍后重试。"
+        if message.name == "item_picker" and latest_picker is None:
+            latest_picker = payload or {}
+
+    if latest_picker is None:
+        return None
+    picks = latest_picker.get("picks")
+    if not isinstance(picks, list) or not picks:
+        return "当前没有满足条件且可验证的商品候选，请调整筛选条件后重试。"
+    if any(not isinstance(item, dict) or not item.get("product_url") for item in picks):
+        return "当前候选缺少可核验的商品来源链接，暂不生成推荐清单。"
+    return None
 
 
 def _decision_budget_exhausted(iteration: int, repeat_threshold: int | None = None) -> bool:
@@ -301,6 +368,10 @@ class AgentLoop:
             else self.model
         )
 
+        async def prepare(state: AgentState) -> dict[str, Any]:
+            repaired = repair_incomplete_tool_groups(state.get("messages", []))
+            return {"messages": repaired} if repaired is not None else {}
+
         async def think(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             iteration = state.get("iteration", 0) + 1
             await _report_phase("think", started=True, iteration=iteration)
@@ -330,6 +401,7 @@ class AgentLoop:
             response = await think_model.ainvoke(
                 model_messages,
                 config=_model_call_config(config, "think", model_messages),
+                **model_request_kwargs(current_thread_id(), model=self.model),
             )
             response, _ = _normalize_phase_tool_calls(response, TOOL_PHASES["think"])
             await _report_phase("think", started=False, iteration=iteration)
@@ -367,8 +439,11 @@ class AgentLoop:
             if state.get("memory_context"):
                 prompt += "\n\n用户已确认的长期记忆：\n" + str(state["memory_context"])
             force_root_termination = must_terminate and current_fork_depth() == 0
+            fallback_message = _deterministic_summary_fallback(state)
             response = (
-                _forced_termination_response(state)
+                _chat_fallback_response(fallback_message)
+                if fallback_message is not None
+                else _forced_termination_response(state)
                 if force_root_termination
                 else await reflect_model.ainvoke(
                     (model_messages := [
@@ -377,6 +452,7 @@ class AgentLoop:
                         *state["messages"],
                     ]),
                     config=_model_call_config(config, "reflect", model_messages),
+                    **model_request_kwargs(current_thread_id(), model=self.model),
                 )
             )
             allowed_tools = (
@@ -389,6 +465,7 @@ class AgentLoop:
             response, requested_think_tool = _normalize_phase_tool_calls(
                 response, allowed_tools
             )
+            response = _single_summary_tool_call(response)
             if must_terminate and not response.tool_calls and not _message_text(response).strip():
                 response = response.model_copy(
                     update={
@@ -456,8 +533,16 @@ class AgentLoop:
                 ):
                     terminal_result, terminal_name = payload, message.name
                     break
-                if payload and payload.get("terminal") is True:
-                    terminal_result, terminal_name = payload, message.name
+                if payload and (
+                    payload.get("terminal") is True
+                    or (
+                        message.name == "shopping_summary"
+                        and payload.get("status") == "complete"
+                    )
+                ):
+                    terminal_result = dict(payload)
+                    terminal_result["terminal"] = True
+                    terminal_name = message.name
                     break
             if state.get("shopping_intent") is None and shopping_intent:
                 monitor = current_monitor()
@@ -506,12 +591,14 @@ class AgentLoop:
             return END if phase == "done" else phase
 
         builder = StateGraph(AgentState)
+        builder.add_node("prepare", prepare)
         builder.add_node("think", think)
         builder.add_node("act", build_dispatch_node(self.tools))
         builder.add_node("observe", observe)
         builder.add_node("context.compress", compress)
         builder.add_node("reflect", reflect)
-        builder.add_edge(START, "think")
+        builder.add_edge(START, "prepare")
+        builder.add_edge("prepare", "think")
         builder.add_conditional_edges("think", route_decision)
         builder.add_edge("act", "observe")
         builder.add_edge("observe", "context.compress")

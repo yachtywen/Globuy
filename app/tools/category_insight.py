@@ -9,7 +9,7 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from app.category.cache import build_category_cache
-from app.category.extractor import DeepSeekCategoryExtractor
+from app.category.extractor import CompatibleCategoryExtractor
 from app.category.normalization import load_category_aliases
 from app.category.reranker import HttpReranker
 from app.category.schemas import CategoryInsightOutput
@@ -29,7 +29,7 @@ def get_category_search_service() -> CategorySearchService:
     return CategorySearchService(
         build_opensearch_client(settings),
         get_embedding_encoder(),
-        DeepSeekCategoryExtractor(get_chat_model()),
+        CompatibleCategoryExtractor(get_chat_model()),
         HttpReranker(
             settings.reranker_endpoint,
             timeout_seconds=settings.reranker_timeout_seconds,

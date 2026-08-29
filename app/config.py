@@ -27,10 +27,14 @@ class Settings(BaseSettings):
     )
 
     model_provider: Literal["mock", "openai-compatible"] = "mock"
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "kimi-k2.6"
     llm_api_key: SecretStr | None = None
-    llm_base_url: str | None = None
+    llm_base_url: str | None = "https://api.moonshot.cn/v1"
     llm_temperature: float = Field(default=0.3, ge=0, le=2)
+    llm_context_window_tokens: int = Field(default=262_144, ge=8_192)
+    llm_max_output_tokens: int = Field(default=32_768, ge=256)
+    # Optional client-side throttle for providers with a low organization RPM.
+    llm_requests_per_minute: float | None = Field(default=None, gt=0)
 
     # Independent P1/P2 evaluation model. These settings intentionally do not
     # fall back to the main Agent model or its credentials.
@@ -42,8 +46,12 @@ class Settings(BaseSettings):
     output_dir: Path = Path("output")
     uploaded_dir: Path = Path("uploaded")
     prompt_file: Path = Path("app/prompt/prompts.yml")
-    # 触发压缩的token上限
-    compression_token_limit: int = 12_000
+    # Optional legacy hard override. When unset, the breakpoint is derived from
+    # the configured model context window and output reserve.
+    compression_token_limit: int | None = Field(default=None, ge=1_024)
+    compression_trigger_ratio: float = Field(default=0.75, gt=0, lt=1)
+    compression_target_ratio: float = Field(default=0.50, gt=0, lt=1)
+    compression_safety_margin_tokens: int = Field(default=16_384, ge=1_024)
     # 压缩时保留最近三个工具调用组；ToolMessage 返回前先经过结果压缩。
     compression_keep_recent: int = 3
     tool_result_token_limit: int = Field(default=4_000, ge=256)
@@ -114,6 +122,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "database_url",
+        "compression_token_limit",
         "langfuse_public_key",
         "langfuse_secret_key",
         "observability_hash_salt",
@@ -126,7 +135,33 @@ class Settings(BaseSettings):
     def empty_database_url_is_unconfigured(cls, value: object) -> object:
         return None if value == "" else value
 
-    @field_validator("justone_token", mode="before")
+    @model_validator(mode="after")
+    def validate_context_budget(self) -> Self:
+        if self.compression_target_ratio >= self.compression_trigger_ratio:
+            raise ValueError("compression target ratio must be below trigger ratio")
+        reserved = self.llm_max_output_tokens + self.compression_safety_margin_tokens
+        if reserved >= self.llm_context_window_tokens:
+            raise ValueError("LLM output and safety reserves must fit inside the context window")
+        return self
+
+    @property
+    def compression_trigger_tokens(self) -> int:
+        if self.compression_token_limit is not None:
+            return self.compression_token_limit
+        ratio_limit = int(self.llm_context_window_tokens * self.compression_trigger_ratio)
+        capacity_limit = (
+            self.llm_context_window_tokens
+            - self.llm_max_output_tokens
+            - self.compression_safety_margin_tokens
+        )
+        return min(ratio_limit, capacity_limit)
+
+    @property
+    def compression_target_tokens(self) -> int:
+        ratio_target = int(self.llm_context_window_tokens * self.compression_target_ratio)
+        return min(ratio_target, max(1_024, self.compression_trigger_tokens - 1_024))
+
+    @field_validator("justone_token", "iqs_api_key", mode="before")
     @classmethod
     def empty_provider_token_is_unconfigured(cls, value: object) -> object:
         return None if value == "" else value
@@ -141,13 +176,14 @@ class Settings(BaseSettings):
             raise ValueError("catalog soft deadline cannot exceed hard deadline")
         return self
 
-    web_search_provider: Literal["none", "tavily"] = "tavily"
-    tavily_api_key: SecretStr | None = None
-    tavily_base_url: str = "https://api.tavily.com"
-    tavily_project_id: str | None = "globuy"
-    tavily_search_depth: Literal["basic", "advanced", "fast", "ultra-fast"] = "basic"
-    tavily_timeout_seconds: float = Field(default=12.0, gt=0)
-    tavily_max_results: int = Field(default=10, ge=1, le=20)
+    web_search_provider: Literal["none", "iqs"] = "iqs"
+    iqs_api_key: SecretStr | None = None
+    iqs_base_url: str = "https://cloud-iqs.aliyuncs.com"
+    iqs_engine_type: Literal["Generic", "GenericAdvanced", "LiteAdvanced", "Deep"] = (
+        "LiteAdvanced"
+    )
+    iqs_timeout_seconds: float = Field(default=8.0, gt=0)
+    iqs_max_results: int = Field(default=10, ge=1, le=50)
     web_search_content_chars: int = Field(default=1_200, ge=100, le=4_000)
 
     ann_backend: Literal["faiss"] = "faiss"

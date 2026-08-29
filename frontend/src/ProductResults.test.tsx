@@ -22,6 +22,33 @@ const result: TaskResult = {
 afterEach(cleanup);
 
 describe("商品结果", () => {
+  it("未执行商品搜索时不展示 Shortlist", () => {
+    render(<ProductResults artifacts={[]} result={{ ...result, picks: [] }} />);
+    expect(screen.queryByText("SHORTLIST")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂未形成结构化商品清单")).not.toBeInTheDocument();
+  });
+
+  it("商品搜索完成且没有候选时才展示空 Shortlist", () => {
+    render(<ProductResults artifacts={[]} result={{
+      ...result,
+      picks: [],
+      search_attempted: true,
+      search_candidate_count: 0,
+    }} />);
+    expect(screen.getByText("SHORTLIST")).toBeVisible();
+    expect(screen.getByText("暂未形成结构化商品清单")).toBeVisible();
+  });
+
+  it("搜索曾返回候选但没有精选结果时不误报候选为空", () => {
+    render(<ProductResults artifacts={[]} result={{
+      ...result,
+      picks: [],
+      search_attempted: true,
+      search_candidate_count: 2,
+    }} />);
+    expect(screen.queryByText("SHORTLIST")).not.toBeInTheDocument();
+  });
+
   it("优先渲染接口返回的真实商品图片 URL", () => {
     render(<ProductResults artifacts={[]} result={result} />);
     expect(screen.getByRole("img", { name: "候选耳机 A" })).toHaveAttribute("src", "https://img.example.com/a.jpg");

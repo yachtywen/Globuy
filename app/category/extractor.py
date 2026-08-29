@@ -11,10 +11,11 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from app.agent.llm import model_request_kwargs
 from app.category.schemas import CategoryCard, InsightExtractionPayload
 from app.observability import current_observability_config
 from app.observability.metrics import context_metrics
-from app.utils.thread_ctx import current_fork_depth
+from app.utils.thread_ctx import current_fork_depth, current_thread_id
 
 CARD_PROMPT_VERSION = "category-card-extract-v1"
 INSIGHT_PROMPT_VERSION = "category-insight-extract-v1"
@@ -77,10 +78,10 @@ def _numbers(text: str) -> set[str]:
     return set(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?%?", text))
 
 
-class DeepSeekCategoryExtractor:
+class CompatibleCategoryExtractor:
     """One configured OpenAI-compatible chat model for both extraction stages."""
 
-    name = "deepseek-json"
+    name = "openai-compatible-json"
     prompt_version = CARD_PROMPT_VERSION
 
     def __init__(self, model: BaseChatModel | None) -> None:
@@ -88,7 +89,7 @@ class DeepSeekCategoryExtractor:
 
     async def _invoke_json(self, system: str, payload: dict) -> dict:
         if self.model is None:
-            raise CategoryExtractionNotConfigured("CategoryInsight 需要已配置的 DeepSeek 模型")
+            raise CategoryExtractionNotConfigured("CategoryInsight 需要已配置的对话模型")
         runnable = self.model.bind(response_format={"type": "json_object"})
         messages = [
             SystemMessage(content=system),
@@ -112,6 +113,7 @@ class DeepSeekCategoryExtractor:
                     else {}
                 ),
             },
+            **model_request_kwargs(current_thread_id(), model=self.model),
         )
         try:
             parsed = json.loads(_json_text(_message_text(response)))
@@ -144,7 +146,6 @@ class DeepSeekCategoryExtractor:
             except (ValidationError, ValueError, CategoryExtractionError) as exc:
                 error = f"\n上次校验失败：{exc}。请严格修正。"
         raise CategoryExtractionError(error.strip())
-
     async def extract_insight(
         self, query: str, depth: str, cards: Sequence[CategoryCard]
     ) -> InsightExtractionPayload:
@@ -174,3 +175,8 @@ class DeepSeekCategoryExtractor:
             except (ValidationError, ValueError, CategoryExtractionError) as exc:
                 error = f"\n上次校验失败：{exc}。请严格修正。"
         raise CategoryExtractionError(error.strip())
+
+
+# Backward-compatible import for older scripts; new runtime code uses the
+# provider-neutral name because Kimi K2.6 now supplies this capability.
+DeepSeekCategoryExtractor = CompatibleCategoryExtractor

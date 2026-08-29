@@ -313,7 +313,7 @@ def create_app(
             ),
             "web_search_provider": settings.web_search_provider,
             "web_search_configured": bool(
-                settings.web_search_provider != "none" and settings.tavily_api_key is not None
+                settings.web_search_provider != "none" and settings.iqs_api_key is not None
             ),
             "category_cache_enabled": bool(settings.redis_url),
             **observability.health(),

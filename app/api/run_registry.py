@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -27,6 +28,57 @@ MemoryCandidateSink = Callable[
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_payload(message: Any) -> dict[str, Any] | None:
+    content = getattr(message, "content", None)
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _product_search_summary(state: dict[str, Any] | None) -> tuple[bool, int]:
+    """Return completed-search evidence for durable shortlist rendering."""
+
+    outputs: list[dict[str, Any]] = []
+    for message in (state or {}).get("messages", []):
+        payload = _tool_payload(message)
+        if payload is None:
+            continue
+        name = getattr(message, "name", None)
+        if name == "item_search":
+            outputs.append(payload)
+        elif name == "dispatch_tool":
+            search_results = payload.get("search_results")
+            if isinstance(search_results, list):
+                outputs.extend(item for item in search_results if isinstance(item, dict))
+            elif isinstance(payload.get("tool_results"), list):
+                outputs.extend(
+                    item["result"]
+                    for item in payload["tool_results"]
+                    if isinstance(item, dict)
+                    and item.get("tool") == "item_search"
+                    and isinstance(item.get("result"), dict)
+                )
+
+    completed = [
+        output
+        for output in outputs
+        if output.get("status") in {"ok", "partial"}
+        and output.get("provider_status") != "blocked"
+    ]
+    candidate_count = sum(
+        len(output["candidates"])
+        for output in completed
+        if isinstance(output.get("candidates"), list)
+    )
+    return bool(completed), candidate_count
 
 
 def _accumulate_final_state(
@@ -638,6 +690,7 @@ class RunRegistry:
         )
         memory_status = metadata.get("memory_status", "not_configured")
         picks = terminal.get("picks", [])
+        search_attempted, search_candidate_count = _product_search_summary(state)
         if picks:
             final_text = sanitize_shopping_markdown(final_text)
         result = {
@@ -655,6 +708,8 @@ class RunRegistry:
             "memory_status": memory_status,
             "memory_metrics": metadata.get("memory_metrics"),
             "source_kind": "offline_snapshot",
+            "search_attempted": search_attempted,
+            "search_candidate_count": search_candidate_count,
             "artifacts": [],
         }
         result = enrich_task_result(result, self.product_image_catalog_path) or result

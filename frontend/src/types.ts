@@ -128,6 +128,8 @@ export interface TaskResult {
   learned_preferences: Array<unknown>;
   memory_status: string;
   source_kind: "offline_snapshot" | string;
+  search_attempted?: boolean;
+  search_candidate_count?: number;
   artifacts: Artifact[];
 }
 

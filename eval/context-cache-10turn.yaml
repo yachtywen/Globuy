@@ -1,0 +1,39 @@
+schema_version: "1.0"
+
+cases:
+  - id: live-context-cache-10turn
+    description: 同一真实购物会话连续十轮的上下文 Token 与 Kimi Prompt Cache 验收
+    suite: live
+    requirements:
+      model: true
+      item_index: true
+      category_index: true
+      external_tools: true
+    timeout_seconds: 600
+    turns:
+      - query: 帮我跨淘宝、京东和抖音找 800 元以内的头戴式降噪耳机，最多推荐三款。
+      - query: 我戴眼镜，每次连续使用两小时，舒适度比音质更重要，请基于上一轮继续分析。
+      - query: 主要在地铁通勤使用，降噪效果优先于音质，继续沿用前面的候选。
+      - query: 我的手机是安卓，希望支持多点连接，请继续结合前面的需求判断。
+      - query: 排除明显偏重或者夹头感比较强的型号，不要忘记之前的预算和使用场景。
+      - query: 预算可以放宽到 1000 元，但保留前面所有其他要求。
+      - query: 比较一下目前前两名的主要差异，引用已经得到的商品事实。
+      - query: 如果每天使用四小时，你会怎么重新排序？仍然只使用已有可靠候选。
+      - query: 总结一下我到目前为止提出的硬约束和偏好，不要新增条件。
+      - query: 基于前九轮信息给出最终清单，最多三项，保留价格、平台和来源链接。
+    rubric:
+      p0:
+        - id: cache10_terminal_once
+          description: 每一轮真实任务都形成唯一终态事件
+          judge: deterministic
+          assertion: {type: terminal_event_once}
+      p1:
+        - id: cache10_final_nonempty
+          description: 第十轮形成非空最终回答
+          judge: deterministic
+          assertion: {type: final_text_nonempty}
+      p2:
+        - id: cache10_no_internal_leak
+          description: 最终回答不暴露内部递归或重试实现
+          judge: deterministic
+          assertion: {type: forbids_text, value: [recursion, 递归上限, 我再重试一次]}

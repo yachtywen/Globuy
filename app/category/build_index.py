@@ -15,7 +15,7 @@ from app.agent.llm import get_chat_model
 from app.category.cards import build_category_card_drafts
 from app.category.extractor import (
     CardExtractor,
-    DeepSeekCategoryExtractor,
+    CompatibleCategoryExtractor,
     PassthroughCardExtractor,
 )
 from app.category.normalization import load_category_aliases, normalize_dataset
@@ -281,7 +281,7 @@ async def build_default_category_index(
     extractor: CardExtractor = (
         PassthroughCardExtractor()
         if deterministic
-        else DeepSeekCategoryExtractor(get_chat_model())
+        else CompatibleCategoryExtractor(get_chat_model())
     )
     return await build_category_artifacts(
         settings=settings,

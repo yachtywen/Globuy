@@ -124,6 +124,8 @@ def test_thread_task_status_and_replayable_websocket(client: TestClient) -> None
         client, thread["thread_id"], task["run_id"], {"succeeded"}
     )
     assert status["result"]["source_kind"] == "offline_snapshot"
+    assert status["result"]["search_attempted"] is False
+    assert status["result"]["search_candidate_count"] == 0
     assert "测试 WebSocket" in status["result"]["final_text"]
 
     received = []
