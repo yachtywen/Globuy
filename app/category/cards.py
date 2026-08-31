@@ -30,9 +30,9 @@ ATTRIBUTE_RULES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
 
 
 def _stable_card_id(category: str, card_type: str, partition: str, snapshot: str) -> str:
-    digest = hashlib.sha256(
-        f"{category}|{card_type}|{partition}|{snapshot}".encode()
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(f"{category}|{card_type}|{partition}|{snapshot}".encode()).hexdigest()[
+        :16
+    ]
     return f"{category}-{card_type}-{partition}-{digest}"
 
 
@@ -49,9 +49,7 @@ def _facts_text(item: NormalizedEvidence) -> str:
     )
 
 
-def _price_card(
-    items: list[NormalizedEvidence], *, min_confidence: float
-) -> CategoryCard | None:
+def _price_card(items: list[NormalizedEvidence], *, min_confidence: float) -> CategoryCard | None:
     prices = sorted(item.price_cny for item in items if item.price_cny > 0)
     confidence = len(prices) / len(items) if items else 0.0
     if len(prices) < 3 or confidence < min_confidence:
@@ -165,9 +163,7 @@ def _attribute_cards(
         if counts["unknown"]:
             ordered_labels.append("unknown")
         summary_parts = [
-            f"{label} {counts[label] / len(items):.1%}"
-            for label in ordered_labels
-            if counts[label]
+            f"{label} {counts[label] / len(items):.1%}" for label in ordered_labels if counts[label]
         ]
         evidence_parts = [f"{label}={counts[label]}" for label in ordered_labels if counts[label]]
         cards.append(
@@ -178,8 +174,7 @@ def _attribute_cards(
                 summary=f"{dimension}: " + " / ".join(summary_parts),
                 raw_evidence=[
                     _compact(
-                        f"样本={len(items)}；可识别={identified}；"
-                        + "；".join(evidence_parts)
+                        f"样本={len(items)}；可识别={identified}；" + "；".join(evidence_parts)
                     )
                 ],
                 last_updated=items[0].observed_at,

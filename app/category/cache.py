@@ -30,9 +30,7 @@ class RedisCategoryCache:
 
     async def get(self, key: str) -> CategoryInsightOutput | None:
         try:
-            payload = await asyncio.wait_for(
-                self.client.get(key), timeout=self.timeout_seconds
-            )
+            payload = await asyncio.wait_for(self.client.get(key), timeout=self.timeout_seconds)
             if not payload:
                 return None
             output = CategoryInsightOutput.model_validate_json(payload)

@@ -180,7 +180,6 @@ def test_authenticated_user_data_flow(tmp_path) -> None:
     asyncio.run(import_snapshot(dataset, database))
     asyncio.run(database.close())
 
-
     settings = Settings(
         database_url=url,
         output_dir=tmp_path / "output",

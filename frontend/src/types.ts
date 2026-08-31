@@ -44,6 +44,8 @@ export type ProductPick = Record<string, unknown> & {
   currency: string;
   rating: number | null;
   sales: number | null;
+  product_group_id?: string | null;
+  alternative_offers?: ProductPick[];
 };
 
 export interface WishlistItem {
@@ -130,6 +132,10 @@ export interface TaskResult {
   source_kind: "offline_snapshot" | string;
   search_attempted?: boolean;
   search_candidate_count?: number;
+  ranking_method?: "llm" | "deterministic_fallback" | null;
+  ranking_status?: "ok" | "degraded" | "insufficient_data" | null;
+  ranking_version?: string | null;
+  ranking_fallback_reason?: string | null;
   artifacts: Artifact[];
 }
 
@@ -219,7 +225,7 @@ export interface ForkTrace {
   timestamp: string;
 }
 
-export type CatalogStage = "intent" | "cache" | "fetch" | "normalize" | "persist" | "index" | "retrieve";
+export type CatalogStage = "intent" | "cache" | "fetch" | "normalize" | "persist" | "index" | "retrieve" | "filter" | "group" | "rerank";
 
 export interface CatalogPlatformProgress {
   status: string;

@@ -1,17 +1,34 @@
 # globuy 向量与检索基础设施固定选型
 
-> 决策状态：用户已于 2026-07-19 确认无训练方案、2026-07-20 授权实施，并于 2026-08-20 授权长期记忆改用 PostgreSQL/pgvector；ItemSearch 的 OpenSearch 契约不变。
+> 决策状态：用户已于 2026-07-19 确认无训练方案、2026-07-20 授权实施、2026-08-20 授权长期记忆改用 PostgreSQL/pgvector，并于 2026-08-27 授权增加直搜 + LLM 精排主链；OpenSearch Hybrid 完整保留为基线和回退策略。
 > 本文记录当前有效契约；完成程度与实测结果以 `docs/project-status.md` 为准。
 
 ## 1. 当前项目边界
 
 - 当前项目不训练或微调 Query/User/Item 编码模型。
 - 不建设依赖人工评分标签、负样本、点击反馈或学习排序的训练闭环。
-- ItemSearch 使用现成冻结模型做推理，检索质量依靠全文召回、通用语义召回、硬过滤和确定性
-  规则，不把手写分数伪装成训练效果。
+- `hybrid` ItemSearch 使用冻结模型做推理；`direct_llm` 首屏链不等待 Embedding/OpenSearch，依靠
+  Provider 顺位、硬过滤、保守同款聚合和一次受约束 LLM 精排。两条链都不使用手写综合分。
 - 原“三塔 + Faiss ItemSearch + 学习权重”是已取消的历史目标，不再指导当前实现。
 
 ## 2. 当前有效架构
+
+在线策略由 `GLOBUY_ITEM_SEARCH_STRATEGY=hybrid|direct_llm|progressive` 控制。`progressive`
+按用户 ID（缺失时 thread ID）的稳定 SHA-256 桶和 0～100 比例选链，不在普通请求中双跑 Provider。
+
+```text
+direct_llm:
+ShoppingIntent -> 三平台并行 ItemSearch -> PostgreSQL 新鲜 Candidate（每平台 <=15）
+  -> 硬过滤 -> 同平台去重 -> 强证据跨平台 ProductGroup -> 最多 36 组
+  -> 一次 LLM 严格 JSON 精排 -> 确定性代表 Offer -> Top 3 + alternative_offers
+
+后台：Product/Offer -> Transactional Outbox -> Embedding/OpenSearch 投影
+```
+
+LLM 只能引用输入的 `product_group_id` 和已有证据字段；重复/未知 ID、非法结构、超时或未配置
+均不重试，并按 `source_rank/retrieval_rank -> 标准化评分 -> 价格 -> 稳定输入顺序` 降级。
+自动同款合并只接受已验证 GTIN 完全一致，或规范化品牌、型号和完整关键变体完全一致；标题/图片/LLM
+相似只产生疑似重复提示。
 
 ```text
 离线商品快照（淘宝 / 京东 / 抖音）
@@ -59,7 +76,7 @@ semantic 0.9/0.1；纯语义 query 可绕过融合直接走 KNN。这些权重�
 
 | 范围 | 当前固定选择 | 不作为当前默认选择 | 原因 |
 |---|---|---|---|
-| ItemSearch 存储与检索 | OpenSearch Hybrid Query | Faiss、Milvus、Qdrant、Redis Stack | 支持 BM25、向量、平台召回域过滤和融合后结构化过滤 |
+| ItemSearch 在线策略 | `direct_llm` 可灰度；OpenSearch Hybrid 保留基线 | Faiss、静默自动切链 | 直搜降低首屏等待，Hybrid 支持冻结查询集对照和人工回退 |
 | Dense Embedding | 冻结 `BAAI/bge-m3`，1024 维，归一化 | 自训练三塔、在线付费 Embedding | 无训练边界下仍保留通用语义召回，且可本地推理 |
 | 全文检索 | `title` 的 BM25，内置 `cjk` analyzer | 仅向量检索 | 型号、品牌和关键词精确命中更可靠 |
 | 向量检索 | Lucene HNSW + `cosinesimil` | L2 | 与归一化文本向量匹配 |
@@ -122,13 +139,14 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
 - 每个子 Agent 与父 Agent 共享同一模型、完整业务工具集和完全相同的 System Prompt，但拥有
   独立 thread/checkpointer。
 - fork 深度首版限制为 1；子 Agent 不得继续 dispatch。
-- 回流主线程时每路 ItemSearch 候选最多保留 10 条，避免三个平台的完整工具消息挤占上下文。
-- ItemPicker 只按 `retrieval_rank` 升序、评分降序、价格升序做确定性选择；缺少 rank 时保持输入
-  顺序，不计算任意业务 score。
+- `direct_llm` 回流主线程时每路最多 15 条，三路按平台轮转和来源顺位截到 36 个商品组。
+- 三个子 Agent 只调用 ItemSearch；父 Agent 汇总后只调用一次 ItemPicker。ItemPicker 排商品组，
+  Top 3 不会被强证据同款重复占位；组内按价格、来源顺位和稳定输入顺序选择展示 Offer。
 
 ## 6. 故障与真实性边界
 
-- OpenSearch、模型缓存或商品索引未准备好时，ItemSearch 返回 `not_configured`。
+- `hybrid` 所需 OpenSearch、模型缓存或商品索引未准备好时返回 `not_configured`；`direct_llm`
+  在 Provider 未配置且 PostgreSQL 没有新鲜范围缓存时同样返回 `not_configured`，不得静默切 Hybrid。
 - 已配置资源上的运行时异常返回 `error` 与简短信息。
 - 禁止生成占位商品、伪造实时价格或在失败时静默改用另一向量空间。
 - 当前 1000 条商品来自离线快照，ItemSearch 返回的是快照数据，不代表实时库存、实时价格或

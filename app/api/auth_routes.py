@@ -58,9 +58,7 @@ async def register(
     payload: RegisterRequest,
     request: Request,
     response: Response,
-    idempotency_key: Annotated[
-        str, Header(alias="Idempotency-Key", min_length=8, max_length=128)
-    ],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=128)],
 ) -> dict:
     issued = await _service(request).register(
         payload.email, payload.password, payload.display_name, idempotency_key

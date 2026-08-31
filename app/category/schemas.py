@@ -8,9 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 type CardType = Literal["bestseller", "attribute", "price_range"]
-type InsightStatus = Literal[
-    "ok", "partial", "insufficient_data", "not_configured", "error"
-]
+type InsightStatus = Literal["ok", "partial", "insufficient_data", "not_configured", "error"]
 EvidenceLine = Annotated[str, Field(min_length=1, max_length=80)]
 
 

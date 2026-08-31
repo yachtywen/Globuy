@@ -8,6 +8,7 @@ from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.auth.service import utc_naive
@@ -18,6 +19,8 @@ from app.database.models import (
     OfferObservation,
     OutboxEvent,
     Product,
+    ProductGroup,
+    ProductGroupMember,
     ProviderRequestLedger,
     SourceSnapshot,
 )
@@ -26,7 +29,9 @@ from app.database.models import (
 )
 from app.database.session import Database
 from app.products.catalog.scope import CatalogScope, ProviderRequestFingerprint
+from app.products.grouping import IDENTITY_VERSION, CandidateGroup, evidence_completeness
 from app.products.identity import offer_id, product_id, stable_id
+from app.search.schemas import Candidate, SearchFilters
 
 
 def _unique_page_items(items: list[dict]) -> list[dict]:
@@ -327,10 +332,18 @@ class CatalogRepository:
                             offer_id=oid,
                             last_seen_at=now,
                             expires_at=expires_at,
+                            source_rank=item.get("source_rank"),
+                            source_request_key=fingerprint.request_key,
                         )
                     )
                 else:
                     member.last_seen_at, member.expires_at = now, expires_at
+                    incoming_rank = item.get("source_rank")
+                    if incoming_rank is not None and (
+                        member.source_rank is None or incoming_rank < member.source_rank
+                    ):
+                        member.source_rank = incoming_rank
+                        member.source_request_key = fingerprint.request_key
                 session.add(
                     OutboxEvent(
                         event_id=uuid4().hex,
@@ -350,3 +363,141 @@ class CatalogRepository:
             scope_row.newest_captured_at = now
             scope_row.updated_at = now
         return {"accepted": len(unique_offer_ids), "offer_ids": unique_offer_ids}
+
+    async def load_scope_candidates(
+        self,
+        scope: CatalogScope,
+        *,
+        filters: SearchFilters | None = None,
+        limit: int = 15,
+    ) -> list[Candidate]:
+        """Read fresh normalized offers without waiting for an OpenSearch projection."""
+
+        active_filters = filters or SearchFilters()
+        now = utc_naive()
+        statement = (
+            select(Product, Offer, CatalogScopeOffer)
+            .join(Offer, Offer.product_id == Product.product_id)
+            .join(CatalogScopeOffer, CatalogScopeOffer.offer_id == Offer.offer_id)
+            .where(
+                CatalogScopeOffer.scope_id == scope.scope_id,
+                CatalogScopeOffer.expires_at > now,
+                Product.status == "active",
+                Offer.is_active.is_(True),
+                Offer.current_price.is_not(None),
+            )
+            .order_by(
+                CatalogScopeOffer.source_rank.asc().nullslast(),
+                Offer.last_seen_at.desc(),
+                Offer.offer_id,
+            )
+            .limit(max(limit * 4, limit))
+        )
+        async with self.database.sessions() as session:
+            rows = list((await session.execute(statement)).all())
+
+        candidates: list[Candidate] = []
+        for product, offer, member in rows:
+            price = float(offer.current_price)
+            if active_filters.min_price is not None and price < active_filters.min_price:
+                continue
+            if active_filters.max_price is not None and price > active_filters.max_price:
+                continue
+            if (
+                active_filters.currency
+                and offer.currency.upper() != active_filters.currency.upper()
+            ):
+                continue
+            rating = float(offer.rating_value) if offer.rating_value is not None else None
+            if active_filters.min_rating is not None and (
+                rating is None or rating < active_filters.min_rating
+            ):
+                continue
+            if active_filters.min_sales is not None and (
+                offer.sales_value is None or offer.sales_value < active_filters.min_sales
+            ):
+                continue
+            attributes = product.attributes_json or {}
+            if any(
+                key not in attributes
+                or str(attributes[key]).strip().casefold() != str(expected).strip().casefold()
+                for key, expected in (active_filters.attribute_equals or {}).items()
+            ):
+                continue
+            candidate = Candidate(
+                item_id=f"{offer.platform}:{offer.source_item_id}",
+                product_id=product.product_id,
+                offer_id=offer.offer_id,
+                platform=offer.platform,
+                title=product.title,
+                price=price,
+                currency=offer.currency,
+                rating=rating,
+                sales=offer.sales_value,
+                image_url=offer.image_url,
+                attributes=attributes,
+                product_url=offer.product_url,
+                source_rank=member.source_rank,
+                captured_at=offer.last_seen_at.isoformat() + "Z",
+            )
+            candidates.append(
+                candidate.model_copy(
+                    update={"evidence_completeness": evidence_completeness(candidate)}
+                )
+            )
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    async def persist_product_groups(self, groups: list[CandidateGroup]) -> int:
+        """Persist derived identity groups without changing Product/Offer ownership."""
+
+        now = utc_naive()
+        memberships = 0
+        async with self.database.sessions.begin() as session:
+            for group in groups:
+                evidence = group.identity_evidence
+                identity_hash = hashlib.sha256(
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                row = await session.get(ProductGroup, group.product_group_id)
+                if row is None:
+                    row = ProductGroup(
+                        product_group_id=group.product_group_id,
+                        identity_key_hash=identity_hash,
+                        identity_version=IDENTITY_VERSION,
+                        brand_normalized=evidence.get("brand"),
+                        model_normalized=evidence.get("model"),
+                        variant_json=evidence.get("variants"),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(row)
+                    await session.flush()
+                else:
+                    row.updated_at = now
+                for offer in group.offers:
+                    if not offer.product_id or await session.get(Product, offer.product_id) is None:
+                        continue
+                    member = await session.get(ProductGroupMember, offer.product_id)
+                    payload = {
+                        "match_method": group.match_method,
+                        "identity_version": IDENTITY_VERSION,
+                        "evidence": evidence,
+                    }
+                    if member is None:
+                        session.add(
+                            ProductGroupMember(
+                                product_id=offer.product_id,
+                                product_group_id=group.product_group_id,
+                                match_method=group.match_method,
+                                evidence_json=payload,
+                                created_at=now,
+                            )
+                        )
+                    else:
+                        member.product_group_id = group.product_group_id
+                        member.match_method = group.match_method
+                        member.evidence_json = payload
+                    memberships += 1
+        return memberships

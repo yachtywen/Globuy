@@ -132,9 +132,7 @@ class PriceRefreshWorker:
                         snapshot_id = stable_id(
                             "snapshot", f"price:{refresh_run_id}:{offer.offer_id}"
                         )
-                        observation_id = stable_id(
-                            "observation", f"{snapshot_id}:{offer.offer_id}"
-                        )
+                        observation_id = stable_id("observation", f"{snapshot_id}:{offer.offer_id}")
                         session.add(
                             SourceSnapshot(
                                 snapshot_id=snapshot_id,
@@ -254,9 +252,7 @@ class PriceRefreshWorker:
             if observation is None:
                 return None
             current_offer = await session.get(Offer, offer_id, with_for_update=True)
-            current_item = await session.get(
-                WishlistItem, wishlist_item_id, with_for_update=True
-            )
+            current_item = await session.get(WishlistItem, wishlist_item_id, with_for_update=True)
             if current_offer is None or current_item is None:
                 return None
             current_offer.current_price = observation.price
@@ -267,9 +263,7 @@ class PriceRefreshWorker:
             current_item.latest_observation_id = observation.observation_id
             current_item.failure_count = 0
             current_item.last_error_code = None
-            current_item.next_check_at = next_daily_refresh(
-                now, local_hour=self.refresh_local_hour
-            )
+            current_item.next_check_at = next_daily_refresh(now, local_hour=self.refresh_local_hour)
             session.add(self._product_outbox(current_offer, observation.observation_id))
             return observation.observation_id
 

@@ -24,6 +24,4 @@ def test_sanitize_shopping_markdown_removes_shipping_and_snapshot_disclosures() 
 
 
 def test_visible_unresolved_keeps_non_shipping_questions() -> None:
-    assert visible_unresolved(["运费未知", "颜色待确认", "包邮待核验"]) == [
-        "颜色待确认"
-    ]
+    assert visible_unresolved(["运费未知", "颜色待确认", "包邮待核验"]) == ["颜色待确认"]

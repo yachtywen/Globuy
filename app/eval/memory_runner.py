@@ -364,8 +364,7 @@ def _assertions(assertions: list[MemoryAssertion], state: dict[str, Any]) -> lis
             ok = state[assertion.left]["reinforcement_count"] == assertion.value
         elif assertion.type == "supersedes":
             ok = (
-                state[assertion.left]["supersedes_memory_id"]
-                == state[assertion.right]["memory_id"]
+                state[assertion.left]["supersedes_memory_id"] == state[assertion.right]["memory_id"]
             )
         elif assertion.type == "recall_contains":
             ok = assertion.value in state["recalls"].get(assertion.left, [])

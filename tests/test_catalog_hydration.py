@@ -98,11 +98,14 @@ def test_request_fingerprint_normalizes_query_and_changes_with_page() -> None:
 
     assert first.request_key == equivalent.request_key
     assert first.request_key != next_page.request_key
-    assert first.request_key != ProviderRequestFingerprint(
-        **base,
-        normalized_query="noise cancelling",
-        request_version="provider-request-v2",
-    ).request_key
+    assert (
+        first.request_key
+        != ProviderRequestFingerprint(
+            **base,
+            normalized_query="noise cancelling",
+            request_version="provider-request-v2",
+        ).request_key
+    )
 
 
 def test_provider_page_items_are_deduplicated_before_database_inserts() -> None:
@@ -128,9 +131,7 @@ def test_stop_policy_hard_cap_and_soft_deadline() -> None:
     hard_cap.observe("taobao", 1, success=True, has_more=True)
     assert hard_cap.reason() == StopReason.HARD_CAP_REACHED
 
-    partial = CatalogStopPolicy(
-        ("taobao", "jingdong"), counts={"taobao": 30, "jingdong": 30}
-    )
+    partial = CatalogStopPolicy(("taobao", "jingdong"), counts={"taobao": 30, "jingdong": 30})
     assert partial.reason(soft_deadline=True) == StopReason.MINIMUM_AT_DEADLINE
 
 
@@ -184,8 +185,7 @@ def test_normalizer_rejects_incomplete_rows_and_converts_douyin_cents() -> None:
                 "price": 159.0,
                 "sales": 5000,
                 "product_url": (
-                    "https://haohuo.jinritemai.com/ecommerce/trade/detail/"
-                    "index.html?id=30001"
+                    "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=30001"
                 ),
             },
         ),

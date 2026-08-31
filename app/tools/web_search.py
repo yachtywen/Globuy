@@ -199,9 +199,7 @@ class IqsSearchService:
                 search_time_ms / 1_000 if search_time_ms is not None else None
             ),
             "request_id": (
-                payload.get("requestId")
-                if isinstance(payload.get("requestId"), str)
-                else None
+                payload.get("requestId") if isinstance(payload.get("requestId"), str) else None
             ),
             "credits_used": _credit_total(payload.get("costCredits")),
             "source_kind": "web",

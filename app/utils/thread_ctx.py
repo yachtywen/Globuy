@@ -11,9 +11,7 @@ user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 session_dir_var: ContextVar[Path | None] = ContextVar("session_dir", default=None)
 fork_depth_var: ContextVar[int] = ContextVar("fork_depth", default=0)
 parent_thread_id_var: ContextVar[str | None] = ContextVar("parent_thread_id", default=None)
-fork_target_platform_var: ContextVar[str | None] = ContextVar(
-    "fork_target_platform", default=None
-)
+fork_target_platform_var: ContextVar[str | None] = ContextVar("fork_target_platform", default=None)
 
 
 ContextTokens = tuple[Token, Token, Token, Token, Token, Token, Token]

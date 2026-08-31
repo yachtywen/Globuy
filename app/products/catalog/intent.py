@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.search.schemas import Platform, SearchFilters
+from app.search.schemas import Platform, Scalar, SearchFilters
 
 
 class ShoppingIntent(BaseModel):
@@ -19,6 +19,10 @@ class ShoppingIntent(BaseModel):
     query_variants: list[str] = Field(default_factory=list)
     platforms: list[Platform] = Field(min_length=1)
     filters: SearchFilters = Field(default_factory=SearchFilters)
+    blocked_platforms: list[Platform] = Field(default_factory=list)
+    blocked_item_ids: list[str] = Field(default_factory=list, max_length=100)
+    required_attributes: dict[str, Scalar] = Field(default_factory=dict)
+    excluded_attributes: dict[str, list[Scalar]] = Field(default_factory=dict)
     hard_constraints: list[str] = Field(default_factory=list, max_length=20)
     soft_preferences: list[str] = Field(default_factory=list, max_length=20)
     needs_clarification: bool = False
@@ -45,7 +49,7 @@ class ShoppingIntent(BaseModel):
             raise ValueError("query_variants 最多允许 2 个")
         return normalized
 
-    @field_validator("platforms")
+    @field_validator("platforms", "blocked_platforms")
     @classmethod
     def unique_platforms(cls, values: list[Platform]) -> list[Platform]:
         return list(dict.fromkeys(values))

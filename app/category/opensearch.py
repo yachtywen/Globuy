@@ -54,9 +54,7 @@ def category_index_body(
 ) -> dict[str, Any]:
     category_meta = category_embedding_metadata(metadata)
     return {
-        "settings": {
-            "index": {"knn": True, "number_of_shards": 1, "number_of_replicas": 0}
-        },
+        "settings": {"index": {"knn": True, "number_of_shards": 1, "number_of_replicas": 0}},
         "mappings": {
             "_meta": {
                 "embedding_model": category_meta.model_id,

@@ -78,6 +78,4 @@ def test_enrich_task_result_repairs_legacy_picks_without_mutating_input(
     assert original["picks"][0]["image_url"] is None
     assert enriched is not None
     assert enriched["picks"][0]["image_url"].endswith("/q45.jpg")
-    assert enriched["picks"][0]["offer_id"] == offer_id(
-        "jingdong:10184615087415"
-    )
+    assert enriched["picks"][0]["offer_id"] == offer_id("jingdong:10184615087415")

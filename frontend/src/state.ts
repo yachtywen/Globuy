@@ -203,14 +203,26 @@ function eventState(state: WorkbenchState, event: MonitorEvent): WorkbenchState 
     "shopping_intent_resolved", "catalog_cache_checked", "catalog_fetch_started",
     "catalog_fetch_progress", "catalog_fetch_finished", "catalog_normalization_progress",
     "catalog_persistence_progress", "catalog_index_progress", "hybrid_retrieval_progress",
+    "candidate_filter_completed", "candidate_grouping_completed", "llm_rerank_started",
+    "llm_rerank_completed", "llm_rerank_degraded",
   ].includes(data.name)) {
     const stageMap: Record<string, CatalogProgress["stage"]> = {
       shopping_intent_resolved: "intent", catalog_cache_checked: "cache",
       catalog_fetch_started: "fetch", catalog_fetch_progress: "fetch", catalog_fetch_finished: "fetch",
       catalog_normalization_progress: "normalize", catalog_persistence_progress: "persist",
       catalog_index_progress: "index", hybrid_retrieval_progress: "retrieve",
+      candidate_filter_completed: "filter", candidate_grouping_completed: "group",
+      llm_rerank_started: "rerank", llm_rerank_completed: "rerank",
+      llm_rerank_degraded: "rerank",
     };
     const prior = state.catalogProgress;
+    const safeStageMessages: Record<string, string> = {
+      candidate_filter_completed: "已完成硬约束筛选",
+      candidate_grouping_completed: "已完成跨平台同款整理",
+      llm_rerank_started: "正在综合比较候选商品",
+      llm_rerank_completed: "已完成候选商品精排",
+      llm_rerank_degraded: "精排不可用，已使用稳定排序规则",
+    };
     const platform = typeof data.platform === "string" ? data.platform : null;
     const platforms = { ...(prior?.platforms ?? {}) };
     if (platform) platforms[platform] = {
@@ -221,7 +233,7 @@ function eventState(state: WorkbenchState, event: MonitorEvent): WorkbenchState 
       ...state, lastSequence, initializationMessage: null,
       catalogProgress: {
         stage: stageMap[data.name],
-        message: event.message || String(data.message || prior?.message || "正在更新商品目录"),
+        message: event.message || String(data.message || safeStageMessages[data.name] || prior?.message || "正在更新商品目录"),
         total: Number(data.deduplicated_total ?? data.total ?? data.fresh_candidates ?? prior?.total ?? 0),
         target: Number(data.target ?? prior?.target ?? 100),
         status: String(data.status ?? prior?.status ?? "running"),

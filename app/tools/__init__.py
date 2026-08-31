@@ -7,7 +7,7 @@ from langchain_core.tools import BaseTool
 
 from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
-from app.tools.item_picker import item_picker
+from app.tools.item_picker import build_item_picker_tool
 from app.tools.item_search import item_search
 from app.tools.planner import planner
 from app.tools.price_compare import price_compare
@@ -58,7 +58,7 @@ def build_core_tools(model: BaseChatModel | None = None) -> tuple[BaseTool, ...]
         web_search,
         category_insight,
         item_search,
-        item_picker,
+        build_item_picker_tool(model),
         price_compare,
         build_shopping_summary_tool(model),
     )

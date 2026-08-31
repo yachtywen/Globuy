@@ -47,7 +47,10 @@ class Candidate(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     product_url: str | None = None
     shipping_fee: float | None = Field(default=None, ge=0)
-    retrieval_rank: int = Field(ge=1)
+    retrieval_rank: int | None = Field(default=None, ge=1)
+    source_rank: int | None = Field(default=None, ge=1)
+    captured_at: str | None = None
+    evidence_completeness: float = Field(default=0.0, ge=0, le=1)
 
 
 class ItemSearchOutput(BaseModel):
@@ -63,3 +66,4 @@ class ItemSearchOutput(BaseModel):
     catalog_candidate_count: int = Field(default=0, ge=0)
     captured_at: str | None = None
     provider_status: str | None = None
+    search_strategy: Literal["hybrid", "direct_llm"] = "hybrid"

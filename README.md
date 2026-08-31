@@ -50,8 +50,8 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 | Harness 防护 | 决策预算、循环指纹检测、主循环递归上限、fork 90 秒超时、候选截断与确定性终结，避免无效自旋和上下文膨胀 |
 | Cache Breakpoint | 在 Observe 后压缩旧历史，保留最近 3 个完整工具调用组和合法的 tool-call/tool-result 配对 |
 | 长期记忆 | PostgreSQL 保存用户确认的偏好事实和版本；pgvector + 关键词 RRF 检索，支持候选确认和软衰减 |
-| 商品检索 | 结构化意图、目录覆盖检查、可选 Provider 补库、PostgreSQL Product/Offer、Outbox 投影和 OpenSearch Hybrid Search |
-| 混合召回 | `BM25(title) + BAAI/bge-m3 Dense Vector + Lucene HNSW/COSINE + 无权重 RRF`；平台前置过滤，价格/评分/销量/属性后置过滤 |
+| 商品检索 | `hybrid / direct_llm / progressive` 三策略；直搜链并行读取 Provider/PostgreSQL 候选后硬过滤、保守同款聚合并执行一次 LLM 全局精排 |
+| 混合召回基线 | `BM25(title) + BAAI/bge-m3 Dense Vector + Lucene HNSW/COSINE + 无权重 RRF` 完整保留；Embedding/OpenSearch 投影继续由 Outbox 异步维护 |
 | 实时任务 | FastAPI 返回 HTTP `202`，后台执行 Agent；WebSocket 按 thread/run 推送带 sequence 的事件，支持 replay、心跳、多订阅、取消与终态恢复 |
 | 用户系统 | Argon2id 密码哈希、服务端可撤销会话、HttpOnly Cookie、CSRF、幂等写入和资源归属校验 |
 | 产品闭环 | React 工作台、会话归档、商品卡片、比较、来源链接、心愿库、价格历史、长期记忆管理和响应式布局 |
@@ -68,7 +68,7 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 
 ### 2. 可收敛的生产型 AgentLoop
 
-LLM 决策之外还存在确定性控制层：阶段工具白名单阻止跨阶段调用；滑动窗口对工具名、参数和结果摘要建立循环指纹；达到决策预算或发现重复无进展时，根 Agent 会基于已经验证的检索结果调用确定性 Picker 和 Summary 收尾。fork 深度固定为 1，单路候选回流上限为 10 条。
+LLM 决策之外还存在确定性控制层：阶段工具白名单阻止跨阶段调用；滑动窗口对工具名、参数和结果摘要建立循环指纹；达到决策预算或发现重复无进展时，根 Agent 会汇总三路候选并只调用一次 ItemPicker 和 Summary 收尾。fork 深度固定为 1，直搜模式每个平台最多保留 15 条候选。
 
 ### 3. Cache Breakpoint 上下文压缩
 
@@ -84,7 +84,7 @@ PostgreSQL 是用户、会话、任务、Product、Offer、价格观测、心愿
 
 ### 6. 不以手写综合分伪装模型效果
 
-商品搜索固定采用 BM25 与冻结 BGE-M3 的无权重 RRF 名次融合；ItemPicker 只依据检索排名、评分、价格和输入顺序执行确定性选择。项目当前不训练或微调 Query/User/Item 编码器，也不建设 SFT、Agentic RL 或依赖人工标签的学习排序闭环。
+直搜链不计算手写综合分：ItemPicker 先以代码重验硬约束，按 GTIN 或品牌、型号及完整关键变体的强证据聚合同款，再让 LLM 只返回已有商品组 ID 的顺序和枚举判断。模型不可用、超时或输出非法时不重试，按来源顺位、可比较评分、价格和稳定输入顺序降级。项目仍不训练或微调 Query/User/Item 编码器，也不建设依赖点击或人工标签的学习排序闭环。
 
 ## 系统架构
 
@@ -124,9 +124,10 @@ flowchart LR
 2. Agent 从 PostgreSQL/pgvector 读取当前用户已确认的相关偏好，拼装本轮上下文。
 3. Think/Planner 提取品类、预算、平台和硬约束；多平台任务可派生同质 fork。
 4. ItemSearch 检查目录覆盖；本地目录不足且 Provider 明确启用时，受控补充候选并写入 PostgreSQL。
-5. Product Outbox 将活动 Offer 批量投影到 OpenSearch，执行 BM25 + Dense Vector + RRF 检索。
-6. Observe/Reflect 检查工具结果、循环状态和约束满足情况，必要时继续检索或确定性收尾。
-7. ShoppingSummary 输出带价格、平台、理由和来源链接的清单；前端通过 WebSocket 增量呈现全过程。
+5. `direct_llm` 下三个 fork 只返回各平台最多 15 条结构化候选；父 Agent 汇总后执行硬过滤、同平台去重和保守跨平台同款聚合，最多送入 36 个商品组。
+6. ItemPicker 最多调用一次 LLM 全局精排，并确定性选择组内最低已知商品价 Offer；同款其他平台报价保留在结果中。失败时返回确定性降级结果。
+7. Product Outbox 在后台继续更新 Embedding/OpenSearch；`hybrid` 策略仍执行原 BM25 + Dense Vector + RRF 基线。
+8. ShoppingSummary 输出带价格、平台、理由、跨平台报价和来源链接的清单；前端通过 WebSocket 增量呈现全过程。
 
 ## 技术栈
 
@@ -312,7 +313,7 @@ globuy/
 
 - 商品与价格来自已授权 Provider 或离线快照；失败时不生成占位数据。
 - 默认 `GLOBUY_PRODUCT_PROVIDER=none`，不会静默产生付费调用。
-- ItemSearch 固定使用 OpenSearch Hybrid；Faiss 不作为故障时的静默后备。
+- ItemSearch 默认仍为 `hybrid` 安全基线，可显式切换 `direct_llm`，或用 `progressive` 按稳定用户哈希灰度；任何策略都不静默切换到 Faiss 或伪造候选。
 - 长期记忆只写入用户明确确认的内容，不把一次浏览自动升级为永久偏好。
 - 当前不包含 SFT、Agentic RL、三塔训练或学习排序；这些内容不得作为已实现成果描述。
 - 首版 RunRegistry/EventBroker 是单进程边界；启用多 worker 前需要迁移到共享任务和事件基础设施。

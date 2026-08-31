@@ -75,6 +75,10 @@ class ShoppingSummaryOutput(BaseModel):
     picks: list[PickedItem] = Field(default_factory=list, max_length=3)
     unresolved: list[str] = Field(default_factory=list)
     learned_preferences: list[PreferenceCandidate] = Field(default_factory=list)
+    ranking_method: Literal["llm", "deterministic_fallback"] | None = None
+    ranking_status: Literal["ok", "degraded", "insufficient_data"] | None = None
+    ranking_version: str | None = None
+    ranking_fallback_reason: str | None = None
     terminal: bool = False
     message: str | None = None
 
@@ -122,6 +126,10 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
         config: RunnableConfig,
         unresolved: list[str] | None = None,
         learned_preferences: list[PreferenceCandidate] | None = None,
+        ranking_method: Literal["llm", "deterministic_fallback"] | None = None,
+        ranking_status: Literal["ok", "degraded", "insufficient_data"] | None = None,
+        ranking_version: str | None = None,
+        ranking_fallback_reason: str | None = None,
     ) -> dict:
         """Generate the final Markdown from validated facts with exactly one LLM call."""
 
@@ -147,6 +155,12 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
             for item in pending
         ]
         visible_pending = visible_unresolved(unresolved)
+        ranking_metadata = {
+            "ranking_method": ranking_method,
+            "ranking_status": ranking_status,
+            "ranking_version": ranking_version,
+            "ranking_fallback_reason": ranking_fallback_reason,
+        }
 
         if not validated_picks:
             return ShoppingSummaryOutput(
@@ -154,6 +168,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 picks=[],
                 unresolved=visible_pending,
                 learned_preferences=pending,
+                **ranking_metadata,
                 message="至少需要一项有效的 ItemPicker 结果才能生成终结清单。",
             ).model_dump(mode="json")
         if any(not item.product_url for item in validated_picks):
@@ -162,6 +177,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 picks=validated_picks,
                 unresolved=visible_pending,
                 learned_preferences=pending,
+                **ranking_metadata,
                 message="精选商品缺少来源链接，不能生成可核验的终结清单。",
             ).model_dump(mode="json")
         if model is None:
@@ -170,6 +186,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 picks=validated_picks,
                 unresolved=visible_pending,
                 learned_preferences=pending,
+                **ranking_metadata,
                 message="ShoppingSummary 的共享模型未配置。",
             ).model_dump(mode="json")
 
@@ -219,6 +236,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 picks=validated_picks,
                 unresolved=visible_pending,
                 learned_preferences=pending,
+                **ranking_metadata,
                 message="ShoppingSummary 模型调用超时。",
             ).model_dump(mode="json")
         except (ValidationError, ValueError, TypeError) as exc:
@@ -227,6 +245,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 picks=validated_picks,
                 unresolved=visible_pending,
                 learned_preferences=pending,
+                **ranking_metadata,
                 message=f"ShoppingSummary 结构化输出无效：{exc}",
             ).model_dump(mode="json")
         except asyncio.CancelledError:
@@ -237,6 +256,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 picks=validated_picks,
                 unresolved=visible_pending,
                 learned_preferences=pending,
+                **ranking_metadata,
                 message=f"ShoppingSummary 模型调用失败：{exc}",
             ).model_dump(mode="json")
 
@@ -249,6 +269,7 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
             picks=validated_picks,
             unresolved=visible_pending,
             learned_preferences=pending,
+            **ranking_metadata,
             terminal=True,
         ).model_dump(mode="json")
 

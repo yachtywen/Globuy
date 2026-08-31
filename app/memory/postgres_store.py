@@ -332,9 +332,7 @@ class PostgresMemoryStore(BaseStore):
                     "keyword_hits": 0,
                     "fused_count": 0,
                     "final_count": len(ordered),
-                    "hard_rule_count": sum(
-                        item.category == "blacklist" for item in ordered
-                    ),
+                    "hard_rule_count": sum(item.category == "blacklist" for item in ordered),
                     "vector_metadata_mismatches": 0,
                 }
             )
@@ -363,9 +361,11 @@ class PostgresMemoryStore(BaseStore):
                 if not ranked_v2 or _injection_rank(entry, op.query) > 0
             ),
             key=(
-                lambda pair: (pair[2], pair[1], pair[0].updated_at)
-                if ranked_v2
-                else (pair[1], pair[0].updated_at)
+                lambda pair: (
+                    (pair[2], pair[1], pair[0].updated_at)
+                    if ranked_v2
+                    else (pair[1], pair[0].updated_at)
+                )
             ),
             reverse=True,
         )
@@ -388,11 +388,7 @@ class PostgresMemoryStore(BaseStore):
                 "final_count": len(selected),
                 "hard_rule_count": len(hard),
                 "vector_metadata_mismatches": metadata_mismatches,
-                **(
-                    {"degraded_reason": "vector_metadata_mismatch"}
-                    if metadata_mismatches
-                    else {}
-                ),
+                **({"degraded_reason": "vector_metadata_mismatch"} if metadata_mismatches else {}),
             }
         )
         return [self._search_item(entry, score) for entry, score in selected]

@@ -70,8 +70,7 @@ def _product_search_summary(state: dict[str, Any] | None) -> tuple[bool, int]:
     completed = [
         output
         for output in outputs
-        if output.get("status") in {"ok", "partial"}
-        and output.get("provider_status") != "blocked"
+        if output.get("status") in {"ok", "partial"} and output.get("provider_status") != "blocked"
     ]
     candidate_count = sum(
         len(output["candidates"])
@@ -710,6 +709,10 @@ class RunRegistry:
             "source_kind": "offline_snapshot",
             "search_attempted": search_attempted,
             "search_candidate_count": search_candidate_count,
+            "ranking_method": terminal.get("ranking_method"),
+            "ranking_status": terminal.get("ranking_status"),
+            "ranking_version": terminal.get("ranking_version"),
+            "ranking_fallback_reason": terminal.get("ranking_fallback_reason"),
             "artifacts": [],
         }
         result = enrich_task_result(result, self.product_image_catalog_path) or result

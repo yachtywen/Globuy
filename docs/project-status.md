@@ -1,4 +1,19 @@
 # globuy 项目状态
+## 2026-08-27：完成商品直搜、硬过滤、保守同款聚合与一次 LLM 全局精排
+
+- 新增 `hybrid / direct_llm / progressive` 三种商品检索策略和稳定用户哈希灰度。直搜模式的三个 fork 只执行单平台 ItemSearch，每平台最多读取 15 条带 `source_rank/captured_at/evidence_completeness` 的 PostgreSQL 新鲜候选；前台不等待 Embedding、Outbox 或 OpenSearch，Hybrid 链完整保留且仍是默认安全基线。
+- ItemPicker 改为模型绑定工具：服务端先重验价格、黑名单、必要/排除属性及来源字段，再同平台去重；跨平台只按已验证 GTIN，或规范化品牌、型号和容量/尺寸/颜色/版本/套装等完整变体强证据自动合并。标题相似只记录疑似重复。三路候选按平台轮转截到 36 个商品组，模型最多调用一次、禁用 HTTP 自动重试，只能输出输入组 ID、枚举判断和已有证据路径；非法结构、重复/未知 ID、超时或未配置均按来源/检索顺位、可比较评分、价格和稳定输入顺序确定性降级。
+- PostgreSQL 新增稳定 `product_groups/product_group_members` 派生身份表，`catalog_scope_offers` 新增 Provider 顺位与请求来源；迁移版本为 `20260827_0005`。原 Product/Offer 外键未重写，组内最低已知商品价 Offer 作为代表，并通过 `alternative_offers` 保留其他平台报价；当前无运费事实，不比较到手价。
+- 新增硬过滤、分组、精排开始/完成/降级的脱敏可重放事件；最终任务结果保留排序方式、版本和降级状态。前端增加同款跨平台报价及确定性降级提示。Prompt、接口文档、README、向量基础设施决策和商品检索实施文档已同步。
+- 已验证：全仓 Ruff 和 compileall 通过；后端 `213 passed, 1 skipped`，新增 Fake Model 覆盖一次调用、非法/篡改结构、未知 ID、超时和未配置降级，不调用真实付费模型或商品 Provider；前端 Vitest `4 files / 19 tests` 通过，TypeScript + Vite 生产构建通过；新增迁移从 `20260823_0004` 到 head 的 PostgreSQL 离线 SQL 编译通过。完整从零离线 SQL 仍受既有 `20260819_0002` 使用在线 inspect 的限制，本次迁移本身无该问题。
+- 尚未宣称灰度性能和质量门禁已通过：真实 `HardConstraintViolation@3`、`DuplicateSlotRate@3`、自动合并精确率、P50/P95 与冻结查询集盲测必须在获授权的 Provider/模型和同环境 Hybrid 基线上单独执行，才能按 `0% → 5% → 25% → 100%` 推进。
+
+## 2026-08-26：新增长期记忆 HitRate@5 的 200 条固定检索评测集
+
+- 新增 `docs/long-term-memory-hitrate-at5-200.json`：包含 20 个隔离合成用户画像、每个画像 12 条结构化记忆和 10 条查询，共 200 个 query-to-ground-truth case；覆盖关键词、同义改写、隐式偏好、预算、作用域、历史、跨会话、冲突替代、归档旧值、英文和多记忆组合。
+- 新增 `docs/long-term-memory-hitrate-at5-evaluation.md`，固定 `HitRate@5` 的 query-level 命中定义，并把全量黑名单单独作为 `HardRuleCoverage` 门禁，补充 `ForbiddenLeakage@5` 与多答案 `Recall@5`，避免黑名单常驻返回导致主指标虚高。
+- 当前只完成合成数据集与标注口径，尚未在生产 PostgreSQL/pgvector 检索链路上执行，因此没有声明 93% 或其他实测分数；对外发布成绩前仍需独立人工复核、冻结测试集，并保存逐 case 预测和运行指纹。
+
 ## 2026-08-25：WebSearch 从 Tavily 切换为阿里云 IQS UnifiedSearch
 
 - `web_search` 已改为阿里云 IQS 官方 HTTP `POST /search/unified`：Bearer API Key 鉴权，默认 `LiteAdvanced`、最多 10 条、`NoLimit` 时间范围，关闭收费增强摘要以及正文/Markdown，仅启用 `rerankScore`；解析 `pageItems`、`requestId`、`searchInformation.searchTime` 和 `costCredits`，继续输出项目统一的来源摘要结构。
@@ -276,7 +291,7 @@
 - 视觉延续现有暖白纸张、Newsreader / Noto Serif SC 标题与 DM Sans / Noto Sans SC 正文体系；桌面采用左右双卡片，移动端改为单列并重排账户头部，避免横向溢出。
 - 验证：后端 134 项测试通过；前端 Vitest 4 文件 13 项测试、TypeScript 与 Vite 生产构建通过；本机 Google Chrome 在 1440×900 与 390×844 下通过真实认证/记忆接口交互检查，六个标签可点击填表且两种视口均无横向溢出。未调用付费模型或外部商品 Provider。
 
-> 最后更新时间：2026-08-25
+> 最后更新时间：2026-08-26
 > 状态口径：本文同时记录参考目标、当前实现和已知差距；“存在文件”不等于“已接入主链路”。
 
 ## 2026-07-21：新增首个 Agent 阶段前的初始化状态事件
@@ -763,6 +778,8 @@ credit。生产 Category 卡片别名仍未切换，当前 7 张确定性验收�
 - `docs/project-status.md` 是当前实现状态的事实来源，有实质变更时自动更新。
 
 ## 11. 变更记录
+
+- 2026-08-26：新增 200 条长期记忆 `HitRate@5` 固定检索评测集与评测口径文档；数据按 20 个隔离合成画像组织，显式标注相关普通记忆、必须全量生效的黑名单和禁止泄漏的归档/跨作用域干扰项。当前仅完成数据与一致性标注，尚未执行真实 pgvector 检索或产生 93% 成绩。
 
 - 2026-08-25：WebSearch 从 Tavily 切换为阿里云 IQS UnifiedSearch；完成官方请求/响应、错误、配置、健康检查、Prompt、README、评测说明和 19 项无外部调用测试。用户安全写入本地 Key 后，生产适配器 `max_results=1` 真实烟测成功，返回 1 条结果、服务端耗时 304 ms并计量 1 credit；正式 8000 后端仍待重启加载新配置。
 

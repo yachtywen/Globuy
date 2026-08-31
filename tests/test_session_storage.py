@@ -74,12 +74,8 @@ async def test_empty_active_thread_is_replaced_without_entering_archive(
         client_request_id="second",
         new_thread_id="empty-second",
     )
-    archived = await store.list_threads(
-        "empty-user", status="archived", cursor=None, limit=20
-    )
-    active = await store.list_threads(
-        "empty-user", status="active", cursor=None, limit=20
-    )
+    archived = await store.list_threads("empty-user", status="archived", cursor=None, limit=20)
+    active = await store.list_threads("empty-user", status="active", cursor=None, limit=20)
     await store.close()
 
     assert second["archived_thread_id"] is None
@@ -134,9 +130,7 @@ async def test_archive_cursor_pagination_has_no_duplicates(tmp_path: Path) -> No
         new_thread_id="thread-final",
     )
 
-    first_page = await store.list_threads(
-        "page-user", status="archived", cursor=None, limit=2
-    )
+    first_page = await store.list_threads("page-user", status="archived", cursor=None, limit=2)
     second_page = await store.list_threads(
         "page-user",
         status="archived",

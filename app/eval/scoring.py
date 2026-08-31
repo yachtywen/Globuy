@@ -102,9 +102,7 @@ def _grounded_amounts(evidence: CaseEvidence) -> tuple[bool, str]:
 def _grounded_urls(evidence: CaseEvidence) -> tuple[bool, str]:
     urls = {url.rstrip(".,，。") for url in _URL_RE.findall(_final_text(evidence))}
     allowed = {fact.product_url for fact in evidence.catalog if fact.product_url}
-    allowed.update(
-        pick.get("product_url") for pick in _picks(evidence) if pick.get("product_url")
-    )
+    allowed.update(pick.get("product_url") for pick in _picks(evidence) if pick.get("product_url"))
     unknown = sorted(urls - allowed)
     if unknown:
         return False, f"回答包含未由商品事实支持的链接：{unknown[:3]}"

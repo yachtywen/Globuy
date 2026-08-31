@@ -96,9 +96,7 @@ def test_product_search_summary_reads_fork_search_results() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_prompt_budget_never_truncates_blacklists(
-    monkeypatch, tmp_path: Path
-) -> None:
+async def test_memory_prompt_budget_never_truncates_blacklists(monkeypatch, tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     class FakeMemoryStore:
@@ -211,9 +209,7 @@ def test_complete_tool_group_is_not_rewritten() -> None:
     messages = [
         AIMessage(
             content="",
-            tool_calls=[
-                {"name": "planner", "args": {}, "id": "planner-1", "type": "tool_call"}
-            ],
+            tool_calls=[{"name": "planner", "args": {}, "id": "planner-1", "type": "tool_call"}],
         ),
         ToolMessage(content='{"status":"ok"}', name="planner", tool_call_id="planner-1"),
     ]
@@ -318,6 +314,39 @@ def test_forced_termination_selects_verified_candidates_then_summarizes() -> Non
 
     assert summary_call.tool_calls[0]["name"] == "shopping_summary"
     assert summary_call.tool_calls[0]["args"]["picks"][0]["item_id"] == "jeans"
+
+
+def test_forced_termination_deduplicates_by_offer_before_compat_item_id() -> None:
+    rows = []
+    for platform, offer in (("taobao", "offer-a"), ("jingdong", "offer-b")):
+        row = candidate("shared-item-id", rank=1, price=499)
+        row.update({"platform": platform, "offer_id": offer})
+        rows.append(row)
+    response = _forced_termination_response(
+        {
+            "messages": [
+                ToolMessage(
+                    name="dispatch_tool",
+                    tool_call_id="dispatch-results",
+                    content=json.dumps(
+                        {
+                            "search_results": [
+                                {"platform": "taobao", "candidates": [rows[0]]},
+                                {"platform": "jingdong", "candidates": [rows[1]]},
+                            ]
+                        }
+                    ),
+                )
+            ],
+            "original_query": "跨平台比较",
+            "shopping_intent": {"filters": {}},
+        }
+    )
+
+    assert [item["offer_id"] for item in response.tool_calls[0]["args"]["items"]] == [
+        "offer-a",
+        "offer-b",
+    ]
 
 
 def candidate(
@@ -571,8 +600,7 @@ async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
 ) -> None:
     model = ScriptedModel()
     model.summary_text = (
-        "## 精选清单\n\n| 价格 | ¥199 |\n| 运费 | 待确认 |"
-        "\n\n> 数据说明：来自离线快照。"
+        "## 精选清单\n\n| 价格 | ¥199 |\n| 运费 | 待确认 |\n\n> 数据说明：来自离线快照。"
     )
     summary = build_shopping_summary_tool(model)
     picked = {
@@ -955,9 +983,7 @@ async def test_empty_picker_goes_directly_to_fallback(tmp_path: Path) -> None:
         snapshot = await loop.graph.aget_state(loop._config("empty-picker-thread"))
 
     tool_names = [
-        message.name
-        for message in snapshot.values["messages"]
-        if isinstance(message, ToolMessage)
+        message.name for message in snapshot.values["messages"] if isinstance(message, ToolMessage)
     ]
     assert metadata["phase"] == "done"
     assert answer
@@ -1025,10 +1051,7 @@ async def test_agentloop_astream_exposes_v2_graph_events(tmp_path: Path) -> None
         events = [event async for event in loop.astream("测试流式", "stream-thread")]
     assert events
     assert all("event" in event for event in events)
-    assert any(
-        event["event"] == "on_chain_end" and not event.get("parent_ids")
-        for event in events
-    )
+    assert any(event["event"] == "on_chain_end" and not event.get("parent_ids") for event in events)
     assert events[-1]["event"] == "globuy_final_state"
     assert events[-1]["data"]["output"]["phase"] == "done"
 

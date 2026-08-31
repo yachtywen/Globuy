@@ -204,9 +204,7 @@ def _decision_budget_exhausted(iteration: int, repeat_threshold: int | None = No
     """Bound non-terminal model decisions before the graph recursion guard fires."""
 
     threshold = (
-        get_settings().loop_repeat_threshold
-        if repeat_threshold is None
-        else repeat_threshold
+        get_settings().loop_repeat_threshold if repeat_threshold is None else repeat_threshold
     )
     return iteration >= max(8, threshold * 2)
 
@@ -216,7 +214,7 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
 
     latest_picker: dict[str, Any] | None = None
     latest_searches: dict[str, dict[str, Any]] = {}
-    for message in state.get("messages", []):
+    for message in _current_turn_messages(state.get("messages", [])):
         if not isinstance(message, ToolMessage):
             continue
         payload = _tool_payload(message)
@@ -228,6 +226,20 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
             platform = str(payload.get("platform") or "")
             if platform:
                 latest_searches[platform] = payload
+        elif message.name == "dispatch_tool":
+            search_results = payload.get("search_results")
+            if not isinstance(search_results, list):
+                search_results = [
+                    item.get("result")
+                    for item in payload.get("tool_results", [])
+                    if isinstance(item, dict) and item.get("tool") == "item_search"
+                ]
+            for result in search_results:
+                if not isinstance(result, dict):
+                    continue
+                platform = str(result.get("platform") or "")
+                if platform:
+                    latest_searches[platform] = result
 
     if latest_picker is not None:
         picks = latest_picker.get("picks")
@@ -241,6 +253,10 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
                             "goal": state.get("original_query") or "商品推荐",
                             "picks": picks[:3],
                             "learned_preferences": state.get("learned_preferences", []),
+                            "ranking_method": latest_picker.get("ranking_method"),
+                            "ranking_status": latest_picker.get("status"),
+                            "ranking_version": latest_picker.get("ranking_version"),
+                            "ranking_fallback_reason": latest_picker.get("fallback_reason"),
                         },
                         "id": f"forced-summary-{uuid4().hex}",
                         "type": "tool_call",
@@ -252,9 +268,7 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
             tool_calls=[
                 {
                     "name": "chat_fallback",
-                    "args": {
-                        "message": "当前候选未通过明确预算或属性约束，请调整筛选条件后重试。"
-                    },
+                    "args": {"message": "当前候选未通过明确预算或属性约束，请调整筛选条件后重试。"},
                     "id": f"forced-fallback-{uuid4().hex}",
                     "type": "tool_call",
                 }
@@ -262,7 +276,7 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
         )
 
     candidates: list[dict[str, Any]] = []
-    seen_item_ids: set[str] = set()
+    seen_offer_ids: set[str] = set()
     for platform in ("taobao", "jingdong", "douyin"):
         rows = latest_searches.get(platform, {}).get("candidates")
         if not isinstance(rows, list):
@@ -270,26 +284,43 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            item_id = str(row.get("item_id") or "")
-            if item_id and item_id not in seen_item_ids:
-                seen_item_ids.add(item_id)
+            identity = str(row.get("offer_id") or row.get("item_id") or "")
+            if identity and identity not in seen_offer_ids:
+                seen_offer_ids.add(identity)
                 candidates.append(row)
-            if len(candidates) >= 50:
+            if len(candidates) >= 45:
                 break
 
     if candidates:
         filters = (state.get("shopping_intent") or {}).get("filters") or {}
         constraints = {
-            key: filters[key]
-            for key in ("min_price", "max_price")
-            if filters.get(key) is not None
+            key: filters[key] for key in ("min_price", "max_price") if filters.get(key) is not None
         }
+        intent = state.get("shopping_intent") or {}
+        required_attributes = {
+            **(filters.get("attribute_equals") or {}),
+            **(intent.get("required_attributes") or {}),
+        }
+        for key, value in {
+            "blocked_platforms": intent.get("blocked_platforms") or [],
+            "blocked_item_ids": intent.get("blocked_item_ids") or [],
+            "required_attributes": required_attributes,
+            "excluded_attributes": intent.get("excluded_attributes") or {},
+        }.items():
+            if value:
+                constraints[key] = value
         return AIMessage(
             content="",
             tool_calls=[
                 {
                     "name": "item_picker",
-                    "args": {"items": candidates, "constraints": constraints, "limit": 3},
+                    "args": {
+                        "items": candidates,
+                        "constraints": constraints,
+                        "goal": state.get("original_query") or "商品推荐",
+                        "soft_preferences": intent.get("soft_preferences", []),
+                        "limit": 3,
+                    },
                     "id": f"forced-picker-{uuid4().hex}",
                     "type": "tool_call",
                 }
@@ -301,9 +332,7 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
         tool_calls=[
             {
                 "name": "chat_fallback",
-                "args": {
-                    "message": "当前没有取得可验证的商品候选，请稍后重试或指定单个平台。"
-                },
+                "args": {"message": "当前没有取得可验证的商品候选，请稍后重试或指定单个平台。"},
                 "id": f"forced-fallback-{uuid4().hex}",
                 "type": "tool_call",
             }
@@ -446,11 +475,13 @@ class AgentLoop:
                 else _forced_termination_response(state)
                 if force_root_termination
                 else await reflect_model.ainvoke(
-                    (model_messages := [
-                        SystemMessage(content=prompt),
-                        phase_prompt,
-                        *state["messages"],
-                    ]),
+                    (
+                        model_messages := [
+                            SystemMessage(content=prompt),
+                            phase_prompt,
+                            *state["messages"],
+                        ]
+                    ),
                     config=_model_call_config(config, "reflect", model_messages),
                     **model_request_kwargs(current_thread_id(), model=self.model),
                 )
@@ -462,9 +493,7 @@ class AgentLoop:
                 if must_terminate
                 else TOOL_PHASES["reflect"]
             )
-            response, requested_think_tool = _normalize_phase_tool_calls(
-                response, allowed_tools
-            )
+            response, requested_think_tool = _normalize_phase_tool_calls(response, allowed_tools)
             response = _single_summary_tool_call(response)
             if must_terminate and not response.tool_calls and not _message_text(response).strip():
                 response = response.model_copy(
@@ -535,10 +564,7 @@ class AgentLoop:
                     break
                 if payload and (
                     payload.get("terminal") is True
-                    or (
-                        message.name == "shopping_summary"
-                        and payload.get("status") == "complete"
-                    )
+                    or (message.name == "shopping_summary" and payload.get("status") == "complete")
                 ):
                     terminal_result = dict(payload)
                     terminal_result["terminal"] = True

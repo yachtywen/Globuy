@@ -137,9 +137,7 @@ class FakeExtractor:
                 if depth == "deep"
                 else []
             ),
-            price_tiers=[
-                PriceTier(tier="budget", range_cny=(99, 299), notes="当前快照挂牌价")
-            ],
+            price_tiers=[PriceTier(tier="budget", range_cny=(99, 299), notes="当前快照挂牌价")],
         )
 
 
@@ -213,9 +211,7 @@ async def test_category_service_hybrid_rerank_and_cache() -> None:
     assert first.attributes == []
     assert "raw_evidence" not in first.model_dump()
     assert trace.rerank_used is True
-    assert client.last_search["params"] == {
-        "search_pipeline": "globuy-category-balanced-v1"
-    }
+    assert client.last_search["params"] == {"search_pipeline": "globuy-category-balanced-v1"}
     assert second.cache_hit is True
     assert second_trace.cache_hit is True
     assert client.search_calls == 1
@@ -306,15 +302,9 @@ def test_cache_key_changes_with_build_and_prompt_versions() -> None:
         "query": "蓝牙耳机",
         "depth": "quick",
     }
-    first = category_cache_key(
-        **base, index_build_id="build-1", prompt_version="prompt-1"
-    )
-    second = category_cache_key(
-        **base, index_build_id="build-2", prompt_version="prompt-1"
-    )
-    third = category_cache_key(
-        **base, index_build_id="build-1", prompt_version="prompt-2"
-    )
+    first = category_cache_key(**base, index_build_id="build-1", prompt_version="prompt-1")
+    second = category_cache_key(**base, index_build_id="build-2", prompt_version="prompt-1")
+    third = category_cache_key(**base, index_build_id="build-1", prompt_version="prompt-2")
 
     assert len({first, second, third}) == 3
     assert "蓝牙耳机" not in first
@@ -353,19 +343,13 @@ def test_item_picker_category_context_only_adds_annotations() -> None:
         "status": "ok",
         "category": "耳机",
         "depth": "deep",
-        "price_tiers": [
-            {"tier": "budget", "range_cny": [99, 299], "notes": "snapshot"}
-        ],
-        "attributes": [
-            {"name": "连接方式", "distribution": {"蓝牙": 0.8, "有线": 0.2}}
-        ],
+        "price_tiers": [{"tier": "budget", "range_cny": [99, 299], "notes": "snapshot"}],
+        "attributes": [{"name": "连接方式", "distribution": {"蓝牙": 0.8, "有线": 0.2}}],
         "components": [],
         "retrieval_mode": "hybrid",
     }
 
-    result = item_picker.invoke(
-        {"items": candidates, "limit": 2, "category_context": context}
-    )
+    result = item_picker.invoke({"items": candidates, "limit": 2, "category_context": context})
 
     assert [item["item_id"] for item in result["picks"]] == ["b", "a"]
     assert result["picks"][0]["category_annotations"]["price_tier"] == "budget"

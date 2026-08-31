@@ -33,9 +33,7 @@ def fixture(name: str) -> dict:
         ("douyin", "douyin_search.json", "douyin:30001"),
     ],
 )
-def test_search_mapping_filters_accessories(
-    platform: str, filename: str, expected_id: str
-) -> None:
+def test_search_mapping_filters_accessories(platform: str, filename: str, expected_id: str) -> None:
     items, _ = search_items(platform, fixture(filename))
     normalized = [
         normalize_search_item(
@@ -115,9 +113,7 @@ def test_client_reuses_raw_response_without_second_request(tmp_path: Path) -> No
 
     config = CollectionConfig(root=tmp_path, request_interval_seconds=0)
     ledger = RequestLedger(tmp_path / "reports" / "request_ledger.jsonl", config)
-    client = JustOneClient(
-        "test-token", config, ledger, transport=httpx.MockTransport(handler)
-    )
+    client = JustOneClient("test-token", config, ledger, transport=httpx.MockTransport(handler))
     params = {"keyword": "耳机", "page": 1, "_keyword_index": 0}
     try:
         first = client.call("taobao", params)
@@ -192,9 +188,7 @@ def test_collector_runs_balanced_end_to_end_with_mock_transport(tmp_path: Path) 
         request_interval_seconds=0,
     )
     ledger = RequestLedger(tmp_path / "reports" / "request_ledger.jsonl", config)
-    client = JustOneClient(
-        "test-token", config, ledger, transport=httpx.MockTransport(handler)
-    )
+    client = JustOneClient("test-token", config, ledger, transport=httpx.MockTransport(handler))
     try:
         manifest = JustOneCollector(client, config).run()
     finally:
@@ -217,17 +211,15 @@ def test_manual_success_response_is_imported_without_api_request(tmp_path: Path)
     finally:
         client.close()
 
-    state = json.loads(
-        (tmp_path / "state" / "collection_state.json").read_text(encoding="utf-8")
-    )
+    state = json.loads((tmp_path / "state" / "collection_state.json").read_text(encoding="utf-8"))
     assert manifest["counts"]["douyin"] == 1
     assert manifest["requests"]["successful_calls"] == 0
     assert state["platforms"]["douyin"]["next_page"] == 2
     assert state["platforms"]["douyin"]["search_id"] == "search-next-page"
     assert (
-        json.loads(
-            (tmp_path / "reports" / "quality_report.json").read_text(encoding="utf-8")
-        )["imported_response_count"]
+        json.loads((tmp_path / "reports" / "quality_report.json").read_text(encoding="utf-8"))[
+            "imported_response_count"
+        ]
         == 1
     )
     persisted = "".join(path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.*"))
@@ -254,6 +246,4 @@ def test_dry_run_stays_within_estimated_budget() -> None:
     plan = dry_run(CollectionConfig())
     assert plan["target_total"] == 1000
     assert plan["max_success_calls"] == 80
-    assert Decimal(plan["expected_estimated_cost_cny"]) <= Decimal(
-        plan["estimated_budget_cny"]
-    )
+    assert Decimal(plan["expected_estimated_cost_cny"]) <= Decimal(plan["estimated_budget_cny"])

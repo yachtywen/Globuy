@@ -165,9 +165,7 @@ async def call_llm_judge(
         else nullcontext(None)
     )
     with scope as generation:
-        async with httpx.AsyncClient(
-            transport=transport, timeout=config.timeout_seconds
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, timeout=config.timeout_seconds) as client:
             for attempt in range(config.max_retries):
                 try:
                     response = await client.post(
@@ -178,9 +176,7 @@ async def call_llm_judge(
                     if response.status_code == 429 or response.status_code >= 500:
                         response.raise_for_status()
                     if response.status_code >= 400:
-                        raise JudgeProtocolError(
-                            f"LLM Judge 请求失败：HTTP {response.status_code}"
-                        )
+                        raise JudgeProtocolError(f"LLM Judge 请求失败：HTTP {response.status_code}")
                     payload = response.json()
                     result = _parse_response(payload, expected_ids)
                     if generation is not None:
@@ -210,8 +206,7 @@ async def call_llm_judge(
                 ) as exc:
                     last_error = exc
                     retryable = not isinstance(exc, httpx.HTTPStatusError) or (
-                        exc.response.status_code == 429
-                        or exc.response.status_code >= 500
+                        exc.response.status_code == 429 or exc.response.status_code >= 500
                     )
                     if not retryable or attempt == config.max_retries - 1:
                         if generation is not None:

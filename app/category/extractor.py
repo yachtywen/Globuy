@@ -107,11 +107,7 @@ class CompatibleCategoryExtractor:
                     **context_metrics(messages).metadata(),
                     **observation.get("metadata", {}),
                 },
-                **(
-                    {"callbacks": observation["callbacks"]}
-                    if observation.get("callbacks")
-                    else {}
-                ),
+                **({"callbacks": observation["callbacks"]} if observation.get("callbacks") else {}),
             },
             **model_request_kwargs(current_thread_id(), model=self.model),
         )
@@ -146,6 +142,7 @@ class CompatibleCategoryExtractor:
             except (ValidationError, ValueError, CategoryExtractionError) as exc:
                 error = f"\n上次校验失败：{exc}。请严格修正。"
         raise CategoryExtractionError(error.strip())
+
     async def extract_insight(
         self, query: str, depth: str, cards: Sequence[CategoryCard]
     ) -> InsightExtractionPayload:

@@ -12,6 +12,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from app.agent.dispatch_tool import build_dispatch_node
 from app.agent.main_agent import AgentLoop
 from app.api.monitor import AgentEvent, EventType, Monitor, monitor_scope
+from app.tools.item_picker import build_item_picker_tool
 from app.tools.planner import planner
 from app.utils.thread_ctx import fork_scope, thread_scope
 
@@ -45,6 +46,7 @@ class ForkCompletionModel:
         self.configs.append(config or {})
         return self.responses.pop(0)
 
+
 @pytest.mark.asyncio
 async def test_dispatch_creates_homogeneous_child_and_reports_fork(tmp_path: Path) -> None:
     published: list[tuple[str, AgentEvent]] = []
@@ -53,8 +55,9 @@ async def test_dispatch_creates_homogeneous_child_and_reports_fork(tmp_path: Pat
         published.append((channel, item))
 
     parent = AgentLoop(model=None)
-    with thread_scope("root", tmp_path, run_id="run-1"), monitor_scope(
-        Monitor(publish, publish_thread_id="root")
+    with (
+        thread_scope("root", tmp_path, run_id="run-1"),
+        monitor_scope(Monitor(publish, publish_thread_id="root")),
     ):
         message = await dispatch_tool(parent).ainvoke(
             {
@@ -128,6 +131,32 @@ async def test_nested_dispatch_is_rejected(tmp_path: Path) -> None:
     payload = json.loads(message.content)
     assert payload["status"] == "depth_limit"
     assert payload["search_results"] == []
+
+
+@pytest.mark.asyncio
+async def test_child_cannot_run_item_picker(tmp_path: Path) -> None:
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", build_dispatch_node([build_item_picker_tool(None)]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "item_picker",
+                "args": {"items": []},
+                "id": "child-picker",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with thread_scope("root", tmp_path, run_id="run-1"), fork_scope("root-fork-1"):
+        state = await graph.ainvoke({"messages": [call]})
+
+    payload = json.loads(state["messages"][-1].content)
+    assert payload["status"] == "parent_only"
 
 
 @pytest.mark.asyncio

@@ -90,8 +90,7 @@ def render_report(results: list[CaseResult], evaluation_id: str) -> str:
         for item in result.criteria:
             mark = "PASS" if item.passed else "FAIL"
             lines.append(
-                f"- [{item.level.upper()}][{mark}][{item.judge}] "
-                f"{item.description}：{item.reason}"
+                f"- [{item.level.upper()}][{mark}][{item.judge}] {item.description}：{item.reason}"
             )
         lines.extend(
             [
@@ -119,9 +118,7 @@ def render_report_with_evidence(
     for result in results:
         evidence = evidence_by_case[result.case_id]
         tool_ends = [event for event in evidence.events if event.get("event") == "TOOL_CALL_END"]
-        total_ms = sum(
-            int(event.get("data", {}).get("duration_ms") or 0) for event in tool_ends
-        )
+        total_ms = sum(int(event.get("data", {}).get("duration_ms") or 0) for event in tool_ends)
         trace_ids = "<br>".join(evidence.trace_ids) if evidence.trace_ids else "-"
         lines.append(
             f"| {_cell(result.case_id)} | {_cell(trace_ids)} | {len(tool_ends)} | {total_ms} ms |"

@@ -95,8 +95,7 @@ class ProductIndexManager:
         vectors = {
             **reused,
             **{
-                str(item["offer_id"]): vector
-                for item, vector in zip(missing, encoded, strict=True)
+                str(item["offer_id"]): vector for item, vector in zip(missing, encoded, strict=True)
             },
         }
         actions = [

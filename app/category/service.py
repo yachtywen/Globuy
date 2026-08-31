@@ -117,9 +117,7 @@ class CategorySearchService:
         except CategorySearchNotConfiguredError:
             raise
         except Exception as exc:
-            raise CategorySearchNotConfiguredError(
-                f"无法检查 CategoryInsight 索引: {exc}"
-            ) from exc
+            raise CategorySearchNotConfiguredError(f"无法检查 CategoryInsight 索引: {exc}") from exc
         if not meta:
             raise CategorySearchNotConfiguredError("CategoryInsight 索引缺少 _meta")
         expected = {
@@ -301,9 +299,7 @@ class CategorySearchService:
             )
 
         top_k = (
-            self.settings.category_quick_k
-            if depth == "quick"
-            else self.settings.category_deep_k
+            self.settings.category_quick_k if depth == "quick" else self.settings.category_deep_k
         )
         threshold = self.settings.category_rerank_bypass_score
         bypass_high_score = bool(

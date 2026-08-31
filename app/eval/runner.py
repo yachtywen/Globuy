@@ -248,9 +248,7 @@ class LiveEvaluationClient:
                 )
                 response.raise_for_status()
                 run_id = str(response.json()["run_id"])
-                trace_ids.append(
-                    str(response.json().get("trace_id") or trace_id_for_run(run_id))
-                )
+                trace_ids.append(str(response.json().get("trace_id") or trace_id_for_run(run_id)))
                 final_run = await self._wait_run(thread_id, run_id, case.timeout_seconds)
                 all_events.extend(
                     await _collect_replayed_events(
@@ -262,9 +260,7 @@ class LiveEvaluationClient:
                     )
                 )
                 result = final_run.get("result") or {}
-                transcript.append(
-                    f"[用户] {turn.query}\n[Globuy] {result.get('final_text', '')}"
-                )
+                transcript.append(f"[用户] {turn.query}\n[Globuy] {result.get('final_text', '')}")
             result = final_run.get("result") or {}
             return CaseEvidence(
                 execution_status=(

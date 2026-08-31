@@ -76,4 +76,32 @@ describe("商品结果", () => {
     expect(screen.getAllByText("候选耳机 A")).toHaveLength(2);
     expect(screen.getAllByText("¥ 299.00")).toHaveLength(2);
   });
+
+  it("展示确定性精排降级提示和同款跨平台报价", () => {
+    render(<ProductResults artifacts={[]} result={{
+      ...result,
+      ranking_method: "deterministic_fallback",
+      ranking_status: "degraded",
+      picks: [{
+        ...result.picks[0],
+        product_group_id: "pg-1",
+        alternative_offers: [{
+          item_id: "same-on-taobao",
+          title: "候选耳机 A",
+          price: 289,
+          currency: "CNY",
+          platform: "taobao",
+          rating: null,
+          sales: null,
+          product_url: "https://example.com/a-taobao",
+        }],
+      }],
+    }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("模型精排暂不可用");
+    expect(screen.getByText("同款其他平台")).toBeVisible();
+    expect(screen.getByRole("link", { name: "淘宝 · ¥ 289.00" })).toHaveAttribute(
+      "href",
+      "https://example.com/a-taobao",
+    );
+  });
 });

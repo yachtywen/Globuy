@@ -179,9 +179,7 @@ class Settings(BaseSettings):
     web_search_provider: Literal["none", "iqs"] = "iqs"
     iqs_api_key: SecretStr | None = None
     iqs_base_url: str = "https://cloud-iqs.aliyuncs.com"
-    iqs_engine_type: Literal["Generic", "GenericAdvanced", "LiteAdvanced", "Deep"] = (
-        "LiteAdvanced"
-    )
+    iqs_engine_type: Literal["Generic", "GenericAdvanced", "LiteAdvanced", "Deep"] = "LiteAdvanced"
     iqs_timeout_seconds: float = Field(default=8.0, gt=0)
     iqs_max_results: int = Field(default=10, ge=1, le=50)
     web_search_content_chars: int = Field(default=1_200, ge=100, le=4_000)
@@ -223,6 +221,11 @@ class Settings(BaseSettings):
     item_search_pool_floor: int = Field(default=60, ge=1)
     item_search_pool_max: int = Field(default=150, ge=1)
     fork_candidate_limit: int = Field(default=10, ge=1, le=50)
+    item_search_strategy: Literal["hybrid", "direct_llm", "progressive"] = "hybrid"
+    direct_rerank_rollout_percent: int = Field(default=0, ge=0, le=100)
+    direct_candidates_per_platform: int = Field(default=15, ge=1, le=50)
+    direct_rerank_group_limit: int = Field(default=36, ge=3, le=60)
+    item_rerank_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     fork_max_depth: int = Field(default=1, ge=1, le=1)
 
     category_dataset_path: Path = Path(

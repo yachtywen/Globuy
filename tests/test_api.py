@@ -120,9 +120,7 @@ def test_thread_task_status_and_replayable_websocket(client: TestClient) -> None
     thread = create_thread(client)
     task = start_task(client, thread["thread_id"], "测试 WebSocket")
     assert len(task["trace_id"]) == 32
-    status = wait_for_status(
-        client, thread["thread_id"], task["run_id"], {"succeeded"}
-    )
+    status = wait_for_status(client, thread["thread_id"], task["run_id"], {"succeeded"})
     assert status["result"]["source_kind"] == "offline_snapshot"
     assert status["result"]["search_attempted"] is False
     assert status["result"]["search_candidate_count"] == 0
@@ -163,14 +161,10 @@ def test_task_post_returns_before_slow_agent_and_cancel_is_run_aware(
     assert time.monotonic() - started < 1
     wait_for_status(client, thread["thread_id"], task["run_id"], {"running"})
 
-    cancelled = client.post(
-        f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/cancel"
-    )
+    cancelled = client.post(f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/cancel")
     assert cancelled.status_code == 202
     assert cancelled.json()["status"] == "cancelling"
-    terminal = wait_for_status(
-        client, thread["thread_id"], task["run_id"], {"cancelled"}
-    )
+    terminal = wait_for_status(client, thread["thread_id"], task["run_id"], {"cancelled"})
     assert terminal["terminal_event"]["event"] == "TASK_CANCELLED"
 
     second_cancel = client.post(
@@ -185,13 +179,9 @@ def test_immediate_cancel_cannot_leave_starting_run_or_hanging_handle(
 ) -> None:
     thread = create_thread(client)
     task = start_task(client, thread["thread_id"], "slow immediate")
-    cancelled = client.post(
-        f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/cancel"
-    )
+    cancelled = client.post(f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/cancel")
     assert cancelled.status_code in {200, 202}
-    terminal = wait_for_status(
-        client, thread["thread_id"], task["run_id"], {"cancelled"}
-    )
+    terminal = wait_for_status(client, thread["thread_id"], task["run_id"], {"cancelled"})
     assert terminal["status"] == "cancelled"
     assert thread["thread_id"] not in client.app.state.run_registry.active_tasks
 
@@ -216,9 +206,7 @@ def test_new_thread_archives_completed_session_and_enforces_read_only(
     new = response.json()
     assert new["archived_thread_id"] == old["thread_id"]
 
-    detail = client.get(
-        f"/api/v1/threads/{old['thread_id']}?user_id=anonymous-test"
-    )
+    detail = client.get(f"/api/v1/threads/{old['thread_id']}?user_id=anonymous-test")
     assert detail.status_code == 200
     assert detail.json()["read_only"] is True
     assert [message["role"] for message in detail.json()["messages"]] == [
@@ -271,9 +259,7 @@ def test_thread_and_run_creation_are_idempotent(client: TestClient) -> None:
 def test_thread_lists_and_owner_hiding(client: TestClient) -> None:
     thread = create_thread(client)
     active = client.get("/api/v1/threads?user_id=anonymous-test&status=active")
-    assert [item["thread_id"] for item in active.json()["items"]] == [
-        thread["thread_id"]
-    ]
+    assert [item["thread_id"] for item in active.json()["items"]] == [thread["thread_id"]]
     hidden = client.get(f"/api/v1/threads/{thread['thread_id']}?user_id=another-user")
     assert hidden.status_code == 404
 
@@ -317,9 +303,7 @@ def test_new_run_waits_for_old_run_and_old_finally_keeps_new_handle(
     active = client.app.state.run_registry.active_tasks[thread["thread_id"]]
     assert active.run_id == second["run_id"]
 
-    client.post(
-        f"/api/v1/threads/{thread['thread_id']}/runs/{second['run_id']}/cancel"
-    )
+    client.post(f"/api/v1/threads/{thread['thread_id']}/runs/{second['run_id']}/cancel")
     wait_for_status(client, thread["thread_id"], second["run_id"], {"cancelled"})
 
 
@@ -337,28 +321,20 @@ def test_archiving_running_thread_cancels_before_transaction(client: TestClient)
         },
     )
     assert response.status_code == 201
-    terminal_response = client.get(
-        f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}"
-    )
+    terminal_response = client.get(f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}")
     assert terminal_response.status_code == 200, terminal_response.text
     terminal = terminal_response.json()
     assert terminal["status"] == "cancelled"
-    detail = client.get(
-        f"/api/v1/threads/{thread['thread_id']}?user_id=anonymous-test"
-    ).json()
+    detail = client.get(f"/api/v1/threads/{thread['thread_id']}?user_id=anonymous-test").json()
     assert detail["status"] == "archived"
 
 
 def test_replay_gap_and_multiple_subscribers_are_isolated(client: TestClient) -> None:
     thread = create_thread(client)
     task = start_task(client, thread["thread_id"], "事件重放")
-    status = wait_for_status(
-        client, thread["thread_id"], task["run_id"], {"succeeded"}
-    )
+    status = wait_for_status(client, thread["thread_id"], task["run_id"], {"succeeded"})
     broker = client.app.state.event_broker
-    stream = client.portal.call(
-        broker.ensure_stream, thread["thread_id"], task["run_id"]
-    )
+    stream = client.portal.call(broker.ensure_stream, thread["thread_id"], task["run_id"])
     stream.max_events = 3
     for index in range(5):
         client.portal.call(
@@ -378,9 +354,7 @@ def test_replay_gap_and_multiple_subscribers_are_isolated(client: TestClient) ->
         assert gap["data"]["name"] == "replay_gap"
 
     after = status["last_sequence"] + 5
-    clean_url = (
-        f"/api/v1/ws/{thread['thread_id']}?run_id={task['run_id']}&after={after}"
-    )
+    clean_url = f"/api/v1/ws/{thread['thread_id']}?run_id={task['run_id']}&after={after}"
     with client.websocket_connect(clean_url) as first_socket:
         assert first_socket.receive_json()["data"]["name"] == "stream_ready"
         with client.websocket_connect(clean_url) as second_socket:
@@ -400,12 +374,9 @@ def test_replay_gap_and_multiple_subscribers_are_isolated(client: TestClient) ->
 def test_running_subscription_receives_application_heartbeat(client: TestClient) -> None:
     thread = create_thread(client)
     task = start_task(client, thread["thread_id"], "slow heartbeat")
-    status = wait_for_status(
-        client, thread["thread_id"], task["run_id"], {"running"}
-    )
+    status = wait_for_status(client, thread["thread_id"], task["run_id"], {"running"})
     url = (
-        f"/api/v1/ws/{thread['thread_id']}?run_id={task['run_id']}"
-        f"&after={status['last_sequence']}"
+        f"/api/v1/ws/{thread['thread_id']}?run_id={task['run_id']}&after={status['last_sequence']}"
     )
     with client.websocket_connect(url) as websocket:
         ready = websocket.receive_json()
@@ -413,9 +384,7 @@ def test_running_subscription_receives_application_heartbeat(client: TestClient)
     assert ready["data"]["name"] == "stream_ready"
     assert heartbeat["data"]["name"] == "heartbeat"
     assert heartbeat["sequence"] is None
-    client.post(
-        f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/cancel"
-    )
+    client.post(f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/cancel")
     wait_for_status(client, thread["thread_id"], task["run_id"], {"cancelled"})
 
 
@@ -423,9 +392,7 @@ def test_concurrent_new_thread_requests_leave_exactly_one_active_thread(
     client: TestClient,
 ) -> None:
     old = create_thread(client, user_id="concurrent-user")
-    task = start_task(
-        client, old["thread_id"], "并发归档", user_id="concurrent-user"
-    )
+    task = start_task(client, old["thread_id"], "并发归档", user_id="concurrent-user")
     wait_for_status(client, old["thread_id"], task["run_id"], {"succeeded"})
 
     def replace(index: int):
@@ -441,9 +408,7 @@ def test_concurrent_new_thread_requests_leave_exactly_one_active_thread(
     with ThreadPoolExecutor(max_workers=2) as pool:
         responses = list(pool.map(replace, range(2)))
     assert sorted(response.status_code for response in responses) == [201, 409]
-    active = client.get(
-        "/api/v1/threads?user_id=concurrent-user&status=active"
-    ).json()["items"]
+    active = client.get("/api/v1/threads?user_id=concurrent-user&status=active").json()["items"]
     assert len(active) == 1
 
 
@@ -471,9 +436,7 @@ def test_artifact_manifest_download_and_path_traversal_rejection(
             relative_path="artifacts/summary.md",
         )
     )
-    listed = client.get(
-        f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/files"
-    )
+    listed = client.get(f"/api/v1/threads/{thread['thread_id']}/runs/{task['run_id']}/files")
     assert listed.status_code == 200
     assert listed.json()["items"][0]["file_id"] == item["file_id"]
     downloaded = client.get(listed.json()["items"][0]["download_url"])

@@ -19,6 +19,7 @@ type Product = {
   reasons: string[];
   warnings: string[];
   specifications: Record<string, string>;
+  alternatives: Array<{ platform: string; price: number | null; currency: string; productUrl: string | null }>;
 };
 
 function stringValue(record: Record<string, unknown>, keys: string[]) {
@@ -52,6 +53,14 @@ function normalizeProduct(raw: Record<string, unknown>, index: number): Product 
     reasons: visibleResultStrings(stringList(raw.reasons)),
     warnings: visibleResultStrings(stringList(raw.flags)),
     specifications: attributes,
+    alternatives: Array.isArray(raw.alternative_offers)
+      ? raw.alternative_offers.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)).map((item) => ({
+        platform: stringValue(item, ["platform"]) || "来源待核验",
+        price: numberValue(item, "price"),
+        currency: stringValue(item, ["currency"]) || "CNY",
+        productUrl: stringValue(item, ["product_url", "url", "link"]),
+      }))
+      : [],
   };
 }
 
@@ -122,11 +131,12 @@ export function ProductResults({ artifacts, result, sourceThreadId = null, sourc
   return (
     <section className="result-panel" aria-labelledby="result-heading">
       <div className="result-heading-row"><div><span className="section-label">SHORTLIST</span><h2 id="result-heading">为你筛出的商品</h2></div></div>
+      {result?.ranking_method === "deterministic_fallback" && <div className="ranking-notice" role="status">模型精排暂不可用，当前结果已按来源顺位、可比较评分和价格稳定排序。</div>}
       {products.length ? <div className="product-list">{products.map((product, index) => {
         const checked = selected.includes(product.id);
         return <article className="product-card" key={product.id}>
           <div className="product-media"><span className="product-rank">#{String(index + 1).padStart(2, "0")}</span><ProductImage product={product} /></div>
-          <div className="product-copy"><div className="product-meta"><span>{platformLabel(product.platform)}</span>{product.rating !== null && <span>评分 {product.rating.toFixed(1)}</span>}{product.sales !== null && <span>销量 {product.sales.toLocaleString("zh-CN")}</span>}</div><h3>{product.title}</h3><ul>{(product.reasons.length ? product.reasons : ["按检索顺位与已知约束筛选"]).map((reason) => <li key={reason}><Check size={14} weight="bold" />{reason}</li>)}</ul>{product.warnings.length > 0 && <p className="product-warning">{product.warnings.join(" · ")}</p>}</div>
+          <div className="product-copy"><div className="product-meta"><span>{platformLabel(product.platform)}</span>{product.rating !== null && <span>评分 {product.rating.toFixed(1)}</span>}{product.sales !== null && <span>销量 {product.sales.toLocaleString("zh-CN")}</span>}</div><h3>{product.title}</h3><ul>{(product.reasons.length ? product.reasons : ["按来源顺位与已知约束筛选"]).map((reason) => <li key={reason}><Check size={14} weight="bold" />{reason}</li>)}</ul>{product.alternatives.length > 0 && <div className="product-alternatives"><strong>同款其他平台</strong>{product.alternatives.map((offer) => offer.productUrl && /^https?:\/\//i.test(offer.productUrl) ? <a href={offer.productUrl} key={`${offer.platform}-${offer.productUrl}`} rel="noopener noreferrer" target="_blank">{platformLabel(offer.platform)} · {offer.price === null ? "价格待核验" : `${offer.currency === "CNY" ? "¥" : offer.currency} ${offer.price.toFixed(2)}`}</a> : <span key={`${offer.platform}-${offer.price}`}>{platformLabel(offer.platform)} · {offer.price === null ? "价格待核验" : `${offer.currency === "CNY" ? "¥" : offer.currency} ${offer.price.toFixed(2)}`}</span>)}</div>}{product.warnings.length > 0 && <p className="product-warning">{product.warnings.join(" · ")}</p>}</div>
           <div className="product-actions"><div><small>快照价格</small><strong>{product.price === null ? "待核验" : `${product.currency === "CNY" ? "¥" : product.currency} ${product.price.toFixed(2)}`}</strong></div><button aria-pressed={checked} className={`compare-toggle ${checked ? "selected" : ""}`} onClick={() => toggle(product.id)}>{checked ? <Check size={15} weight="bold" /> : <Scales size={15} />} {checked ? "已加入对比" : "加入对比"}</button><button className={`wishlist-toggle ${saved.includes(product.id) ? "selected" : ""}`} disabled={!product.offerId || saving === product.id || saved.includes(product.id)} onClick={async () => { if (!product.offerId) return; const clientRequestId = `wishlist_${crypto.randomUUID()}`; setSaving(product.id); setWishlistError(null); try { await wishlistApi.add(product.offerId, sourceThreadId, sourceRunId, clientRequestId); setSaved((items) => [...items, product.id]); } catch (reason) { setWishlistError(reason instanceof Error ? reason.message : "加入心愿库失败"); } finally { setSaving(null); } }} title={!product.offerId ? "当前商品缺少稳定报价标识，暂时无法加入心愿库。" : undefined}><Heart size={15} weight={saved.includes(product.id) ? "fill" : "regular"} />{saved.includes(product.id) ? "已加入心愿库" : saving === product.id ? "正在加入…" : "加入心愿库"}</button>{product.productUrl && /^https?:\/\//i.test(product.productUrl) ? <a href={product.productUrl} rel="noopener noreferrer" target="_blank">前往来源 <ArrowSquareOut size={15} /></a> : <span className="source-unavailable">来源链接未提供</span>}</div>
         </article>;
       })}</div> : showEmptyShortlist && <div className="result-empty"><strong>暂未形成结构化商品清单</strong><span>完整建议仍保留在上方回答中。</span></div>}

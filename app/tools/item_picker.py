@@ -1,44 +1,59 @@
-"""Deterministic candidate shortlisting without a learned score."""
+"""Hard filtering, conservative grouping and one-shot LLM product reranking."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import math
+import time
+from functools import lru_cache
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from langchain_core.tools import tool
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, tool
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agent.llm import model_request_kwargs
+from app.api.monitor import current_monitor
 from app.category.schemas import CategoryInsightOutput
-from app.search.schemas import Platform, Scalar
+from app.config import get_settings
+from app.database.session import Database
+from app.products.catalog.repository import CatalogRepository
+from app.products.grouping import CandidateGroup, cap_groups_balanced, group_candidates
+from app.search.schemas import Candidate, Platform, Scalar
+from app.utils.thread_ctx import current_thread_id
+
+RANKING_VERSION = "direct-llm-rerank-v1"
 
 
 class PickerCandidate(BaseModel):
-    """One normalized candidate accepted by ItemPicker."""
-
     model_config = ConfigDict(extra="forbid")
-
-    item_id: str = Field(min_length=1)
+    item_id: str
     product_id: str | None = None
     offer_id: str | None = None
     platform: Platform
-    title: str = Field(min_length=1)
-    price: float = Field(ge=0)
-    currency: Literal["CNY"] = "CNY"
-    rating: float | None = Field(default=None, ge=0)
-    sales: int | None = Field(default=None, ge=0)
+    title: str
+    price: float
+    currency: str = "CNY"
+    rating: float | None = None
+    sales: int | None = None
     image_url: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
     product_url: str | None = None
     shipping_fee: float | None = Field(default=None, ge=0)
     total_cost: float | None = Field(default=None, ge=0)
-    retrieval_rank: int | None = Field(default=None, ge=1)
+    retrieval_rank: int | None = None
+    source_rank: int | None = None
+    captured_at: str | None = None
+    evidence_completeness: float = Field(default=0.0, ge=0, le=1)
 
 
 class PickerConstraints(BaseModel):
-    """Explicit hard constraints; absent evidence never counts as a match."""
-
     model_config = ConfigDict(extra="forbid")
-
     min_price: float | None = Field(default=None, ge=0)
     max_price: float | None = Field(default=None, ge=0)
     blocked_item_ids: list[str] = Field(default_factory=list)
@@ -59,7 +74,6 @@ class PickerConstraints(BaseModel):
 
 class CategoryAnnotations(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     price_tier: str | None = None
     matched_typical_attributes: list[dict[str, str]] = Field(default_factory=list)
     component_coverage: list[str] = Field(default_factory=list)
@@ -67,7 +81,8 @@ class CategoryAnnotations(BaseModel):
 
 class PickedItem(PickerCandidate):
     model_config = ConfigDict(extra="forbid")
-
+    product_group_id: str | None = None
+    alternative_offers: list[PickerCandidate] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list, max_length=3)
     flags: list[str] = Field(default_factory=list)
     category_annotations: CategoryAnnotations = Field(default_factory=CategoryAnnotations)
@@ -75,18 +90,47 @@ class PickedItem(PickerCandidate):
     @field_validator("reasons", mode="before")
     @classmethod
     def keep_top_reasons(cls, value: Any) -> Any:
-        """Keep tool-call drift from turning a valid shortlist into a retry loop."""
-
         return value[:3] if isinstance(value, list) else value
 
 
 class ItemPickerOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok", "insufficient_data"]
+    status: Literal["ok", "degraded", "insufficient_data"]
     picks: list[PickedItem] = Field(default_factory=list, max_length=3)
     rejected_brief: list[str] = Field(default_factory=list, max_length=8)
-    selection_rule: str = "retrieval_rank asc, rating desc, price asc, input order"
+    ranking_method: Literal["llm", "deterministic_fallback"]
+    ranking_version: str = RANKING_VERSION
+    fallback_reason: str | None = None
+    duplicate_summary: dict[str, int] = Field(default_factory=dict)
+    selection_rule: str = "source/retrieval rank, normalized rating, price, input order"
+
+
+class RerankAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    product_group_id: str
+    relevance: Literal["exact", "high", "medium", "low"]
+    preference_fit: Literal["strong", "partial", "unknown"]
+    specification_fit: Literal["strong", "partial", "unknown"]
+    value: Literal["strong", "fair", "weak", "unknown"]
+    evidence_quality: Literal["high", "medium", "low"]
+    confidence: Literal["high", "medium", "low"]
+    evidence_fields: list[str] = Field(default_factory=list, max_length=8)
+    risk_codes: list[
+        Literal[
+            "missing_rating",
+            "missing_sales",
+            "missing_model",
+            "stale_candidate",
+            "possible_duplicate",
+            "weak_preference_evidence",
+        ]
+    ] = Field(default_factory=list)
+
+
+class RerankDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ordered_group_ids: list[str] = Field(min_length=1, max_length=36)
+    assessments: list[RerankAssessment] = Field(default_factory=list, max_length=36)
 
 
 def _normalized(value: Any) -> str:
@@ -95,7 +139,24 @@ def _normalized(value: Any) -> str:
     return str(value).strip().casefold()
 
 
-def _hard_failure(item: PickerCandidate, constraints: PickerConstraints) -> str | None:
+def _hard_failure(
+    item: PickerCandidate,
+    constraints: PickerConstraints,
+    *,
+    require_source_url: bool = True,
+) -> str | None:
+    if not item.item_id.strip():
+        return "缺少平台商品 ID"
+    if not item.title.strip():
+        return "缺少商品标题"
+    if not math.isfinite(item.price) or item.price <= 0:
+        return "商品价格非法"
+    if item.currency.upper() != "CNY":
+        return "币种不受支持"
+    if require_source_url and (
+        not item.product_url or not item.product_url.startswith(("http://", "https://"))
+    ):
+        return "缺少可核验来源链接"
     if item.item_id in constraints.blocked_item_ids:
         return "命中商品黑名单"
     if item.platform in constraints.blocked_platforms:
@@ -104,13 +165,11 @@ def _hard_failure(item: PickerCandidate, constraints: PickerConstraints) -> str 
         return f"价格低于下限 {constraints.min_price:g} CNY"
     if constraints.max_price is not None and item.price > constraints.max_price:
         return f"价格超过预算 {constraints.max_price:g} CNY"
-
     for key, expected in constraints.required_attributes.items():
         if key not in item.attributes:
             return f"缺少硬约束属性证据：{key}"
         if _normalized(item.attributes[key]) != _normalized(expected):
             return f"属性 {key} 不满足要求"
-
     for key, excluded in constraints.excluded_attributes.items():
         if key not in item.attributes:
             return f"缺少黑名单属性证据：{key}"
@@ -126,12 +185,10 @@ def _category_annotations(
     annotations = CategoryAnnotations()
     if context is None or context.status not in {"ok", "partial"}:
         return annotations
-
     for tier in context.price_tiers:
         if tier.range_cny[0] <= item.price <= tier.range_cny[1]:
             annotations.price_tier = tier.tier
             break
-
     searchable = f"{item.title} {_normalized(item.attributes)}".casefold()
     for attribute in context.attributes:
         typical = sorted(attribute.distribution.items(), key=lambda pair: (-pair[1], pair[0]))
@@ -147,15 +204,153 @@ def _category_annotations(
     return annotations
 
 
-def _rank(
-    pair: tuple[int, PickerCandidate],
-) -> tuple[float, float, float, int]:
-    position, item = pair
+def _rating_signal(value: float | None) -> float:
+    if value is None:
+        return -1.0
+    if value <= 1:
+        return value
+    if value <= 5:
+        return value / 5
+    if value <= 100:
+        return value / 100
+    return -1.0
+
+
+def _group_rank(group: CandidateGroup) -> tuple[float, float, float, int]:
+    item = group.representative
+    best_source_rank = min(
+        (
+            offer.source_rank or offer.retrieval_rank
+            for offer in group.offers
+            if offer.source_rank is not None or offer.retrieval_rank is not None
+        ),
+        default=10**9,
+    )
+    best_rating = max((_rating_signal(offer.rating) for offer in group.offers), default=-1.0)
     return (
-        float(item.retrieval_rank) if item.retrieval_rank is not None else float("inf"),
-        -float(item.rating) if item.rating is not None else 0.0,
-        float(item.price),
-        position,
+        float(best_source_rank),
+        -best_rating,
+        item.price,
+        group.input_order,
+    )
+
+
+def _as_candidate(item: PickerCandidate) -> Candidate:
+    return Candidate.model_validate(item.model_dump(exclude={"total_cost"}))
+
+
+def _reason_lines(
+    item: PickerCandidate, assessment: RerankAssessment | None, annotations: CategoryAnnotations
+) -> list[str]:
+    reasons: list[str] = []
+    if assessment is not None:
+        if assessment.relevance in {"exact", "high"}:
+            reasons.append("与目标品类和用途高度相关")
+        if assessment.preference_fit == "strong":
+            reasons.append("较好匹配本轮软偏好")
+        if assessment.value == "strong":
+            reasons.append("在可比候选中价格表现较好")
+        if assessment.evidence_quality == "high":
+            reasons.append("商品证据字段相对完整")
+    if not reasons:
+        rank = item.source_rank or item.retrieval_rank
+        if rank:
+            reasons.append(f"来源候选顺位 {rank}")
+    if annotations.price_tier:
+        reasons.append(f"品类价格档位：{annotations.price_tier}")
+    return list(dict.fromkeys(reasons))[:3]
+
+
+def _picked(
+    group: CandidateGroup,
+    *,
+    assessment: RerankAssessment | None,
+    category_context: CategoryInsightOutput | None,
+) -> PickedItem:
+    representative = PickerCandidate.model_validate(group.representative.model_dump())
+    annotations = _category_annotations(representative, category_context)
+    flags = list(assessment.risk_codes) if assessment else []
+    if group.possible_duplicate_group_ids:
+        flags.append("possible_duplicate")
+    return PickedItem(
+        **representative.model_dump(),
+        product_group_id=group.product_group_id,
+        alternative_offers=[
+            PickerCandidate.model_validate(offer.model_dump()) for offer in group.offers[1:]
+        ],
+        reasons=_reason_lines(representative, assessment, annotations),
+        flags=list(dict.fromkeys(flags)),
+        category_annotations=annotations,
+    )
+
+
+def _prepare_groups(
+    items: list[PickerCandidate],
+    constraints: PickerConstraints,
+    group_limit: int,
+    *,
+    require_source_url: bool = True,
+) -> tuple[list[CandidateGroup], list[str], dict[str, int]]:
+    accepted: list[Candidate] = []
+    rejected: list[str] = []
+    seen_offer_ids: set[str] = set()
+    hard_filtered = 0
+    same_platform_duplicates = 0
+    for raw in items:
+        candidate = raw if isinstance(raw, PickerCandidate) else PickerCandidate.model_validate(raw)
+        failure = _hard_failure(candidate, constraints, require_source_url=require_source_url)
+        identity = candidate.offer_id or candidate.item_id
+        if failure is not None:
+            hard_filtered += 1
+            if len(rejected) < 8:
+                rejected.append(f"{candidate.item_id}: {failure}")
+            continue
+        if identity in seen_offer_ids:
+            same_platform_duplicates += 1
+            continue
+        seen_offer_ids.add(identity)
+        accepted.append(_as_candidate(candidate))
+    groups, summary = group_candidates(accepted)
+    groups = cap_groups_balanced(groups, group_limit)
+    statistics = summary.model_dump(mode="json")
+    statistics.update(
+        {
+            "received_offers": len(items),
+            "hard_filtered_offers": hard_filtered,
+            "same_platform_duplicates": same_platform_duplicates,
+            "ranked_product_groups": len(groups),
+        }
+    )
+    return groups, rejected, statistics
+
+
+def _deterministic_output(
+    items: list[PickerCandidate],
+    constraints: PickerConstraints,
+    category_context: CategoryInsightOutput | None,
+    limit: int,
+    *,
+    status: Literal["ok", "degraded"] = "ok",
+    fallback_reason: str | None = None,
+    require_source_url: bool = True,
+) -> ItemPickerOutput:
+    groups, rejected, summary = _prepare_groups(
+        items,
+        constraints,
+        get_settings().direct_rerank_group_limit,
+        require_source_url=require_source_url,
+    )
+    picks = [
+        _picked(group, assessment=None, category_context=category_context)
+        for group in sorted(groups, key=_group_rank)[:limit]
+    ]
+    return ItemPickerOutput(
+        status=status if picks else "insufficient_data",
+        picks=picks,
+        rejected_brief=rejected,
+        ranking_method="deterministic_fallback",
+        fallback_reason=fallback_reason,
+        duplicate_summary=summary,
     )
 
 
@@ -165,42 +360,279 @@ def item_picker(
     constraints: PickerConstraints | None = None,
     category_context: CategoryInsightOutput | None = None,
     limit: int = 3,
+    goal: str = "商品推荐",
+    soft_preferences: list[str] | None = None,
 ) -> dict:
-    """Apply explicit hard constraints, then deterministic retrieval ordering."""
+    """Compatibility deterministic picker used by local and legacy callers."""
+    del goal, soft_preferences
+    return _deterministic_output(
+        items,
+        constraints or PickerConstraints(),
+        category_context,
+        max(1, min(limit, 3)),
+        require_source_url=False,
+    ).model_dump(mode="json")
 
-    bounded_limit = max(1, min(limit, 3))
-    active_constraints = constraints or PickerConstraints()
-    accepted: list[tuple[int, PickerCandidate]] = []
-    rejected: list[str] = []
-    for position, raw in enumerate(items):
-        candidate = raw if isinstance(raw, PickerCandidate) else PickerCandidate.model_validate(raw)
-        failure = _hard_failure(candidate, active_constraints)
-        if failure is not None:
-            if len(rejected) < 8:
-                rejected.append(f"{candidate.item_id}: {failure}")
-            continue
-        accepted.append((position, candidate))
 
-    picks: list[PickedItem] = []
-    for _, candidate in sorted(accepted, key=_rank)[:bounded_limit]:
-        annotations = _category_annotations(candidate, category_context)
-        reasons = [f"检索顺位 {candidate.retrieval_rank}"] if candidate.retrieval_rank else []
-        if annotations.price_tier:
-            reasons.append(f"品类价格档位：{annotations.price_tier}")
-        if annotations.matched_typical_attributes:
-            reasons.append("匹配有证据的典型属性")
-        picks.append(
-            PickedItem(
-                **candidate.model_dump(),
-                reasons=reasons[:3],
-                flags=[],
-                category_annotations=annotations,
-            )
+def _portable_structured_model(model: BaseChatModel) -> BaseChatModel:
+    active_model = model
+    if isinstance(model, ChatOpenAI):
+        root_client = model.root_client.with_options(max_retries=0)
+        root_async_client = model.root_async_client.with_options(max_retries=0)
+        active_model = model.model_copy(
+            update={
+                "max_retries": 0,
+                "root_client": root_client,
+                "root_async_client": root_async_client,
+                "client": root_client.chat.completions,
+                "async_client": root_async_client.chat.completions,
+            }
         )
+    hostname = (
+        urlparse(str(getattr(active_model, "openai_api_base", "") or "")).hostname or ""
+    ).lower()
+    if hostname == "api.moonshot.cn" or hostname.endswith(".api.moonshot.cn"):
+        extra_body = dict(getattr(active_model, "extra_body", None) or {})
+        extra_body["thinking"] = {"type": "disabled"}
+        return active_model.model_copy(update={"extra_body": extra_body})
+    return active_model
 
-    output = ItemPickerOutput(
-        status="ok" if picks else "insufficient_data",
-        picks=picks,
-        rejected_brief=rejected,
+
+def _rerank_payload(groups: list[CandidateGroup]) -> list[dict[str, Any]]:
+    return [
+        {
+            "product_group_id": group.product_group_id,
+            "title": group.representative.title,
+            "price": group.representative.price,
+            "platforms": [offer.platform for offer in group.offers],
+            "source_rank": group.representative.source_rank,
+            "rating": group.representative.rating,
+            "sales": group.representative.sales,
+            "attributes": group.representative.attributes,
+            "evidence_completeness": group.representative.evidence_completeness,
+            "possible_duplicate": bool(group.possible_duplicate_group_ids),
+        }
+        for group in groups
+    ]
+
+
+def _validate_decision(
+    decision: RerankDecision, groups: list[CandidateGroup]
+) -> tuple[list[CandidateGroup], dict[str, RerankAssessment]]:
+    by_id = {group.product_group_id: group for group in groups}
+    ordered = decision.ordered_group_ids
+    if len(ordered) != len(set(ordered)) or any(group_id not in by_id for group_id in ordered):
+        raise ValueError("LLM rerank returned duplicate or unknown product_group_id")
+    assessments = {item.product_group_id: item for item in decision.assessments}
+    if len(assessments) != len(decision.assessments) or any(
+        key not in by_id for key in assessments
+    ):
+        raise ValueError("LLM rerank assessment references an invalid product group")
+    allowed_fields = {
+        "title",
+        "price",
+        "platforms",
+        "source_rank",
+        "rating",
+        "sales",
+        "attributes",
+        "evidence_completeness",
+        "possible_duplicate",
+    }
+    if any(
+        field not in allowed_fields
+        for item in assessments.values()
+        for field in item.evidence_fields
+    ):
+        raise ValueError("LLM rerank referenced an unavailable evidence field")
+    return [by_id[group_id] for group_id in ordered], assessments
+
+
+@lru_cache(maxsize=1)
+def _group_repository() -> CatalogRepository | None:
+    settings = get_settings()
+    if settings.database_url is None:
+        return None
+    database = Database(
+        settings.database_url.get_secret_value(),
+        echo=settings.database_echo,
+        pool_size=settings.database_pool_size,
+        pool_recycle=settings.database_pool_recycle_seconds,
     )
-    return output.model_dump(mode="json")
+    return CatalogRepository(database, scope_ttl_seconds=settings.catalog_scope_ttl_seconds)
+
+
+def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
+    @tool("item_picker")
+    async def llm_item_picker(
+        items: list[PickerCandidate],
+        config: RunnableConfig,
+        constraints: PickerConstraints | None = None,
+        category_context: CategoryInsightOutput | None = None,
+        limit: int = 3,
+        goal: str = "商品推荐",
+        soft_preferences: list[str] | None = None,
+    ) -> dict:
+        """Filter, group and globally rerank provider candidates once."""
+        settings = get_settings()
+        bounded_limit = max(1, min(limit, 3))
+        active_constraints = constraints or PickerConstraints()
+        groups, rejected, summary = _prepare_groups(
+            items, active_constraints, settings.direct_rerank_group_limit
+        )
+        monitor = current_monitor()
+        if monitor is not None:
+            await monitor.report_catalog(
+                "candidate_filter_completed",
+                phase="filtering",
+                status="finished",
+                received=len(items),
+                accepted=summary["input_offers"],
+                rejected=summary["hard_filtered_offers"],
+            )
+            await monitor.report_catalog(
+                "candidate_grouping_completed",
+                phase="grouping",
+                status="finished",
+                candidate_pool=summary["input_offers"],
+                product_groups=summary["product_groups"],
+                collapsed_offers=summary["collapsed_offers"],
+                possible_duplicates=summary["possible_duplicate_pairs"],
+            )
+        if not groups:
+            return ItemPickerOutput(
+                status="insufficient_data",
+                picks=[],
+                rejected_brief=rejected,
+                ranking_method="deterministic_fallback",
+                duplicate_summary=summary,
+            ).model_dump(mode="json")
+        repository = _group_repository()
+        if repository is not None:
+            try:
+                await repository.persist_product_groups(groups)
+            except Exception:
+                pass
+        if model is None:
+            output = _deterministic_output(
+                items,
+                active_constraints,
+                category_context,
+                bounded_limit,
+                status="degraded",
+                fallback_reason="reranker_not_configured",
+            )
+            if monitor is not None:
+                await monitor.report_catalog(
+                    "llm_rerank_degraded",
+                    phase="reranking",
+                    status="degraded",
+                    candidate_pool=len(groups),
+                    ranking_method="deterministic_fallback",
+                )
+            return output.model_dump(mode="json")
+        if monitor is not None:
+            await monitor.report_catalog(
+                "llm_rerank_started",
+                phase="reranking",
+                status="running",
+                candidate_pool=len(groups),
+                ranking_method="llm",
+            )
+        started = time.perf_counter()
+        try:
+            structured = _portable_structured_model(model).with_structured_output(
+                RerankDecision, method="function_calling"
+            )
+            messages = [
+                SystemMessage(
+                    content=(
+                        "你是商品候选精排器。只能排序输入的 product_group_id，"
+                        "不得修改或补充事实。硬约束已经由代码执行，不得让被过滤商品"
+                        "重新出现。综合考察查询相关性、软偏好、规格、同规格性价比、"
+                        "证据质量、新鲜度和 Top3 差异化。评分和销量缺失不等于质量差，"
+                        "不同平台量纲不得直接比较。"
+                    )
+                ),
+                HumanMessage(
+                    content=json.dumps(
+                        {
+                            "goal": goal,
+                            "soft_preferences": soft_preferences or [],
+                            "candidates": _rerank_payload(groups),
+                            "output_limit": bounded_limit,
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            ]
+            model_config = dict(config or {})
+            model_config["run_name"] = "item_picker.rerank"
+            model_config["tags"] = [*model_config.get("tags", []), "item_rerank"]
+            async with asyncio.timeout(settings.item_rerank_timeout_seconds):
+                response = await structured.ainvoke(
+                    messages,
+                    config=model_config,
+                    **model_request_kwargs(current_thread_id(), model=model),
+                )
+            decision = (
+                response
+                if isinstance(response, RerankDecision)
+                else RerankDecision.model_validate(response)
+            )
+            ordered, assessments = _validate_decision(decision, groups)
+            seen = {group.product_group_id for group in ordered}
+            ordered.extend(
+                group
+                for group in sorted(groups, key=_group_rank)
+                if group.product_group_id not in seen
+            )
+            picks = [
+                _picked(
+                    group,
+                    assessment=assessments.get(group.product_group_id),
+                    category_context=category_context,
+                )
+                for group in ordered[:bounded_limit]
+            ]
+            if monitor is not None:
+                await monitor.report_catalog(
+                    "llm_rerank_completed",
+                    phase="reranking",
+                    status="finished",
+                    candidate_pool=len(groups),
+                    returned=len(picks),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    ranking_method="llm",
+                )
+            return ItemPickerOutput(
+                status="ok",
+                picks=picks,
+                rejected_brief=rejected,
+                ranking_method="llm",
+                duplicate_summary=summary,
+            ).model_dump(mode="json")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            reason = type(exc).__name__.casefold()
+            output = _deterministic_output(
+                items,
+                active_constraints,
+                category_context,
+                bounded_limit,
+                status="degraded",
+                fallback_reason=reason,
+            )
+            if monitor is not None:
+                await monitor.report_catalog(
+                    "llm_rerank_degraded",
+                    phase="reranking",
+                    status="degraded",
+                    candidate_pool=len(groups),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    ranking_method="deterministic_fallback",
+                )
+            return output.model_dump(mode="json")
+
+    return llm_item_picker

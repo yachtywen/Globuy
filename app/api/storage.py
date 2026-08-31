@@ -14,9 +14,7 @@ import aiosqlite
 
 from app.api.errors import ApiError
 
-TERMINAL_RUN_STATUSES = frozenset(
-    {"succeeded", "cancelled", "failed", "interrupted"}
-)
+TERMINAL_RUN_STATUSES = frozenset({"succeeded", "cancelled", "failed", "interrupted"})
 ACTIVE_RUN_STATUSES = frozenset({"starting", "running", "cancelling"})
 
 
@@ -704,9 +702,7 @@ class SessionStore:
             )
             return [dict(row) for row in await cursor.fetchall()]
 
-    async def artifact(
-        self, thread_id: str, run_id: str, file_id: str
-    ) -> dict[str, Any]:
+    async def artifact(self, thread_id: str, run_id: str, file_id: str) -> dict[str, Any]:
         async with self._lock:
             cursor = await self._db().execute(
                 """

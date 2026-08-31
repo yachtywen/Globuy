@@ -7,9 +7,7 @@ from datasets.justone_headphones.repair_snapshot_text import repair_rows
 def _write_raw(root: Path, platform: str, payload: dict) -> None:
     target = root / platform / "search"
     target.mkdir(parents=True)
-    (target / "response.json").write_text(
-        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-    )
+    (target / "response.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def test_repair_rows_restores_title_and_attributes_from_raw(tmp_path: Path) -> None:

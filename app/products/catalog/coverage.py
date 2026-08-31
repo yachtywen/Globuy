@@ -1,4 +1,4 @@
-"""MySQL-backed bounded catalog coverage inspection."""
+"""PostgreSQL-backed bounded catalog coverage inspection."""
 
 from __future__ import annotations
 
@@ -40,9 +40,7 @@ class CatalogCoverageService:
         async with self.database.sessions() as session:
             row = await session.get(CatalogScopeRow, scope.scope_id)
             if row is None:
-                return CoverageResult(
-                    "missing", scope.scope_id, 0, (), None, True, "scope_missing"
-                )
+                return CoverageResult("missing", scope.scope_id, 0, (), None, True, "scope_missing")
             offer_ids = tuple(
                 await session.scalars(
                     select(CatalogScopeOffer.offer_id)

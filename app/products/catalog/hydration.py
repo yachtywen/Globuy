@@ -69,18 +69,21 @@ class CatalogHydrationCoordinator:
         self._lock = asyncio.Lock()
 
     @staticmethod
-    def group_key(intent: ShoppingIntent, provider: str) -> str:
+    def group_key(intent: ShoppingIntent, provider: str, target_total: int | None = None) -> str:
         value = {
             "category_key": intent.category_key,
             "query": " ".join(intent.primary_query.lower().split()),
             "platforms": sorted(intent.platforms),
             "filters": intent.filters.model_dump(mode="json"),
             "provider": provider,
+            "target_total": target_total,
             "version": "hydration-v1",
         }
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
-    async def ensure(self, intent: ShoppingIntent) -> HydrationResult:
+    async def ensure(
+        self, intent: ShoppingIntent, *, target_total: int | None = None
+    ) -> HydrationResult:
         if not intent.provider_allowed:
             return HydrationResult(
                 "partial", 0, {}, list(intent.platforms), "clarification", "blocked"
@@ -98,13 +101,15 @@ class CatalogHydrationCoordinator:
         thread_id, run_id = current_thread_id(), current_run_id()
         if thread_id is None or run_id is None:
             raise RuntimeError("Catalog hydration requires thread/run context")
-        key = self.group_key(intent, provider_name)
+        key = self.group_key(intent, provider_name, target_total)
         subscriber_key = (thread_id.split("-fork-", 1)[0], run_id)
         async with self._lock:
             job = self._jobs.get(key)
             if job is None or job.task.done():
                 placeholder: dict[str, _SharedJob] = {}
-                task = asyncio.create_task(self._run(key, intent, placeholder))
+                task = asyncio.create_task(
+                    self._run(key, intent, placeholder, target_total=target_total)
+                )
                 job = _SharedJob(task=task)
                 placeholder["job"] = job
                 self._jobs[key] = job
@@ -141,9 +146,18 @@ class CatalogHydrationCoordinator:
                 )
 
     async def _run(
-        self, key: str, intent: ShoppingIntent, holder: dict[str, _SharedJob]
+        self,
+        key: str,
+        intent: ShoppingIntent,
+        holder: dict[str, _SharedJob],
+        *,
+        target_total: int | None = None,
     ) -> HydrationResult:
         settings = self.settings
+        requested_target = target_total or settings.catalog_target_total
+        minimum_total = min(settings.catalog_minimum_total, requested_target)
+        hard_cap_total = min(settings.catalog_hard_cap_total, requested_target)
+        minimum_per_platform = min(settings.catalog_minimum_per_platform, requested_target)
         hydration_run_id = uuid4().hex
         scopes = {
             platform: CatalogScope.from_intent(intent, platform, provider=settings.product_provider)
@@ -168,7 +182,7 @@ class CatalogHydrationCoordinator:
             phase="catalog",
             status="sufficient" if all(not item.refresh_required for item in coverages) else "thin",
             fresh_candidates=sum(fresh.values()),
-            target=settings.catalog_target_total,
+            target=requested_target,
             message="正在检查已有商品目录",
         )
         if all(not item.refresh_required for item in coverages):
@@ -180,10 +194,10 @@ class CatalogHydrationCoordinator:
             key,
             intent.model_dump(mode="json"),
             {
-                "minimum": settings.catalog_minimum_total,
-                "target": settings.catalog_target_total,
-                "hard_cap": settings.catalog_hard_cap_total,
-                "minimum_per_platform": settings.catalog_minimum_per_platform,
+                "minimum": minimum_total,
+                "target": requested_target,
+                "hard_cap": hard_cap_total,
+                "minimum_per_platform": minimum_per_platform,
             },
             settings.catalog_lease_seconds,
         )
@@ -195,10 +209,10 @@ class CatalogHydrationCoordinator:
                 leased.add(platform)
         policy = CatalogStopPolicy(
             tuple(intent.platforms),
-            settings.catalog_minimum_total,
-            settings.catalog_target_total,
-            settings.catalog_hard_cap_total,
-            settings.catalog_minimum_per_platform,
+            minimum_total,
+            requested_target,
+            hard_cap_total,
+            minimum_per_platform,
             settings.catalog_max_success_calls_per_run,
             settings.catalog_max_attempts_per_run,
             counts=fresh,
@@ -254,9 +268,7 @@ class CatalogHydrationCoordinator:
                         provider_filters=intent.filters,
                         cursor=cursors[platform],
                     )
-                    if not await self.repository.reserve_request(
-                        fingerprint, hydration_run_id
-                    ):
+                    if not await self.repository.reserve_request(fingerprint, hydration_run_id):
                         policy.exhausted.add(platform)
                         break
                     request = ProviderSearchRequest(
@@ -269,8 +281,7 @@ class CatalogHydrationCoordinator:
                     )
                     remaining_seconds = max(
                         0.01,
-                        settings.catalog_hard_deadline_seconds
-                        - (time.monotonic() - started),
+                        settings.catalog_hard_deadline_seconds - (time.monotonic() - started),
                     )
                     try:
                         page = await asyncio.wait_for(
@@ -289,9 +300,8 @@ class CatalogHydrationCoordinator:
                     }:
                         delay = 0.1 if page.status == ProviderErrorCode.RATE_LIMITED else 0.05
                         await asyncio.sleep(delay)
-                        retry_remaining = (
-                            settings.catalog_hard_deadline_seconds
-                            - (time.monotonic() - started)
+                        retry_remaining = settings.catalog_hard_deadline_seconds - (
+                            time.monotonic() - started
                         )
                         if retry_remaining > 0:
                             try:
@@ -308,6 +318,11 @@ class CatalogHydrationCoordinator:
                     normalized = [
                         item for raw in page.items if (item := normalize_item(platform, raw))
                     ]
+                    before_page_dedup = len(normalized)
+                    normalized = list({str(item["item_id"]): item for item in normalized}.values())
+                    base_rank = len(seen_offer_ids[platform])
+                    for position, item in enumerate(normalized, start=1):
+                        item["source_rank"] = base_rank + position
                     persisted = {"accepted": 0, "offer_ids": []}
                     async with policy_lock:
                         remaining = max(0, policy.hard_cap_total - policy.total)
@@ -333,7 +348,7 @@ class CatalogHydrationCoordinator:
                         status="finished",
                         received=len(page.items),
                         accepted=len(normalized),
-                        duplicates=0,
+                        duplicates=max(0, before_page_dedup - len(normalized)),
                         rejected=max(0, len(page.items) - len(normalized)),
                         message="已完成商品字段校验",
                     )
@@ -363,9 +378,7 @@ class CatalogHydrationCoordinator:
                     low_yield[platform] = low_yield[platform] + 1 if accepted < 3 else 0
                     success = page.status == ProviderErrorCode.OK
                     async with policy_lock:
-                        policy.observe(
-                            platform, accepted, success=success, has_more=page.has_more
-                        )
+                        policy.observe(platform, accepted, success=success, has_more=page.has_more)
                     if not success:
                         partial.add(platform)
                         break
@@ -416,9 +429,7 @@ class CatalogHydrationCoordinator:
         finally:
             await asyncio.gather(
                 *(
-                    self.repository.release_scope_lease(
-                        scopes[platform].scope_id, hydration_run_id
-                    )
+                    self.repository.release_scope_lease(scopes[platform].scope_id, hydration_run_id)
                     for platform in leased
                 ),
                 return_exceptions=True,

@@ -217,8 +217,7 @@ def create_app(
                         scope_value=candidate.get("scope_value"),
                         evidence_type=evidence_type,
                         persistence_scope=persistence_scope,
-                        extraction_version=candidate.get("extraction_version")
-                        or "memory-fact-v2",
+                        extraction_version=candidate.get("extraction_version") or "memory-fact-v2",
                     )
                 )
             except (TypeError, ValueError):

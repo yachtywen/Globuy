@@ -36,22 +36,18 @@ class ProductOutboxWorker:
         now = utc_naive()
         claim_token = uuid4().hex
         async with self.database.sessions.begin() as session:
-            statement = (
-                select(OutboxEvent)
-                .where(
-                    OutboxEvent.aggregate_type == "product",
-                    OutboxEvent.published_at.is_(None),
-                    OutboxEvent.attempts < self.settings.product_outbox_max_attempts,
-                    (OutboxEvent.available_at.is_(None)) | (OutboxEvent.available_at <= now),
-                    (OutboxEvent.claimed_at.is_(None))
-                    | (OutboxEvent.claimed_at < now - timedelta(minutes=5)),
-                )
+            statement = select(OutboxEvent).where(
+                OutboxEvent.aggregate_type == "product",
+                OutboxEvent.published_at.is_(None),
+                OutboxEvent.attempts < self.settings.product_outbox_max_attempts,
+                (OutboxEvent.available_at.is_(None)) | (OutboxEvent.available_at <= now),
+                (OutboxEvent.claimed_at.is_(None))
+                | (OutboxEvent.claimed_at < now - timedelta(minutes=5)),
             )
             if preferred_offer_ids:
                 statement = statement.where(OutboxEvent.aggregate_id.in_(preferred_offer_ids))
             statement = (
-                statement
-                .order_by(OutboxEvent.created_at, OutboxEvent.event_id)
+                statement.order_by(OutboxEvent.created_at, OutboxEvent.event_id)
                 .limit(
                     min(
                         1000,
@@ -60,11 +56,7 @@ class ProductOutboxWorker:
                 )
                 .with_for_update(skip_locked=True)
             )
-            events = list(
-                (
-                    await session.scalars(statement)
-                ).all()
-            )
+            events = list((await session.scalars(statement)).all())
             bounded: list[OutboxEvent] = []
             used_bytes = 0
             for event in events:

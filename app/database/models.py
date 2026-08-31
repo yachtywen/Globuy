@@ -329,6 +329,39 @@ class CatalogScopeOffer(Base):
     )
     last_seen_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     expires_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
+    source_rank: Mapped[int | None] = mapped_column(Integer)
+    source_request_key: Mapped[str | None] = mapped_column(String(64))
+
+
+class ProductGroup(Base):
+    __tablename__ = "product_groups"
+
+    product_group_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    identity_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    identity_version: Mapped[str] = mapped_column(String(32))
+    brand_normalized: Mapped[str | None] = mapped_column(String(255), index=True)
+    model_normalized: Mapped[str | None] = mapped_column(String(255), index=True)
+    variant_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+    updated_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+
+
+class ProductGroupMember(Base):
+    __tablename__ = "product_group_members"
+
+    product_id: Mapped[str] = mapped_column(
+        ForeignKey("products.product_id", ondelete="CASCADE"), primary_key=True
+    )
+    product_group_id: Mapped[str] = mapped_column(
+        ForeignKey("product_groups.product_group_id", ondelete="CASCADE"), index=True
+    )
+    match_method: Mapped[str] = mapped_column(String(32))
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+
+    __table_args__ = (
+        CheckConstraint("match_method IN ('singleton','gtin_exact','brand_model_variant_exact')"),
+    )
 
 
 class CatalogHydrationRun(Base):

@@ -24,9 +24,7 @@ def estimate_value_tokens(value: Any) -> int:
     """Return the project's bounded trend estimate; never a billable token count."""
 
     encoded = (
-        json.dumps(value, ensure_ascii=False, default=str)
-        if not isinstance(value, str)
-        else value
+        json.dumps(value, ensure_ascii=False, default=str) if not isinstance(value, str) else value
     )
     return max(1, len(encoded) // 4)
 
@@ -142,9 +140,7 @@ _tool_context: ContextVar[ToolObservationContext | None] = ContextVar(
 def tool_observation_scope(
     tool_name: str, tool_call_id: str, phase: str | None, *, started_at: float
 ):
-    token = _tool_context.set(
-        ToolObservationContext(tool_name, tool_call_id, phase, started_at)
-    )
+    token = _tool_context.set(ToolObservationContext(tool_name, tool_call_id, phase, started_at))
     try:
         yield
     finally:
@@ -170,9 +166,7 @@ class CompressionMetrics:
 def context_metrics(messages: Sequence[BaseMessage]) -> ContextMetrics:
     total = sum(estimate_tokens(message) for message in messages)
     system = sum(
-        estimate_tokens(message)
-        for message in messages
-        if isinstance(message, SystemMessage)
+        estimate_tokens(message) for message in messages if isinstance(message, SystemMessage)
     )
     tool = sum(estimate_tokens(message) for message in messages if isinstance(message, ToolMessage))
     characters = sum(len(str(message.content)) for message in messages)
@@ -212,8 +206,7 @@ def compression_metrics(
         after_estimated_tokens=after_tokens,
         removed_message_count=max(0, len(before) - retained_originals),
         retained_tool_group_count=sum(
-            isinstance(message, AIMessage) and bool(message.tool_calls)
-            for message in retained
+            isinstance(message, AIMessage) and bool(message.tool_calls) for message in retained
         ),
     )
 

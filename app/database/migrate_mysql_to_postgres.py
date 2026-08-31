@@ -133,9 +133,7 @@ async def migrate(
                     non_empty_tables.append(target_table.name)
             if non_empty_tables:
                 names = ", ".join(non_empty_tables)
-                raise RuntimeError(
-                    f"target PostgreSQL is not empty; migration refused ({names})"
-                )
+                raise RuntimeError(f"target PostgreSQL is not empty; migration refused ({names})")
             source_names = set(source_metadata.tables)
             for target_table in Base.metadata.sorted_tables:
                 if target_table.name not in source_names:

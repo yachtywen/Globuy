@@ -26,6 +26,7 @@ from app.api.monitor import current_monitor
 from app.compress.breakpoint import estimate_tokens
 from app.config import get_settings
 from app.observability.metrics import estimate_value_tokens, tool_observation_scope
+from app.utils.thread_ctx import current_fork_depth
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +134,13 @@ def compact_tool_content(tool_name: str, content: Any) -> Any:
     settings = get_settings()
     if tool_name == "item_search" and isinstance(payload, dict):
         candidates = payload.get("candidates")
-        if isinstance(candidates, list) and len(candidates) > settings.fork_candidate_limit:
-            payload["candidates"] = candidates[: settings.fork_candidate_limit]
+        candidate_limit = (
+            settings.direct_candidates_per_platform
+            if payload.get("search_strategy") == "direct_llm"
+            else settings.fork_candidate_limit
+        )
+        if isinstance(candidates, list) and len(candidates) > candidate_limit:
+            payload["candidates"] = candidates[:candidate_limit]
             payload["truncated"] = True
     char_budget = settings.tool_result_token_limit * 4
     compacted, _ = _trim_value(payload, budget=char_budget)
@@ -286,6 +292,30 @@ async def guarded_tool_call(
                 call_id,
                 {
                     "status": "needs_planning",
+                    "tool_name": name,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
+        return rejected
+    if name == "item_picker" and current_fork_depth() > 0:
+        payload = {
+            "status": "parent_only",
+            "message": "跨平台候选必须回流父 Agent 后统一执行一次 ItemPicker。",
+        }
+        rejected = ToolMessage(
+            content=_json(payload), name=name, tool_call_id=call_id, status="error"
+        )
+        await _observe_rejected_tool(
+            request,
+            rejected,
+            started_at=started,
+            phase=state.get("decision_phase"),
+        )
+        if monitor is not None:
+            await monitor.report_tool_end(
+                call_id,
+                {
+                    "status": "parent_only",
                     "tool_name": name,
                     "duration_ms": int((time.perf_counter() - started) * 1000),
                 },

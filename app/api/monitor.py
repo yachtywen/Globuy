@@ -45,12 +45,42 @@ EventPublisher = Callable[[str, AgentEvent], Awaitable[None]]
 monitor_var: ContextVar["Monitor | None"] = ContextVar("monitor", default=None)
 CATALOG_EVENT_FIELDS = frozenset(
     {
-        "phase", "status", "category_name", "platforms", "has_budget",
-        "fresh_candidates", "minimum", "target", "hard_cap", "platform", "page",
-        "received", "accepted", "platform_total", "deduplicated_total", "total",
-        "platform_counts", "partial_platforms", "stop_reason", "duplicates", "rejected",
-        "upserted_products", "new_observations", "embedded", "reused_vectors", "indexed",
-        "candidate_pool", "returned", "message", "provider_status",
+        "phase",
+        "status",
+        "category_name",
+        "platforms",
+        "has_budget",
+        "fresh_candidates",
+        "minimum",
+        "target",
+        "hard_cap",
+        "platform",
+        "page",
+        "received",
+        "accepted",
+        "platform_total",
+        "deduplicated_total",
+        "total",
+        "platform_counts",
+        "partial_platforms",
+        "stop_reason",
+        "duplicates",
+        "rejected",
+        "upserted_products",
+        "new_observations",
+        "embedded",
+        "reused_vectors",
+        "indexed",
+        "candidate_pool",
+        "returned",
+        "message",
+        "provider_status",
+        "strategy",
+        "product_groups",
+        "collapsed_offers",
+        "possible_duplicates",
+        "ranking_method",
+        "duration_ms",
     }
 )
 
@@ -87,9 +117,7 @@ class Monitor:
             **{key: value for key, value in data.items() if key in CATALOG_EVENT_FIELDS},
         )
 
-    async def report_catalog_for(
-        self, thread_id: str, run_id: str, name: str, **data: Any
-    ) -> None:
+    async def report_catalog_for(self, thread_id: str, run_id: str, name: str, **data: Any) -> None:
         await self.emit_for(
             EventType.CUSTOM,
             thread_id,

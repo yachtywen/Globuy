@@ -446,6 +446,11 @@ interface ProductPick {
   reasons?: string[];
   flags?: string[];
   retrieval_rank?: number | null;
+  source_rank?: number | null;
+  captured_at?: string | null;
+  evidence_completeness?: number;
+  product_group_id?: string | null;
+  alternative_offers?: ProductPick[];
 }
 ```
 
@@ -453,6 +458,9 @@ interface ProductPick {
 
 - 加入心愿库必须使用稳定 `offer_id`，不能只提交兼容 `item_id`。
 - `product_id` 是归一化商品；`offer_id` 是具体平台报价，心愿库按 Offer 跟踪。
+- `product_group_id` 是跨平台保守同款组；顶层字段是确定性代表 Offer，`alternative_offers`
+  保存同组其他平台合格报价。当前没有运费事实，因此只比较商品价，不声明到手价。
+- `source_rank` 来自 Provider/缓存原始顺位；`retrieval_rank` 只来自 Hybrid 检索，两者不得互换。
 - `rating`、`sales`、`price` 可能为 `null`，不可转成 `0`。
 - 运行状态响应顶层 `artifacts` 是产物清单的权威入口。
 
@@ -544,15 +552,23 @@ HTTPS 使用 `wss://`。浏览器自动随同源握手发送会话 Cookie。首�
 - `{name: "thread_archived", thread_id, new_thread_id}`：当前会话归档，切换只读并跟随新会话。
 - 商品目录临时状态：`shopping_intent_resolved`、`catalog_cache_checked`、`catalog_fetch_started`、
   `catalog_fetch_progress`、`catalog_fetch_finished`、`catalog_normalization_progress`、
-  `catalog_persistence_progress`、`catalog_index_progress`、`hybrid_retrieval_progress`。这些事件只包含品类名、平台、
+  `catalog_persistence_progress`、`catalog_index_progress`、`hybrid_retrieval_progress`、
+  `candidate_filter_completed`、`candidate_grouping_completed`、`llm_rerank_started`、
+  `llm_rerank_completed`、`llm_rerank_degraded`。这些事件只包含品类名、平台、
   是否有预算、阶段状态和候选计数等白名单字段；不得包含 Token、游标、Provider 原文、原始业务码或异常堆栈。
   前端按 `sequence` 幂等合并平台快照，不把事件转换成 assistant 消息，并在终态、取消、错误、新 run、切换会话或
   `replay_gap` 状态同步后清理临时进度。
 
-ItemSearch 仍保持一次调用只搜索一个平台。内部调用可携带同一份已验证结构化购物意图，返回状态为
+ItemSearch 仍保持一次调用只搜索一个平台。`search_strategy` 为 `hybrid | direct_llm`；运行配置还可
+使用 `progressive` 按稳定用户哈希选择其中一条，普通请求不会双跑 Provider。内部调用可携带同一份已验证结构化购物意图，返回状态为
 `ok | partial | not_configured | error | cancelled`，并可包含 `catalog_status`、`catalog_candidate_count`、
 `captured_at` 和 `provider_status`。Provider 默认关闭时仍搜索已有本地目录；目录不足不会触发真实网络请求，而返回
 `not_configured`。候选不新增无法验证的库存、运费或综合评分字段。
+
+父 Agent 汇总三路候选后只调用一次 ItemPicker。其完整工具结果额外包含
+`ranking_method=llm|deterministic_fallback`、`ranking_version`、
+`status=ok|degraded|insufficient_data`、脱敏 `fallback_reason` 与去重统计；这些诊断字段不允许
+模型修改商品事实。直搜每平台最多 15 条，LLM 最多接收 36 个商品组且不自动重试。
 
 ### 8.3 重连规则
 

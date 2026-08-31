@@ -100,11 +100,15 @@ class EventBroker:
     ) -> MonitorEvent:
         stream = await self.ensure_stream(thread_id, run_id)
         async with stream.lock:
-            if event_type in {
-                EventType.RUN_FINISHED,
-                EventType.RUN_ERROR,
-                EventType.TASK_CANCELLED,
-            } and stream.terminal_event is not None:
+            if (
+                event_type
+                in {
+                    EventType.RUN_FINISHED,
+                    EventType.RUN_ERROR,
+                    EventType.TASK_CANCELLED,
+                }
+                and stream.terminal_event is not None
+            ):
                 return stream.terminal_event
             sequence = stream.next_sequence
             stream.next_sequence += 1
@@ -173,9 +177,7 @@ class EventBroker:
             data={"name": name, **data},
         )
 
-    async def subscribe(
-        self, thread_id: str, run_id: str, after: int
-    ) -> Subscription:
+    async def subscribe(self, thread_id: str, run_id: str, after: int) -> Subscription:
         stream = await self.ensure_stream(thread_id, run_id)
         async with stream.lock:
             replay = [item for item in stream.buffer if (item.sequence or 0) > after]
@@ -235,9 +237,7 @@ class EventBroker:
                     stream.buffer[0].sequence if stream.buffer else None
                 ),
                 "terminal_event": (
-                    stream.terminal_event.model_dump(mode="json")
-                    if stream.terminal_event
-                    else None
+                    stream.terminal_event.model_dump(mode="json") if stream.terminal_event else None
                 ),
             }
 

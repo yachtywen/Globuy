@@ -77,11 +77,7 @@ def case_payload(*, llm: bool = False) -> dict:
                     "id": "clear_text",
                     "description": "表达清楚",
                     "judge": p2_judge,
-                    **(
-                        {}
-                        if llm
-                        else {"assertion": {"type": "final_text_nonempty"}}
-                    ),
+                    **({} if llm else {"assertion": {"type": "final_text_nonempty"}}),
                 }
             ],
         },

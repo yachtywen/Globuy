@@ -390,6 +390,10 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px sol
 .product-copy ul { margin: 0; padding: 0; display: grid; gap: 6px; list-style: none; }
 .product-copy li { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }.product-copy li svg { margin-top: 1px; flex: 0 0 auto; color: var(--green); }
 .product-warning { margin: 9px 0 0; color: #9b4d3b; font-size: 10px; }
+.product-alternatives { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 10px; }
+.product-alternatives strong { width: 100%; color: var(--muted); font-size: 9px; }
+.product-alternatives a, .product-alternatives span { padding: 5px 8px; color: var(--ink); background: white; border: 1px solid var(--line-soft); border-radius: 999px; text-decoration: none; }
+.ranking-notice { margin: 0 0 12px; padding: 9px 12px; border: 1px solid #ead9a6; border-radius: 10px; background: #fffaf0; color: #755b13; font-size: 12px; }
 .product-actions { padding-left: 14px; display: flex; flex-direction: column; justify-content: center; gap: 8px; border-left: 1px solid var(--line-soft); }
 .product-actions > div { display: grid; gap: 4px; }.product-actions small { color: var(--muted); font-size: 9px; }.product-actions strong { color: var(--orange); font-size: 17px; }
 .product-actions button, .product-actions a { min-height: 36px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; font-size: 10px; font-weight: 700; text-decoration: none; cursor: pointer; }

@@ -126,9 +126,9 @@ def test_document_text_excludes_offer_fields_and_flattens_attributes() -> None:
 def test_index_and_pipeline_use_lucene_cosine_and_unweighted_rrf() -> None:
     body = product_index_body(FakeEncoder().metadata)
     vector = body["mappings"]["properties"]["content_vector"]
-    combination = search_pipeline_body()["phase_results_processors"][0][
-        "score-ranker-processor"
-    ]["combination"]
+    combination = search_pipeline_body()["phase_results_processors"][0]["score-ranker-processor"][
+        "combination"
+    ]
 
     assert vector["dimension"] == 3
     assert vector["method"] == {

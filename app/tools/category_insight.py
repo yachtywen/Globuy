@@ -52,9 +52,7 @@ async def category_insight(
 
     normalized = category.strip()
     try:
-        output, trace = await get_category_search_service().query_with_trace(
-            normalized, depth
-        )
+        output, trace = await get_category_search_service().query_with_trace(normalized, depth)
     except Exception as exc:
         output = CategoryInsightOutput(
             status="error",

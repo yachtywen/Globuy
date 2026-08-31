@@ -646,9 +646,7 @@ class MemoryService:
         )
         if not allowed:
             code = (
-                "MEMORY_SESSION_ONLY"
-                if reason == "session_only"
-                else "MEMORY_CANDIDATE_REJECTED"
+                "MEMORY_SESSION_ONLY" if reason == "session_only" else "MEMORY_CANDIDATE_REJECTED"
             )
             raise ApiError(422, code, "候选不符合长期记忆安全策略")
         if not valid_fact_fields(
@@ -817,9 +815,7 @@ class MemoryService:
                 superseded = item
                 item.lifecycle_status = "archived"
                 item.archived_at = now
-                item.purge_after = now + timedelta(
-                    days=365 if item.category == "history" else 730
-                )
+                item.purge_after = now + timedelta(days=365 if item.category == "history" else 730)
                 item.updated_at = now
                 item.version += 1
                 old_snapshot = _memory_snapshot(item)

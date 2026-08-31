@@ -268,9 +268,7 @@ def test_collector_runs_balanced_end_to_end_with_mock_transport(tmp_path: Path) 
     assert manifest["detail_counts"] == {"taobao": 1, "jd": 1}
     assert manifest["requests"]["search_calls"] == 4
     assert manifest["provider_failures"] == []
-    quality = json.loads(
-        (tmp_path / "reports" / "quality_report.json").read_text(encoding="utf-8")
-    )
+    quality = json.loads((tmp_path / "reports" / "quality_report.json").read_text(encoding="utf-8"))
     assert quality["raw_search_audit"]["successful_responses"] == 4
     assert quality["raw_search_audit"]["duplicate_occurrences"] == 0
     assert (tmp_path / "normalized" / "headphones.jsonl").exists()

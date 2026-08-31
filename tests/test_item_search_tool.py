@@ -91,6 +91,24 @@ class FakeWorker:
         raise AssertionError("no newly hydrated offers expected")
 
 
+class FakeDirectRepository:
+    def __init__(self, candidates: list[Candidate]) -> None:
+        self.candidates = candidates
+        self.calls = []
+
+    async def load_scope_candidates(self, scope, *, filters, limit):
+        self.calls.append((scope, filters, limit))
+        return self.candidates[:limit]
+
+
+class FakeDirectCoordinator:
+    def __init__(self, candidates: list[Candidate]) -> None:
+        self.repository = FakeDirectRepository(candidates)
+
+    async def ensure(self, intent, *, target_total=None):
+        raise AssertionError("disabled provider must not be called")
+
+
 @pytest.mark.asyncio
 async def test_item_search_tool_returns_contract_and_monitor_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -105,8 +123,9 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
     )
     settings = get_settings().model_copy(update={"product_provider": "none"})
     monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
-    with thread_scope("root", tmp_path, run_id="run-1"), monitor_scope(
-        Monitor(publish, publish_thread_id="root")
+    with (
+        thread_scope("root", tmp_path, run_id="run-1"),
+        monitor_scope(Monitor(publish, publish_thread_id="root")),
     ):
         node = build_dispatch_node([exported_item_search])
         builder = StateGraph(MessagesState)
@@ -154,9 +173,7 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
     assert any(item.type == EventType.CUSTOM for _, item in events)
     assert all(channel == "root" for channel, _ in events)
     tool_end = next(item for _, item in events if item.type == EventType.TOOL_CALL_END)
-    tool_result = next(
-        item for _, item in events if item.type == EventType.TOOL_CALL_RESULT
-    )
+    tool_result = next(item for _, item in events if item.type == EventType.TOOL_CALL_RESULT)
     assert tool_end.data["duration_ms"] >= 0
     assert tool_result.data["result"]["tool_result_estimated_tokens"] > 0
 
@@ -193,3 +210,74 @@ async def test_item_search_hydrates_only_its_requested_platform(
     assert payload["status"] == "ok"
     assert len(coordinator.intents) == 1
     assert coordinator.intents[0].platforms == ["taobao"]
+
+
+@pytest.mark.asyncio
+async def test_direct_search_reads_fresh_postgres_candidates_without_opensearch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = FakeDirectCoordinator(
+        [
+            Candidate(
+                item_id="taobao:1",
+                platform="taobao",
+                title="降噪耳机",
+                price=299,
+                currency="CNY",
+                product_url="https://example.test/taobao/1",
+                source_rank=1,
+            )
+        ]
+    )
+    settings = get_settings().model_copy(
+        update={"product_provider": "none", "item_search_strategy": "direct_llm"}
+    )
+    monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        item_search_module,
+        "get_catalog_runtime",
+        lambda: (coordinator, FakeWorker()),
+    )
+    monkeypatch.setattr(
+        item_search_module,
+        "get_product_search_service",
+        lambda: (_ for _ in ()).throw(AssertionError("OpenSearch must not be called")),
+    )
+
+    payload = await exported_item_search.ainvoke(
+        {
+            "query": "降噪耳机",
+            "platform": "taobao",
+            "top_k": 50,
+            "intent": {
+                "category_key": "headphones",
+                "category_name": "耳机",
+                "primary_query": "降噪耳机",
+                "platforms": ["taobao"],
+            },
+        }
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["search_strategy"] == "direct_llm"
+    assert payload["candidates"][0]["source_rank"] == 1
+    assert coordinator.repository.calls[0][2] == settings.direct_candidates_per_platform
+
+
+def test_progressive_strategy_honors_zero_and_full_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(item_search_module, "current_user_id", lambda: "stable-user")
+    base = get_settings().model_copy(update={"item_search_strategy": "progressive"})
+    monkeypatch.setattr(
+        item_search_module,
+        "get_settings",
+        lambda: base.model_copy(update={"direct_rerank_rollout_percent": 0}),
+    )
+    assert item_search_module.resolve_search_strategy() == "hybrid"
+    monkeypatch.setattr(
+        item_search_module,
+        "get_settings",
+        lambda: base.model_copy(update={"direct_rerank_rollout_percent": 100}),
+    )
+    assert item_search_module.resolve_search_strategy() == "direct_llm"

@@ -155,9 +155,7 @@ def extract_items(
     metadata.setdefault("search_id", _nested(data, ("searchId", "search_id", "search_id_str")))
     metadata.setdefault(
         "total_pages",
-        _integer(
-            _nested(data, ("totalPage", "totalPages", "total_pages", "pageCount"))
-        ),
+        _integer(_nested(data, ("totalPage", "totalPages", "total_pages", "pageCount"))),
     )
     metadata.setdefault("has_more", _nested(data, ("has_more", "hasMore")))
     return items, metadata
@@ -180,9 +178,7 @@ def _normalize_taobao(item: dict[str, Any]) -> dict[str, Any]:
         "rating": _money(item.get("itemGradeAvg")),
         "sales": _integer(item.get("orderPayUV")),
         "image_url": _image_url(item.get("picUrlFull") or item.get("picUrl")),
-        "product_url": (
-            f"https://item.taobao.com/item.htm?id={source_id}" if source_id else None
-        ),
+        "product_url": (f"https://item.taobao.com/item.htm?id={source_id}" if source_id else None),
         "attributes": _clean_attributes(
             {
                 "shop_id": item.get("shopId"),
@@ -226,9 +222,7 @@ def _normalize_jingdong(item: dict[str, Any]) -> dict[str, Any]:
 def _normalize_douyin(item: dict[str, Any]) -> dict[str, Any]:
     base = item.get("base_model") if isinstance(item.get("base_model"), dict) else {}
     product = base.get("product_info") if isinstance(base.get("product_info"), dict) else {}
-    marketing = (
-        base.get("marketing_info") if isinstance(base.get("marketing_info"), dict) else {}
-    )
+    marketing = base.get("marketing_info") if isinstance(base.get("marketing_info"), dict) else {}
     price_desc = (
         marketing.get("price_desc") if isinstance(marketing.get("price_desc"), dict) else {}
     )

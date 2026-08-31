@@ -44,9 +44,7 @@ async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
     )
 
 
-async def validation_error_handler(
-    _request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
         status_code=422,
         content={
@@ -60,9 +58,7 @@ async def validation_error_handler(
     )
 
 
-async def http_error_handler(
-    _request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
+async def http_error_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={

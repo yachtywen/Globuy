@@ -141,9 +141,7 @@ class GlobuyLangfuseCallbackHandler(CallbackHandler):
         **kwargs: Any,
     ) -> Any:
         try:
-            return super().on_llm_error(
-                error, run_id=run_id, parent_run_id=parent_run_id, **kwargs
-            )
+            return super().on_llm_error(error, run_id=run_id, parent_run_id=parent_run_id, **kwargs)
         finally:
             self._llm_metadata.pop(run_id, None)
 
@@ -156,9 +154,7 @@ class GlobuyLangfuseCallbackHandler(CallbackHandler):
         **kwargs: Any,
     ) -> Any:
         self._update_tool(run_id, output, fallback_status="ok")
-        return super().on_tool_end(
-            output, run_id=run_id, parent_run_id=parent_run_id, **kwargs
-        )
+        return super().on_tool_end(output, run_id=run_id, parent_run_id=parent_run_id, **kwargs)
 
     def on_tool_error(
         self,
@@ -169,9 +165,7 @@ class GlobuyLangfuseCallbackHandler(CallbackHandler):
         **kwargs: Any,
     ) -> Any:
         self._update_tool(run_id, None, fallback_status=_error_status(error))
-        return super().on_tool_error(
-            error, run_id=run_id, parent_run_id=parent_run_id, **kwargs
-        )
+        return super().on_tool_error(error, run_id=run_id, parent_run_id=parent_run_id, **kwargs)
 
     def _update_tool(self, run_id: UUID, output: Any, *, fallback_status: str) -> None:
         try:

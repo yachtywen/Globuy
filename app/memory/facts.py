@@ -60,11 +60,11 @@ def build_fact_slot(
 def same_fact(
     *, left_value: Any, left_polarity: str | None, right_value: Any, right_polarity: str | None
 ) -> bool:
-    return (
-        json.dumps(normalized_value(left_value), sort_keys=True, ensure_ascii=False)
-        == json.dumps(normalized_value(right_value), sort_keys=True, ensure_ascii=False)
-        and (left_polarity or "positive") == (right_polarity or "positive")
-    )
+    return json.dumps(
+        normalized_value(left_value), sort_keys=True, ensure_ascii=False
+    ) == json.dumps(normalized_value(right_value), sort_keys=True, ensure_ascii=False) and (
+        left_polarity or "positive"
+    ) == (right_polarity or "positive")
 
 
 def durable_candidate_allowed(
