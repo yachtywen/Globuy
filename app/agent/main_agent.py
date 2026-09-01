@@ -319,6 +319,7 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
                         "constraints": constraints,
                         "goal": state.get("original_query") or "商品推荐",
                         "soft_preferences": intent.get("soft_preferences", []),
+                        "shopping_intent": intent,
                         "limit": 3,
                     },
                     "id": f"forced-picker-{uuid4().hex}",

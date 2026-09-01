@@ -5,9 +5,11 @@ import importlib
 import json
 from typing import Any
 
+import numpy as np
 import pytest
 
 from app.products.grouping import cap_groups_balanced, group_candidates
+from app.search.candidate_encoder import CandidateEmbeddingBatch, CandidateEmbeddingMetadata
 from app.search.schemas import Candidate
 from app.tools.item_picker import build_item_picker_tool
 
@@ -123,6 +125,32 @@ class FakeRerankModel:
         return RerankRunner(self)
 
 
+class FakeCandidateEncoder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def metadata(self) -> CandidateEmbeddingMetadata:
+        return CandidateEmbeddingMetadata("fake/bge-small", "test", 3, "fake")
+
+    def encode_cached(self, keys: list[str], texts: list[str]) -> CandidateEmbeddingBatch:
+        self.calls += 1
+        vectors = np.asarray(
+            [
+                [1.0, float("降噪" in text), float("通勤" in text)]
+                for text in texts
+            ],
+            dtype="float32",
+        )
+        return CandidateEmbeddingBatch(vectors, cache_hits=0, cache_misses=len(texts))
+
+
+class FailingCandidateEncoder(FakeCandidateEncoder):
+    def encode_cached(self, keys: list[str], texts: list[str]) -> CandidateEmbeddingBatch:
+        self.calls += 1
+        raise RuntimeError("embedding unavailable")
+
+
 @pytest.mark.asyncio
 async def test_item_picker_calls_model_once_and_collapses_duplicate_slots() -> None:
     model = FakeRerankModel()
@@ -205,3 +233,133 @@ async def test_hard_filter_requires_url_and_reliable_required_attribute() -> Non
 
     assert result["status"] == "insufficient_data"
     assert len(result["rejected_brief"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_36_groups_skip_candidate_embedding() -> None:
+    model = FakeRerankModel()
+    encoder = FakeCandidateEncoder()
+    tool = build_item_picker_tool(model, candidate_encoder=encoder)  # type: ignore[arg-type]
+    items = [
+        candidate(f"item-{index}", ("taobao", "jingdong", "douyin")[index % 3], index + 1)
+        .model_dump()
+        for index in range(36)
+    ]
+    result = await tool.ainvoke(
+        {
+            "items": items,
+            "shopping_intent": {
+                "intent_mode": "category_explore",
+                "category_key": "headphones",
+                "category_name": "耳机",
+                "primary_query": "降噪耳机",
+                "lexical_query": "降噪 耳机",
+                "semantic_query": "适合通勤的降噪耳机",
+                "platforms": ["taobao", "jingdong", "douyin"],
+            },
+        }
+    )
+    assert encoder.calls == 0
+    assert model.calls == 1
+    assert result["candidate_selection_method"] == "not_needed"
+    assert result["candidate_groups_after_selection"] == 36
+
+
+@pytest.mark.asyncio
+async def test_37_groups_use_one_batch_hybrid_then_one_llm_call() -> None:
+    model = FakeRerankModel()
+    encoder = FakeCandidateEncoder()
+    tool = build_item_picker_tool(model, candidate_encoder=encoder)  # type: ignore[arg-type]
+    items = [
+        candidate(
+            f"item-{index}",
+            ("taobao", "jingdong", "douyin")[index % 3],
+            index + 1,
+            title=f"通勤降噪耳机 {index}",
+        ).model_dump()
+        for index in range(37)
+    ]
+    result = await tool.ainvoke(
+        {
+            "items": items,
+            "shopping_intent": {
+                "intent_mode": "category_explore",
+                "category_key": "headphones",
+                "category_name": "耳机",
+                "primary_query": "降噪耳机",
+                "lexical_query": "降噪 耳机",
+                "semantic_query": "适合通勤的降噪耳机",
+                "platforms": ["taobao", "jingdong", "douyin"],
+            },
+        }
+    )
+    assert encoder.calls == 1
+    assert model.calls == 1
+    assert result["candidate_selection_method"] == "hybrid_rrf"
+    assert result["candidate_groups_before_selection"] == 37
+    assert result["candidate_groups_after_selection"] == 36
+
+
+@pytest.mark.asyncio
+async def test_candidate_embedding_failure_degrades_to_bm25_without_retry() -> None:
+    model = FakeRerankModel()
+    encoder = FailingCandidateEncoder()
+    tool = build_item_picker_tool(model, candidate_encoder=encoder)  # type: ignore[arg-type]
+    items = [
+        candidate(
+            f"item-{index}",
+            ("taobao", "jingdong", "douyin")[index % 3],
+            index + 1,
+            title=f"降噪耳机 {index}",
+        ).model_dump()
+        for index in range(37)
+    ]
+    result = await tool.ainvoke(
+        {
+            "items": items,
+            "shopping_intent": {
+                "category_key": "headphones",
+                "category_name": "耳机",
+                "primary_query": "降噪耳机",
+                "platforms": ["taobao", "jingdong", "douyin"],
+            },
+        }
+    )
+    assert encoder.calls == 1
+    assert model.calls == 1
+    assert result["candidate_selection_method"] == "bm25_fallback"
+    assert result["candidate_groups_after_selection"] == 36
+
+
+@pytest.mark.asyncio
+async def test_exact_product_is_deterministic_and_skips_both_models() -> None:
+    model = FakeRerankModel()
+    encoder = FakeCandidateEncoder()
+    tool = build_item_picker_tool(model, candidate_encoder=encoder)  # type: ignore[arg-type]
+    items = [
+        candidate("sony-a", "taobao", 1, price=1999, title="Sony WH-1000XM5 黑色").model_dump(),
+        candidate(
+            "sony-b", "jingdong", 1, price=1899, title="索尼 Sony WH-1000XM5 黑色"
+        ).model_dump(),
+        candidate("other", "douyin", 1, price=999, title="Sony WH-1000XM4 黑色").model_dump(),
+    ]
+    result = await tool.ainvoke(
+        {
+            "items": items,
+            "shopping_intent": {
+                "intent_mode": "exact_product",
+                "intent_confidence": "high",
+                "product_identity": {"brand": "Sony", "model": "WH-1000XM5"},
+                "category_key": "headphones",
+                "category_name": "耳机",
+                "primary_query": "Sony WH-1000XM5",
+                "platforms": ["taobao", "jingdong", "douyin"],
+            },
+        }
+    )
+    assert model.calls == 0
+    assert encoder.calls == 0
+    assert result["ranking_method"] == "deterministic_exact"
+    assert result["candidate_selection_method"] == "deterministic_exact"
+    assert result["picks"][0]["platform"] == "jingdong"
+    assert len(result["picks"][0]["alternative_offers"]) == 1

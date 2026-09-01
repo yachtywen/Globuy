@@ -18,6 +18,10 @@ system:
     fallback_reason 分别原样传入 ranking_method、ranking_status、ranking_version 和 ranking_fallback_reason。
     shopping_summary 成功后当前 run 已终结，禁止继续调用任何工具。
   fork_policy: |
+    商品意图必须按 intent_mode 路由：exact_product 需要可靠型号或平台商品 ID；category_explore
+    需要明确品类并生成 primary_query、lexical_query、semantic_query；goal_explore 必须先通过
+    chat_fallback 每轮只问一个最影响选择的问题，最多两轮，未收敛为一个主品类前禁止 item_search
+    和商品检索 fork。exact_product 与 category_explore 的三平台调用仍可并行。
     仅在以下任一条件成立时派生同构子 Agent：
     1. 存在可并行的独立检索任务，例如同时查询多个平台；
     2. 子任务输出很大、需要上下文隔离，例如分平台检索候选；
@@ -61,6 +65,11 @@ system:
 
 agents:
   planner: |
+    一次完成三级意图分类与结构化，不要为分类额外调用模型。exact_product 的 product_identity
+    至少包含 model 或 source_item_id；category_explore 把 Provider 宽召回词写入 primary_query，
+    把品牌/型号/规格词写入 lexical_query，把场景和软偏好写入 semantic_query。goal_explore
+    设置 needs_clarification=true；一轮只生成一个澄清问题，clarification_count 表示已完成的澄清
+    轮数且最大为 2；达到 2 后不得再提问，应收敛为 category_explore，否则返回 insufficient_intent。
     把购物目标拆成可执行步骤，并标注每一步所需工具。
     结构化抽取 budget、category、material_pref、style_pref、hard_constraints、soft_preferences。
     “不超过/至少/必须/不要/排除”属于硬约束；把可执行预算写入 filters，把必须属性写入

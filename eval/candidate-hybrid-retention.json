@@ -1,0 +1,121 @@
+{
+  "schema_version": "candidate-hybrid-retention-v1",
+  "description": "Manually audited positives from the frozen 1000-headphone snapshot; deterministic distractors are added by the evaluator.",
+  "cases": [
+    {
+      "id": "swimming_bone_conduction",
+      "kind": "semantic_preference",
+      "pool_size": 120,
+      "lexical_query": "骨传导 游泳 防水 运动耳机",
+      "semantic_query": "游泳训练时佩戴，要求防水、不堵耳道并适合运动",
+      "relevant_item_ids": [
+        "douyin:3787868124578185478",
+        "jingdong:100026201427",
+        "jingdong:100099336234",
+        "jingdong:100106453382",
+        "taobao:1003411452914",
+        "taobao:1044627811448",
+        "taobao:671815690600",
+        "taobao:696833229504"
+      ]
+    },
+    {
+      "id": "typec_wired_gaming",
+      "kind": "mixed_specification",
+      "pool_size": 120,
+      "lexical_query": "Type-C 有线 入耳式 游戏 电竞耳机",
+      "semantic_query": "手机直连、低延迟并且带麦克风的有线游戏耳塞",
+      "relevant_item_ids": [
+        "douyin:3559518543622110190",
+        "douyin:3676616321409351774",
+        "douyin:3711494745621659824",
+        "douyin:3717235319561650376",
+        "douyin:3801639542285533418",
+        "jingdong:100235609465",
+        "jingdong:10207083868831",
+        "taobao:1015784220203"
+      ]
+    },
+    {
+      "id": "overear_anc_commute",
+      "kind": "semantic_preference",
+      "pool_size": 120,
+      "lexical_query": "头戴式 主动降噪 蓝牙 长续航 耳机",
+      "semantic_query": "地铁和飞机通勤使用，希望隔绝环境声并能长时间佩戴",
+      "relevant_item_ids": [
+        "douyin:3771596115103842485",
+        "douyin:3773062025912123721",
+        "douyin:3799218464724484291",
+        "douyin:3818544965013865231",
+        "jingdong:100044370902",
+        "jingdong:100099072661",
+        "jingdong:100177568276",
+        "jingdong:100240050387"
+      ]
+    },
+    {
+      "id": "open_ear_running",
+      "kind": "semantic_preference",
+      "pool_size": 120,
+      "lexical_query": "开放式 不入耳 运动 跑步 耳机",
+      "semantic_query": "跑步时想听见周围车辆，久戴不堵耳朵",
+      "relevant_item_ids": [
+        "douyin:3662137940626275519",
+        "douyin:3662690002929863683",
+        "douyin:3689979398951403578",
+        "douyin:3703915376174825505",
+        "douyin:3711470693855134013",
+        "douyin:3718651123125584202",
+        "douyin:3731332256783008182",
+        "douyin:3775095607186817428"
+      ]
+    },
+    {
+      "id": "side_sleep_comfort",
+      "kind": "semantic_preference",
+      "pool_size": 120,
+      "lexical_query": "睡眠 侧睡 迷你 隐形 蓝牙耳机",
+      "semantic_query": "晚上侧卧听音频，不压耳朵并且体积尽量小",
+      "relevant_item_ids": [
+        "douyin:3679705360630939967",
+        "douyin:3715960141472989533",
+        "douyin:3716651111617265913",
+        "douyin:3740560846636580929",
+        "douyin:3743256698941473030",
+        "douyin:3770792597598109782",
+        "douyin:3773394039785783627",
+        "douyin:3793311907696476201"
+      ]
+    },
+    {
+      "id": "sony_wh1000xm5",
+      "kind": "exact_identity",
+      "pool_size": 120,
+      "lexical_query": "Sony WH-1000XM5",
+      "semantic_query": "索尼 WH-1000XM5 头戴式耳机",
+      "relevant_item_ids": ["jingdong:100142816814"]
+    },
+    {
+      "id": "baseus_bc1_lite",
+      "kind": "exact_identity",
+      "pool_size": 120,
+      "lexical_query": "Baseus 倍思 BC1 Lite",
+      "semantic_query": "倍思 BC1 Lite 开放式耳夹耳机",
+      "relevant_item_ids": [
+        "douyin:3662137940626275519",
+        "taobao:1033374185346"
+      ]
+    },
+    {
+      "id": "yinbeiqi_free_b3",
+      "kind": "exact_identity",
+      "pool_size": 120,
+      "lexical_query": "音贝奇 Free B3",
+      "semantic_query": "音贝奇 Free B3 头戴式主动降噪耳机",
+      "relevant_item_ids": [
+        "douyin:3799218464724484291",
+        "jingdong:100240050387"
+      ]
+    }
+  ]
+}

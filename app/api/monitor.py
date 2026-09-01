@@ -81,6 +81,15 @@ CATALOG_EVENT_FIELDS = frozenset(
         "possible_duplicates",
         "ranking_method",
         "duration_ms",
+        "intent_mode",
+        "clarification_count",
+        "candidate_limit",
+        "embedding_duration_ms",
+        "bm25_duration_ms",
+        "faiss_duration_ms",
+        "embedding_cache_hits",
+        "embedding_cache_misses",
+        "fallback_reason",
     }
 )
 

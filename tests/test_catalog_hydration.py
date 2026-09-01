@@ -53,7 +53,7 @@ def test_clarification_requires_question_and_blocks_provider() -> None:
     assert intent.provider_allowed is False
 
 
-def test_planner_does_not_block_a_broad_search_when_category_and_budget_exist() -> None:
+def test_planner_does_not_cancel_an_explicit_clarification_because_budget_exists() -> None:
     result = planner.invoke(
         {
             "goal": "买500元左右的牛仔裤",
@@ -69,8 +69,9 @@ def test_planner_does_not_block_a_broad_search_when_category_and_budget_exist() 
         }
     )
 
-    assert result["shopping_intent"]["needs_clarification"] is False
-    assert result["shopping_intent"]["clarification_question"] is None
+    assert result["status"] == "needs_clarification"
+    assert result["shopping_intent"]["needs_clarification"] is True
+    assert result["shopping_intent"]["clarification_question"] == "需要男款还是女款？"
 
 
 def test_scope_hash_is_public_and_stable_across_free_text() -> None:

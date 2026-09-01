@@ -260,6 +260,7 @@ async def test_direct_search_reads_fresh_postgres_candidates_without_opensearch(
 
     assert payload["status"] == "ok"
     assert payload["search_strategy"] == "direct_llm"
+    assert payload["retrieval_route"] == "category_direct"
     assert payload["candidates"][0]["source_rank"] == 1
     assert coordinator.repository.calls[0][2] == settings.direct_candidates_per_platform
 
@@ -280,4 +281,4 @@ def test_progressive_strategy_honors_zero_and_full_rollout(
         "get_settings",
         lambda: base.model_copy(update={"direct_rerank_rollout_percent": 100}),
     )
-    assert item_search_module.resolve_search_strategy() == "direct_llm"
+    assert item_search_module.resolve_search_strategy() == "intent_routed"

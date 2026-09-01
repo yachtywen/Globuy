@@ -10,15 +10,6 @@ def planner(goal: str, shopping_intent: ShoppingIntent | None = None) -> dict:
     """Split a shopping goal into ordered, tool-oriented execution steps."""
 
     normalized = goal.strip()
-    if shopping_intent is not None:
-        filters = shopping_intent.filters
-        has_budget = filters.min_price is not None or filters.max_price is not None
-        # A concrete category plus a budget is sufficient for a broad first pass.
-        # Gender, fit, colour, and brand are useful refinements, not paid-search blockers.
-        if shopping_intent.needs_clarification and has_budget:
-            shopping_intent = shopping_intent.model_copy(
-                update={"needs_clarification": False, "clarification_question": None}
-            )
     steps = [
         {
             "order": 1,
@@ -48,7 +39,17 @@ def planner(goal: str, shopping_intent: ShoppingIntent | None = None) -> dict:
         {"order": 6, "action": "summarize", "tool": "shopping_summary"},
     ]
     return {
-        "status": "ok" if shopping_intent is not None else "needs_planning",
+        "status": (
+            "insufficient_intent"
+            if shopping_intent is not None
+            and shopping_intent.intent_mode == "goal_explore"
+            and shopping_intent.clarification_count >= 2
+            else "needs_clarification"
+            if shopping_intent is not None and shopping_intent.needs_clarification
+            else "ok"
+            if shopping_intent is not None
+            else "needs_planning"
+        ),
         "goal": normalized,
         "shopping_intent": shopping_intent.model_dump(mode="json") if shopping_intent else None,
         "steps": steps,

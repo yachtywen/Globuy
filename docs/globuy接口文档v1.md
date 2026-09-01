@@ -559,16 +559,27 @@ HTTPS 使用 `wss://`。浏览器自动随同源握手发送会话 Cookie。首�
   前端按 `sequence` 幂等合并平台快照，不把事件转换成 assistant 消息，并在终态、取消、错误、新 run、切换会话或
   `replay_gap` 状态同步后清理临时进度。
 
-ItemSearch 仍保持一次调用只搜索一个平台。`search_strategy` 为 `hybrid | direct_llm`；运行配置还可
-使用 `progressive` 按稳定用户哈希选择其中一条，普通请求不会双跑 Provider。内部调用可携带同一份已验证结构化购物意图，返回状态为
+ItemSearch 仍保持一次调用只搜索一个平台。`search_strategy` 为
+`hybrid | direct_llm | intent_routed`；运行配置还可使用 `progressive` 按稳定用户哈希把流量灰度到
+`intent_routed`，普通请求不会双跑 Provider。响应可带可选
+`retrieval_route=exact_direct|category_direct|category_hybrid`，旧客户端可忽略。内部调用可携带同一份已验证结构化购物意图，返回状态为
 `ok | partial | not_configured | error | cancelled`，并可包含 `catalog_status`、`catalog_candidate_count`、
 `captured_at` 和 `provider_status`。Provider 默认关闭时仍搜索已有本地目录；目录不足不会触发真实网络请求，而返回
 `not_configured`。候选不新增无法验证的库存、运费或综合评分字段。
 
 父 Agent 汇总三路候选后只调用一次 ItemPicker。其完整工具结果额外包含
-`ranking_method=llm|deterministic_fallback`、`ranking_version`、
+`ranking_method=llm|deterministic_exact|deterministic_fallback`、`ranking_version`、
 `status=ok|degraded|insufficient_data`、脱敏 `fallback_reason` 与去重统计；这些诊断字段不允许
-模型修改商品事实。直搜每平台最多 15 条，LLM 最多接收 36 个商品组且不自动重试。
+模型修改商品事实。另返回
+`candidate_selection_method=not_needed|hybrid_rrf|bm25_fallback|deterministic_exact`、筛选前后组数、
+Embedding 模型/revision、缓存命中/未命中及 Embedding、BM25、FAISS 分段耗时。明确商品路由不调用
+Embedding 或 LLM；品类探索仅在分组超过 36 时执行临时 Hybrid，LLM 最多接收 36 组且不自动重试。
+
+结构化 `ShoppingIntent` 新增 `intent_mode`、`intent_confidence`、`product_identity`、
+`primary_query/lexical_query/semantic_query` 与 `clarification_count`。`goal_explore` 在澄清完成前不得
+调用 Provider；每轮只问一个问题，最多两轮，仍不能收敛到一个主品类时返回 `insufficient_intent`。
+检索过程可发出脱敏事件 `shopping_intent_routed`、`intent_clarification_requested`、
+`candidate_hybrid_started/completed/degraded`；事件不包含完整候选、向量或 Prompt。
 
 ### 8.3 重连规则
 

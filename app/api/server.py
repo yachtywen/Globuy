@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -68,11 +69,13 @@ from app.database.session_store import SQLAlchemySessionStore
 from app.memory.facts import durable_candidate_allowed
 from app.memory.postgres_store import PostgresMemoryStore
 from app.observability import ObservabilityManager
+from app.search.candidate_encoder import get_candidate_embedding_encoder
 from app.search.catalog_images import enrich_task_result
 from app.search.encoder import get_embedding_encoder
 from app.utils.path_utils import session_path, upload_path
 
 _THREAD_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+logger = logging.getLogger(__name__)
 
 
 def _safe_thread_id(value: str | None) -> str:
@@ -245,6 +248,20 @@ def create_app(
             )
         await store.open()
         await store.recover_after_restart()
+        warm_candidate_encoder = settings.item_search_strategy == "intent_routed" or (
+            settings.item_search_strategy == "progressive"
+            and settings.direct_rerank_rollout_percent > 0
+        )
+        if warm_candidate_encoder:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(get_candidate_embedding_encoder().warmup), timeout=60
+                )
+            except Exception:  # noqa: BLE001 - missing artifacts degrade per request to BM25
+                logger.warning(
+                    "Candidate embedding warmup failed; request-time Hybrid will use BM25 fallback",
+                    exc_info=True,
+                )
         try:
             yield
         finally:

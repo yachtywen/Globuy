@@ -132,7 +132,7 @@ export interface TaskResult {
   source_kind: "offline_snapshot" | string;
   search_attempted?: boolean;
   search_candidate_count?: number;
-  ranking_method?: "llm" | "deterministic_fallback" | null;
+  ranking_method?: "llm" | "deterministic_exact" | "deterministic_fallback" | null;
   ranking_status?: "ok" | "degraded" | "insufficient_data" | null;
   ranking_version?: string | null;
   ranking_fallback_reason?: string | null;

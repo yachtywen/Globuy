@@ -1,20 +1,21 @@
 # globuy 向量与检索基础设施固定选型
 
-> 决策状态：用户已于 2026-07-19 确认无训练方案、2026-07-20 授权实施、2026-08-20 授权长期记忆改用 PostgreSQL/pgvector，并于 2026-08-27 授权增加直搜 + LLM 精排主链；OpenSearch Hybrid 完整保留为基线和回退策略。
+> 决策状态：用户已于 2026-08-29 授权三级意图路由与临时 FAISS Hybrid；OpenSearch Hybrid 完整保留为基线和人工回退策略。
 > 本文记录当前有效契约；完成程度与实测结果以 `docs/project-status.md` 为准。
 
 ## 1. 当前项目边界
 
 - 当前项目不训练或微调 Query/User/Item 编码模型。
 - 不建设依赖人工评分标签、负样本、点击反馈或学习排序的训练闭环。
-- `hybrid` ItemSearch 使用冻结模型做推理；`direct_llm` 首屏链不等待 Embedding/OpenSearch，依靠
-  Provider 顺位、硬过滤、保守同款聚合和一次受约束 LLM 精排。两条链都不使用手写综合分。
+- `intent_routed` 先区分 `exact_product/category_explore/goal_explore`。只有品类探索且硬过滤、
+  同款聚合后超过 36 组时，才执行临时候选 Hybrid；两条线上链都不使用手写综合分。
 - 原“三塔 + Faiss ItemSearch + 学习权重”是已取消的历史目标，不再指导当前实现。
 
 ## 2. 当前有效架构
 
-在线策略由 `GLOBUY_ITEM_SEARCH_STRATEGY=hybrid|direct_llm|progressive` 控制。`progressive`
-按用户 ID（缺失时 thread ID）的稳定 SHA-256 桶和 0～100 比例选链，不在普通请求中双跑 Provider。
+在线策略由 `GLOBUY_ITEM_SEARCH_STRATEGY=hybrid|direct_llm|intent_routed|progressive` 控制。
+`progressive` 按用户 ID（缺失时 thread ID）的稳定 SHA-256 桶把流量灰度到 `intent_routed`，
+不在普通请求中双跑 Provider。
 
 ```text
 direct_llm:
@@ -23,6 +24,14 @@ ShoppingIntent -> 三平台并行 ItemSearch -> PostgreSQL 新鲜 Candidate（�
   -> 一次 LLM 严格 JSON 精排 -> 确定性代表 Offer -> Top 3 + alternative_offers
 
 后台：Product/Offer -> Transactional Outbox -> Embedding/OpenSearch 投影
+
+intent_routed:
+ShoppingIntent
+  -> exact_product -> 三平台精确召回 -> 硬过滤/同款聚合 -> 确定性 Offer（无 Embedding/LLM）
+  -> category_explore -> 三平台宽召回 -> 硬过滤/同款聚合
+       -> <=36 组：全部进入一次 LLM 精排
+       -> >36 组：BM25 + BGE-small 512d + 临时 IndexFlatIP + RRF -> 36 -> 一次 LLM 精排
+  -> goal_explore -> 每轮一个澄清问题、最多两轮 -> 单一品类或 insufficient_intent
 ```
 
 LLM 只能引用输入的 `product_group_id` 和已有证据字段；重复/未知 ID、非法结构、超时或未配置
@@ -76,17 +85,17 @@ semantic 0.9/0.1；纯语义 query 可绕过融合直接走 KNN。这些权重�
 
 | 范围 | 当前固定选择 | 不作为当前默认选择 | 原因 |
 |---|---|---|---|
-| ItemSearch 在线策略 | `direct_llm` 可灰度；OpenSearch Hybrid 保留基线 | Faiss、静默自动切链 | 直搜降低首屏等待，Hybrid 支持冻结查询集对照和人工回退 |
-| Dense Embedding | 冻结 `BAAI/bge-m3`，1024 维，归一化 | 自训练三塔、在线付费 Embedding | 无训练边界下仍保留通用语义召回，且可本地推理 |
+| ItemSearch 在线策略 | `intent_routed` 灰度；OpenSearch Hybrid 保留基线 | 静默自动切链 | 按意图避开不必要的向量化，同时保留冻结查询集对照 |
+| Dense Embedding | 临时候选 `bge-small-zh-v1.5` 512 维；OpenSearch `bge-m3` 1024 维，严格隔离 | 自训练三塔、在线付费 Embedding | 小模型只筛短生命周期候选，长期投影契约不变 |
 | 全文检索 | `title` 的 BM25，内置 `cjk` analyzer | 仅向量检索 | 型号、品牌和关键词精确命中更可靠 |
 | 向量检索 | Lucene HNSW + `cosinesimil` | L2 | 与归一化文本向量匹配 |
 | 融合 | `score-ranker-processor` 的无权重 RRF | 手工分数、`min_max + 0.7/0.3` | 不引入未经标注验证的业务权重，避免跨路原始分数不可比 |
-| Faiss | 保留实验性 ANN 基础设施 | ItemSearch 主链路 | 现阶段过滤、全文和可运维性比单纯 ANN 更重要 |
+| Faiss | 请求内 `IndexFlatIP` 精确余弦；仅在分组数 >36 时启用 | 持久化候选索引、OpenSearch 故障后备 | 数十到百级候选无需近似索引，生命周期与请求一致 |
 | 长期记忆 | LangGraph BaseStore + PostgreSQL/pgvector + 关键词 RRF | OpenSearch 商品索引或本地 JSON 作为最终实现 | 与 ItemSearch 分离，采用用户确认、版本审计和软衰减生命周期 |
 | CategoryInsight RAG | 独立 OpenSearch 索引；BGE-M3 + BM25 的 Category 专用 min-max Pipeline；按需冻结 Cross-Encoder 精排 | 复用商品索引或 ItemSearch RRF Pipeline | 知识卡片与商品候选的 Schema、分数和生命周期不同 |
 
-Faiss 代码可用于学习、基准测试或未来经过明确论证的纯 ANN 场景，但不得在 OpenSearch 不可用
-时静默接管 ItemSearch，也不得把其哈希演示向量用于真实语义结果。
+临时 FAISS 不持久化、不使用 HNSW/IVF/PQ，也不得在 OpenSearch 不可用时静默接管旧 `hybrid`
+链。既有 `FaissHNSWIndex` 仍仅是实验能力，禁止与 `TransientFaissFlatIndex` 混用。
 
 ## 4. ItemSearch 索引契约
 
@@ -131,6 +140,14 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
 - `device=auto` 时有可用 CUDA 就使用 CUDA，否则回退 CPU；CUDA 使用半精度，CPU 使用全精度。
 - 当前索引构建命令为 `python -m app.search.build_index`。
 
+### 4.4 临时候选 Hybrid 契约
+
+- 仅当 `category_explore` 在硬过滤和 ProductGroup 聚合后超过 36 组时启用；查询向量一次、未命中缓存的组向量一次批量编码。
+- BM25 固定 `k1=1.2/b=0.75`，中文单字+双字、英文/数字/型号完整 token；BGE-small 文本只含标题和有证据的稳定属性。
+- 候选编码器固定 `BAAI/bge-small-zh-v1.5`、512 维、最大长度 128；缓存键包含模型、解析 revision、语义文本版本和内容哈希。
+- FAISS 固定归一化 `IndexFlatIP`，两路名次以 `k=60` 的无权重 RRF 融合，再按平台桶轮转到 36 组。禁止融合原始 BM25/余弦分数。
+- CUDA 使用进程级本地 FP16 模型；CPU 只加载部署阶段准备的 ONNX INT8。准备命令是 `python scripts/prepare_candidate_embedding.py`，在线链禁止下载、导出或量化。
+
 ## 5. 同质 fork 与结果边界
 
 - 单平台请求由主 Agent 直接调用 ItemSearch。
@@ -139,14 +156,16 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
 - 每个子 Agent 与父 Agent 共享同一模型、完整业务工具集和完全相同的 System Prompt，但拥有
   独立 thread/checkpointer。
 - fork 深度首版限制为 1；子 Agent 不得继续 dispatch。
-- `direct_llm` 回流主线程时每路最多 15 条，三路按平台轮转和来源顺位截到 36 个商品组。
+- `direct_llm/intent_routed` 回流主线程时每路最多 15 条；三级路由先完整分组，再按需筛到 36 个商品组。
 - 三个子 Agent 只调用 ItemSearch；父 Agent 汇总后只调用一次 ItemPicker。ItemPicker 排商品组，
   Top 3 不会被强证据同款重复占位；组内按价格、来源顺位和稳定输入顺序选择展示 Offer。
 
 ## 6. 故障与真实性边界
 
-- `hybrid` 所需 OpenSearch、模型缓存或商品索引未准备好时返回 `not_configured`；`direct_llm`
+- `hybrid` 所需 OpenSearch、模型缓存或商品索引未准备好时返回 `not_configured`；`direct_llm/intent_routed`
   在 Provider 未配置且 PostgreSQL 没有新鲜范围缓存时同样返回 `not_configured`，不得静默切 Hybrid。
+- 临时候选编码器未准备、超时、OOM、维度错误或向量非法时不重试，使用同一真实候选集的
+  `BM25 -> source_rank -> 输入顺序` 筛到 36，并标记 `candidate_hybrid_degraded`。
 - 已配置资源上的运行时异常返回 `error` 与简短信息。
 - 禁止生成占位商品、伪造实时价格或在失败时静默改用另一向量空间。
 - 当前 1000 条商品来自离线快照，ItemSearch 返回的是快照数据，不代表实时库存、实时价格或
@@ -172,7 +191,6 @@ Embedding 文本只包含标题和稳定属性白名单，例如品牌、型号�
 
 - 恢复三塔或其他检索模型训练/微调。
 - 引入依赖人工标签、点击数据或负样本的学习排序。
-- 用 Faiss、Milvus、Qdrant、Redis Stack、Chroma、pgvector 等替代 ItemSearch 的 OpenSearch
-  主链路。
+- 用其他向量库替代 OpenSearch 长期商品投影基线，或把临时候选 FAISS 改为持久化索引。
 - 更换 Embedding 模型、维度、归一化方式、语义文本版本、距离度量或 RRF 融合方式。
 - 将离线快照结果描述为实时平台数据。

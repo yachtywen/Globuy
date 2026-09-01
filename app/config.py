@@ -174,6 +174,8 @@ class Settings(BaseSettings):
             raise ValueError("catalog limits must satisfy minimum <= target <= hard cap")
         if self.catalog_soft_deadline_seconds > self.catalog_hard_deadline_seconds:
             raise ValueError("catalog soft deadline cannot exceed hard deadline")
+        if self.candidate_hybrid_group_threshold != self.candidate_hybrid_group_limit:
+            raise ValueError("candidate Hybrid threshold and group limit must match")
         return self
 
     web_search_provider: Literal["none", "iqs"] = "iqs"
@@ -192,6 +194,21 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=1024, ge=1)
     embedding_batch_size: int = Field(default=16, ge=1)
     embedding_max_length: int = Field(default=256, ge=1)
+
+    candidate_embedding_model_name: str = "BAAI/bge-small-zh-v1.5"
+    candidate_embedding_model_revision: str = "main"
+    candidate_embedding_dimensions: int = Field(default=512, ge=1)
+    candidate_embedding_backend: Literal["auto", "cuda", "onnx"] = "auto"
+    candidate_embedding_onnx_path: Path = Path("data/models/bge-small-zh-v1.5-onnx-int8")
+    candidate_embedding_onnx_file: str = "onnx/model_qint8_avx512_vnni.onnx"
+    candidate_embedding_batch_size: int = Field(default=64, ge=1)
+    candidate_embedding_max_length: int = Field(default=128, ge=1)
+    candidate_embedding_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    candidate_hybrid_group_threshold: int = Field(default=36, ge=3, le=120)
+    candidate_hybrid_group_limit: int = Field(default=36, ge=3, le=120)
+    candidate_embedding_cache_size: int = Field(default=10_000, ge=0, le=100_000)
+    candidate_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=1)
+    candidate_rrf_rank_constant: int = Field(default=60, ge=1, le=1_000)
 
     memory_store_backend: Literal["pgvector"] = "pgvector"
     memory_candidate_min_confidence: float = Field(default=0.75, ge=0, le=1)
@@ -221,7 +238,9 @@ class Settings(BaseSettings):
     item_search_pool_floor: int = Field(default=60, ge=1)
     item_search_pool_max: int = Field(default=150, ge=1)
     fork_candidate_limit: int = Field(default=10, ge=1, le=50)
-    item_search_strategy: Literal["hybrid", "direct_llm", "progressive"] = "hybrid"
+    item_search_strategy: Literal[
+        "hybrid", "direct_llm", "intent_routed", "progressive"
+    ] = "hybrid"
     direct_rerank_rollout_percent: int = Field(default=0, ge=0, le=100)
     direct_candidates_per_platform: int = Field(default=15, ge=1, le=50)
     direct_rerank_group_limit: int = Field(default=36, ge=3, le=60)

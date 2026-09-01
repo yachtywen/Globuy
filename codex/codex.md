@@ -12,7 +12,7 @@
 - 用户资料中的参考名 `globex`，在新代码和文档中统一写成 `globuy`。
 
 主要技术栈：Python 3.12、Conda、FastAPI、Uvicorn、WebSocket、LangChain、LangGraph、
-React、TypeScript、Vite 和 OpenSearch；Faiss 仅保留为实验性 ANN 能力。对话模型通过 OpenAI
+React、TypeScript、Vite、OpenSearch 和请求内临时 Faiss。对话模型通过 OpenAI
 兼容接口接入 Kimi K2.6，模型标识固定为 `kimi-k2.6`，上下文窗口按 256K 计算。
 
 ## 2. 事实来源和严格程度
@@ -52,12 +52,13 @@ React、TypeScript、Vite 和 OpenSearch；Faiss 仅保留为实验性 ANN 能�
 详细契约见 `docs/vector-infrastructure.md`，后续实现必须严格遵守：
 
 - 当前项目不训练或微调检索模型，不建设人工评分标签、负样本或学习排序闭环。
-- ItemSearch：单一 `OpenSearch` 商品索引，BM25 与冻结 `BAAI/bge-m3` Dense Vector 通过无权重
-  RRF 融合；`platform` 在召回前限定单平台候选域，价格、评分、销量和属性只在 RRF 完成后通过
-  `post_filter` 过滤，再从扩大候选池中截取 `top_k`。
-- 商品向量固定为 1024 维归一化向量；OpenSearch 使用 Lucene HNSW + COSINE。
-- ItemSearch 的旧“三塔 + Faiss + min_max 0.7/0.3”目标已经取消。Faiss 只保留为实验性
-  ANN 基础设施，不得作为 OpenSearch 故障时的静默后备。
+- ItemSearch 默认新路由为三级意图：明确型号/商品 ID 走确定性直搜；明确品类在分组后不超过
+  36 组时直接执行一次 LLM 精排，超过 36 组时才用 BM25 + 冻结
+  `BAAI/bge-small-zh-v1.5` + 请求内 `IndexFlatIP` + 无权重 RRF 筛到 36；目标型需求最多澄清两轮。
+- 临时候选向量固定为 512 维归一化向量，仅存在于单次请求内，不落盘；既有商品 OpenSearch
+  使用独立的 BGE-M3 1024 维空间、Lucene HNSW + COSINE，完整保留为 `hybrid` 基线。
+- 旧“三塔 + 分平台持久化 Faiss + min_max 0.7/0.3”目标仍已取消。临时 `IndexFlatIP` 不是
+  OpenSearch 故障后备；编码失败只在同一候选集内确定性降级为 BM25。
 - 长期记忆接口：`LangGraph BaseStore`，PostgreSQL/pgvector 为事实与检索后端。
 - 长期记忆使用独立事实表、候选确认、版本审计和软衰减生命周期，不能直接复用商品索引；CategoryInsight 继续使用独立 OpenSearch 索引。
 - Qdrant、Redis Stack、Chroma、pgvector、Milvus 不得作为 ItemSearch 默认替代；更换模型、

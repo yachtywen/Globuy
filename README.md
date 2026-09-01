@@ -50,8 +50,9 @@ Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需
 | Harness 防护 | 决策预算、循环指纹检测、主循环递归上限、fork 90 秒超时、候选截断与确定性终结，避免无效自旋和上下文膨胀 |
 | Cache Breakpoint | 在 Observe 后压缩旧历史，保留最近 3 个完整工具调用组和合法的 tool-call/tool-result 配对 |
 | 长期记忆 | PostgreSQL 保存用户确认的偏好事实和版本；pgvector + 关键词 RRF 检索，支持候选确认和软衰减 |
-| 商品检索 | `hybrid / direct_llm / progressive` 三策略；直搜链并行读取 Provider/PostgreSQL 候选后硬过滤、保守同款聚合并执行一次 LLM 全局精排 |
+| 商品检索 | `hybrid / direct_llm / intent_routed / progressive`：按明确商品、品类探索和目标探索三级路由，按需执行临时 Hybrid 与一次 LLM 精排 |
 | 混合召回基线 | `BM25(title) + BAAI/bge-m3 Dense Vector + Lucene HNSW/COSINE + 无权重 RRF` 完整保留；Embedding/OpenSearch 投影继续由 Outbox 异步维护 |
+| 临时候选筛选 | 分组超过 36 时才运行 `BM25 + bge-small-zh-v1.5 512d + FAISS IndexFlatIP + RRF`；索引仅存在于单次请求，失败降级 BM25 |
 | 实时任务 | FastAPI 返回 HTTP `202`，后台执行 Agent；WebSocket 按 thread/run 推送带 sequence 的事件，支持 replay、心跳、多订阅、取消与终态恢复 |
 | 用户系统 | Argon2id 密码哈希、服务端可撤销会话、HttpOnly Cookie、CSRF、幂等写入和资源归属校验 |
 | 产品闭环 | React 工作台、会话归档、商品卡片、比较、来源链接、心愿库、价格历史、长期记忆管理和响应式布局 |
@@ -122,10 +123,10 @@ flowchart LR
 
 1. FastAPI 校验用户会话、CSRF 和幂等键，创建 run 后立即返回 `202`。
 2. Agent 从 PostgreSQL/pgvector 读取当前用户已确认的相关偏好，拼装本轮上下文。
-3. Think/Planner 提取品类、预算、平台和硬约束；多平台任务可派生同质 fork。
+3. Think/Planner 一次结构化调用同时完成意图路由、约束抽取和查询构造；目标型需求每轮只澄清一个问题，最多两轮。
 4. ItemSearch 检查目录覆盖；本地目录不足且 Provider 明确启用时，受控补充候选并写入 PostgreSQL。
-5. `direct_llm` 下三个 fork 只返回各平台最多 15 条结构化候选；父 Agent 汇总后执行硬过滤、同平台去重和保守跨平台同款聚合，最多送入 36 个商品组。
-6. ItemPicker 最多调用一次 LLM 全局精排，并确定性选择组内最低已知商品价 Offer；同款其他平台报价保留在结果中。失败时返回确定性降级结果。
+5. `intent_routed` 下，明确型号/商品 ID 走确定性选择且不编码；品类探索在商品组超过 36 时才用临时 Hybrid 筛到 36；目标探索在澄清前不调用 Provider。
+6. 品类探索最多调用一次 LLM 全局精排，并确定性选择组内最低已知商品价 Offer；同款其他平台报价保留。Embedding 失败不重试，按 BM25 和来源顺位降级。
 7. Product Outbox 在后台继续更新 Embedding/OpenSearch；`hybrid` 策略仍执行原 BM25 + Dense Vector + RRF 基线。
 8. ShoppingSummary 输出带价格、平台、理由、跨平台报价和来源链接的清单；前端通过 WebSocket 增量呈现全过程。
 
@@ -135,7 +136,7 @@ flowchart LR
 |---|---|
 | Agent | LangChain 1.x、LangGraph 1.x、Kimi K2.6（OpenAI-compatible） |
 | Backend | Python 3.12、FastAPI、Uvicorn、Pydantic、SQLAlchemy Async、Alembic |
-| Retrieval | OpenSearch 3.7、BGE-M3、BM25、Lucene HNSW、RRF；Faiss 仅作实验性 ANN |
+| Retrieval | OpenSearch 3.7 + BGE-M3 长期投影基线；BM25 + BGE-small 512d + FAISS IndexFlatIP 请求内候选筛选 |
 | Data | PostgreSQL 17、pgvector 0.8、Redis 7、Transactional Outbox |
 | Frontend | React 19、TypeScript 5.8、Vite 7、Vitest |
 | Protocol | HTTP 202、WebSocket、AG-UI 风格事件、sequence replay |
@@ -144,7 +145,7 @@ flowchart LR
 
 ## 快速开始
 
-默认演示模式使用 `mock` 模型，不调用 Kimi、阿里云 IQS 或商品 Provider。完整商品检索还需要 OpenSearch、Redis、BGE-M3 模型缓存和有权使用的商品数据。
+默认演示模式使用 `mock` 模型，不调用 Kimi、阿里云 IQS 或商品 Provider。`intent_routed` 的临时候选语义筛选需要预先准备 BGE-small ONNX INT8 或本机 CUDA 模型缓存；缺失时显式降级 BM25，不在用户请求中下载或导出模型。
 
 ### 环境要求
 
@@ -226,6 +227,12 @@ docker compose up -d --wait --wait-timeout 300 postgres opensearch redis
 REM 需要有权使用的 Candidate 数据包
 python -m app.products.import_snapshot
 python -m app.search.build_index
+
+REM 部署/开发阶段准备临时候选模型；不要在在线请求中执行
+python scripts/prepare_candidate_embedding.py
+
+REM 使用冻结的 CandidateGroup JSON 做 45/60/120 组本机基准
+python scripts/benchmark_candidate_hybrid.py candidate-groups.json --query "通勤降噪耳机"
 
 REM 可选：构建确定性品类知识卡片
 python -m app.category.build_index --deterministic
@@ -313,7 +320,7 @@ globuy/
 
 - 商品与价格来自已授权 Provider 或离线快照；失败时不生成占位数据。
 - 默认 `GLOBUY_PRODUCT_PROVIDER=none`，不会静默产生付费调用。
-- ItemSearch 默认仍为 `hybrid` 安全基线，可显式切换 `direct_llm`，或用 `progressive` 按稳定用户哈希灰度；任何策略都不静默切换到 Faiss 或伪造候选。
+- ItemSearch 默认仍为 `hybrid` 安全基线，可显式切换 `intent_routed`；`progressive` 按稳定用户哈希灰度到新路由。临时 FAISS 只处理本次真实候选，不作为 OpenSearch 故障后备。
 - 长期记忆只写入用户明确确认的内容，不把一次浏览自动升级为永久偏好。
 - 当前不包含 SFT、Agentic RL、三塔训练或学习排序；这些内容不得作为已实现成果描述。
 - 首版 RunRegistry/EventBroker 是单进程边界；启用多 worker 前需要迁移到共享任务和事件基础设施。

@@ -66,7 +66,7 @@ def resolve_search_strategy() -> str:
         return settings.item_search_strategy
     identity = current_user_id() or current_thread_id() or "anonymous"
     bucket = int(hashlib.sha256(identity.encode()).hexdigest()[:8], 16) % 100
-    return "direct_llm" if bucket < settings.direct_rerank_rollout_percent else "hybrid"
+    return "intent_routed" if bucket < settings.direct_rerank_rollout_percent else "hybrid"
 
 
 @tool
@@ -94,14 +94,14 @@ async def item_search(
                     provider_status="blocked",
                 ).model_dump(mode="json")
             coordinator = worker = None
-            if settings.product_provider != "none" or strategy == "direct_llm":
+            if settings.product_provider != "none" or strategy in {"direct_llm", "intent_routed"}:
                 coordinator, worker = get_catalog_runtime()
             if settings.product_provider != "none" and coordinator is not None:
                 # ItemSearch is deliberately single-platform. Dispatch may execute one
                 # call per platform concurrently, so hydrating the original multi-platform
                 # intent here would make those calls race over the same scopes and rows.
                 platform_intent = intent.model_copy(update={"platforms": [platform]})
-                if strategy == "direct_llm":
+                if strategy in {"direct_llm", "intent_routed"}:
                     hydration = await coordinator.ensure(
                         platform_intent,
                         target_total=settings.direct_candidates_per_platform,
@@ -122,14 +122,14 @@ async def item_search(
                         message="已建立商品语义检索目录",
                     )
         active_filters = filters or (intent.filters if intent else None)
-        if strategy == "direct_llm":
+        if strategy in {"direct_llm", "intent_routed"}:
             if intent is None:
                 output = ItemSearchOutput(
                     status="partial",
                     platform=platform,
                     message="直搜链需要结构化 ShoppingIntent",
                     provider_status="blocked",
-                    search_strategy="direct_llm",
+                    search_strategy=strategy,
                 )
             else:
                 coordinator, _ = get_catalog_runtime()
@@ -168,7 +168,12 @@ async def item_search(
                         if settings.product_provider == "none"
                         else None
                     ),
-                    search_strategy="direct_llm",
+                    search_strategy=strategy,
+                    retrieval_route=(
+                        "exact_direct"
+                        if intent.intent_mode == "exact_product"
+                        else "category_direct"
+                    ),
                 )
         else:
             output = await asyncio.to_thread(
@@ -209,7 +214,7 @@ async def item_search(
                 strategy=output.search_strategy,
                 message=(
                     "已完成结构化候选读取"
-                    if output.search_strategy == "direct_llm"
+                    if output.search_strategy in {"direct_llm", "intent_routed"}
                     else "已从候选中完成混合检索"
                 ),
             )

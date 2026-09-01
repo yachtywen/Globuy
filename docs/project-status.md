@@ -1,4 +1,14 @@
 # globuy 项目状态
+## 2026-08-29：完成三级意图路由与请求内临时 FAISS Hybrid
+
+- `ShoppingIntent` 已增加 `exact_product/category_explore/goal_explore`、置信度、稳定商品身份、Provider/词法/语义三类查询和 0～2 轮澄清计数。Planner 不再因已有预算自动取消模型明确提出的澄清；目标探索在收敛到一个主品类前由 Harness 阻止平台 fork 和 Provider 调用。
+- 新增 `intent_routed` 策略，`progressive` 的稳定用户哈希灰度目标改为该路由。明确商品按型号/平台商品 ID 和关键变体确定性验证，跳过 Embedding 与 LLM；品类探索在硬过滤、同平台去重和强证据跨平台分组后不超过 36 组时全部进入一次 LLM，超过 36 组才执行 BM25 + BGE-small + FAISS + RRF 筛选。
+- 新增独立 `CandidateEmbeddingEncoder`：固定 `BAAI/bge-small-zh-v1.5`、512 维归一化、进程级有界 TTL 缓存；CUDA 读取本地模型并使用 FP16，CPU 只读取部署阶段预导出的 ONNX INT8，在线请求不会下载或导出模型。新增部署准备脚本与 45/60/120 组冷启动、预热、缓存命中基准脚本。
+- 新增确定性中文/型号 BM25、无权重 RRF 和请求内 `TransientFaissFlatIndex(IndexFlatIP)`；价格、评分、销量、优惠和店铺营销字段不进入语义文本。编码未配置、OOM、超时、维度或非法向量异常均不重试并降级 BM25；原 BGE-M3 1024 维 OpenSearch 商品索引、CategoryInsight、pgvector 长期记忆及实验性持久化 `FaissHNSWIndex` 均未替换或混用。
+- ItemPicker 输出已增加候选选择方法、筛选前后组数、模型 revision、缓存命中及三段耗时；排序方式增加 `deterministic_exact`。新增意图路由、澄清、Hybrid 开始/完成/降级的脱敏事件，接口、Prompt、README、长期契约、向量决策和商品检索实施文档已同步。
+- 验证未调用真实模型、Provider 或付费 LLM：Ruff、compileall 和 `git diff --check` 通过；后端全量 223 项为 `222 passed, 1 skipped`，前端 Vitest `4 files / 19 tests` 通过，TypeScript + Vite 生产构建通过；模型准备脚本 `--help` 和已安装 SentenceTransformers 导出 API 签名检查通过。
+- 尚未下载/导出 BGE-small，也未宣称 GPU 500 ms、CPU 1.5 s、端到端 +15%、`RelevantRetention@36 >=98%` 或灰度质量门禁通过。这些结果必须在目标部署硬件、冻结候选集和获授权真实 Provider 上运行准备/基准/盲测后，才能按 `0% → 5% → 25% → 100%` 推进。
+
 ## 2026-08-27：完成商品直搜、硬过滤、保守同款聚合与一次 LLM 全局精排
 
 - 新增 `hybrid / direct_llm / progressive` 三种商品检索策略和稳定用户哈希灰度。直搜模式的三个 fork 只执行单平台 ItemSearch，每平台最多读取 15 条带 `source_rank/captured_at/evidence_completeness` 的 PostgreSQL 新鲜候选；前台不等待 Embedding、Outbox 或 OpenSearch，Hybrid 链完整保留且仍是默认安全基线。

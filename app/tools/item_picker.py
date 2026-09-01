@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
+import re
 import time
+import unicodedata
 from functools import lru_cache
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -22,8 +25,18 @@ from app.api.monitor import current_monitor
 from app.category.schemas import CategoryInsightOutput
 from app.config import get_settings
 from app.database.session import Database
+from app.products.catalog.intent import ProductIdentity, ShoppingIntent
 from app.products.catalog.repository import CatalogRepository
 from app.products.grouping import CandidateGroup, cap_groups_balanced, group_candidates
+from app.recall.transient_hybrid import (
+    HybridSelection,
+    select_bm25_groups,
+    select_hybrid_groups,
+)
+from app.search.candidate_encoder import (
+    CandidateEmbeddingEncoder,
+    get_candidate_embedding_encoder,
+)
 from app.search.schemas import Candidate, Platform, Scalar
 from app.utils.thread_ctx import current_thread_id
 
@@ -98,11 +111,23 @@ class ItemPickerOutput(BaseModel):
     status: Literal["ok", "degraded", "insufficient_data"]
     picks: list[PickedItem] = Field(default_factory=list, max_length=3)
     rejected_brief: list[str] = Field(default_factory=list, max_length=8)
-    ranking_method: Literal["llm", "deterministic_fallback"]
+    ranking_method: Literal["llm", "deterministic_exact", "deterministic_fallback"]
     ranking_version: str = RANKING_VERSION
     fallback_reason: str | None = None
     duplicate_summary: dict[str, int] = Field(default_factory=dict)
     selection_rule: str = "source/retrieval rank, normalized rating, price, input order"
+    candidate_selection_method: Literal[
+        "not_needed", "hybrid_rrf", "bm25_fallback", "deterministic_exact"
+    ] = "not_needed"
+    candidate_groups_before_selection: int = 0
+    candidate_groups_after_selection: int = 0
+    embedding_model: str | None = None
+    embedding_revision: str | None = None
+    embedding_cache_hits: int = 0
+    embedding_cache_misses: int = 0
+    embedding_duration_ms: int = 0
+    bm25_duration_ms: int = 0
+    faiss_duration_ms: int = 0
 
 
 class RerankAssessment(BaseModel):
@@ -287,7 +312,7 @@ def _picked(
 def _prepare_groups(
     items: list[PickerCandidate],
     constraints: PickerConstraints,
-    group_limit: int,
+    group_limit: int | None,
     *,
     require_source_url: bool = True,
 ) -> tuple[list[CandidateGroup], list[str], dict[str, int]]:
@@ -311,7 +336,8 @@ def _prepare_groups(
         seen_offer_ids.add(identity)
         accepted.append(_as_candidate(candidate))
     groups, summary = group_candidates(accepted)
-    groups = cap_groups_balanced(groups, group_limit)
+    if group_limit is not None:
+        groups = cap_groups_balanced(groups, group_limit)
     statistics = summary.model_dump(mode="json")
     statistics.update(
         {
@@ -322,6 +348,124 @@ def _prepare_groups(
         }
     )
     return groups, rejected, statistics
+
+
+def _selection_fields(
+    selection: HybridSelection | None,
+    *,
+    before: int,
+    after: int,
+    method: str = "not_needed",
+) -> dict[str, Any]:
+    return {
+        "candidate_selection_method": selection.method if selection else method,
+        "candidate_groups_before_selection": before,
+        "candidate_groups_after_selection": after,
+        "embedding_model": selection.embedding_model if selection else None,
+        "embedding_revision": selection.embedding_revision if selection else None,
+        "embedding_cache_hits": selection.embedding_cache_hits if selection else 0,
+        "embedding_cache_misses": selection.embedding_cache_misses if selection else 0,
+        "embedding_duration_ms": selection.embedding_duration_ms if selection else 0,
+        "bm25_duration_ms": selection.bm25_duration_ms if selection else 0,
+        "faiss_duration_ms": selection.faiss_duration_ms if selection else 0,
+    }
+
+
+def _identity_search_text(candidate: Candidate) -> str:
+    return _identity_normalized({"title": candidate.title, "attributes": candidate.attributes})
+
+
+def _identity_normalized(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", _normalized(value))
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+
+
+def _matches_requested_identity(candidate: Candidate, identity: ProductIdentity) -> bool:
+    if identity.source_item_id:
+        requested = _identity_normalized(identity.source_item_id)
+        if requested not in {
+            _identity_normalized(candidate.item_id),
+            _identity_normalized(candidate.product_id or ""),
+            _identity_normalized(candidate.offer_id or ""),
+        }:
+            return False
+    searchable = _identity_search_text(candidate)
+    if identity.model and _identity_normalized(identity.model) not in searchable:
+        return False
+    if identity.brand and _identity_normalized(identity.brand) not in searchable:
+        return False
+    return all(
+        _identity_normalized(value) in searchable for value in identity.variant_attributes.values()
+    )
+
+
+def _requested_identity_group(
+    groups: list[CandidateGroup], identity: ProductIdentity
+) -> CandidateGroup | None:
+    offers = [
+        offer
+        for group in groups
+        for offer in group.offers
+        if _matches_requested_identity(offer, identity)
+    ]
+    if not offers:
+        return None
+    offers.sort(
+        key=lambda offer: (
+            offer.price,
+            offer.source_rank or offer.retrieval_rank or 10**9,
+            offer.platform,
+            offer.item_id,
+        )
+    )
+    evidence = identity.model_dump(mode="json", exclude_none=True)
+    digest = hashlib.sha256(
+        json.dumps(evidence, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return CandidateGroup(
+        product_group_id=f"pg_exact_{digest[:24]}",
+        match_method="requested_identity_exact",
+        identity_evidence=evidence,
+        representative=offers[0],
+        offers=offers,
+        input_order=min(group.input_order for group in groups),
+    )
+
+
+def _deterministic_from_groups(
+    groups: list[CandidateGroup],
+    rejected: list[str],
+    summary: dict[str, int],
+    category_context: CategoryInsightOutput | None,
+    limit: int,
+    *,
+    status: Literal["ok", "degraded"] = "ok",
+    ranking_method: Literal["deterministic_exact", "deterministic_fallback"] = (
+        "deterministic_fallback"
+    ),
+    fallback_reason: str | None = None,
+    selection: HybridSelection | None = None,
+    before: int | None = None,
+    selection_method: str = "not_needed",
+) -> ItemPickerOutput:
+    picks = [
+        _picked(group, assessment=None, category_context=category_context)
+        for group in sorted(groups, key=_group_rank)[:limit]
+    ]
+    return ItemPickerOutput(
+        status=status if picks else "insufficient_data",
+        picks=picks,
+        rejected_brief=rejected,
+        ranking_method=ranking_method,
+        fallback_reason=fallback_reason,
+        duplicate_summary=summary,
+        **_selection_fields(
+            selection,
+            before=before if before is not None else len(groups),
+            after=len(groups),
+            method=selection_method,
+        ),
+    )
 
 
 def _deterministic_output(
@@ -340,17 +484,14 @@ def _deterministic_output(
         get_settings().direct_rerank_group_limit,
         require_source_url=require_source_url,
     )
-    picks = [
-        _picked(group, assessment=None, category_context=category_context)
-        for group in sorted(groups, key=_group_rank)[:limit]
-    ]
-    return ItemPickerOutput(
-        status=status if picks else "insufficient_data",
-        picks=picks,
-        rejected_brief=rejected,
-        ranking_method="deterministic_fallback",
+    return _deterministic_from_groups(
+        groups,
+        rejected,
+        summary,
+        category_context,
+        limit,
+        status=status,
         fallback_reason=fallback_reason,
-        duplicate_summary=summary,
     )
 
 
@@ -462,7 +603,10 @@ def _group_repository() -> CatalogRepository | None:
     return CatalogRepository(database, scope_ttl_seconds=settings.catalog_scope_ttl_seconds)
 
 
-def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
+def build_item_picker_tool(
+    model: BaseChatModel | None,
+    candidate_encoder: CandidateEmbeddingEncoder | None = None,
+) -> BaseTool:
     @tool("item_picker")
     async def llm_item_picker(
         items: list[PickerCandidate],
@@ -472,14 +616,14 @@ def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
         limit: int = 3,
         goal: str = "商品推荐",
         soft_preferences: list[str] | None = None,
+        shopping_intent: ShoppingIntent | None = None,
     ) -> dict:
         """Filter, group and globally rerank provider candidates once."""
         settings = get_settings()
         bounded_limit = max(1, min(limit, 3))
         active_constraints = constraints or PickerConstraints()
-        groups, rejected, summary = _prepare_groups(
-            items, active_constraints, settings.direct_rerank_group_limit
-        )
+        groups, rejected, summary = _prepare_groups(items, active_constraints, None)
+        groups_before_selection = len(groups)
         monitor = current_monitor()
         if monitor is not None:
             await monitor.report_catalog(
@@ -499,6 +643,15 @@ def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
                 collapsed_offers=summary["collapsed_offers"],
                 possible_duplicates=summary["possible_duplicate_pairs"],
             )
+            await monitor.report_catalog(
+                "shopping_intent_routed",
+                phase="intent",
+                status="finished",
+                intent_mode=(
+                    shopping_intent.intent_mode if shopping_intent else "category_explore"
+                ),
+                candidate_pool=len(groups),
+            )
         if not groups:
             return ItemPickerOutput(
                 status="insufficient_data",
@@ -506,7 +659,113 @@ def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
                 rejected_brief=rejected,
                 ranking_method="deterministic_fallback",
                 duplicate_summary=summary,
+                candidate_groups_before_selection=0,
+                candidate_groups_after_selection=0,
             ).model_dump(mode="json")
+
+        if shopping_intent and shopping_intent.intent_mode == "goal_explore":
+            if monitor is not None:
+                await monitor.report_catalog(
+                    "intent_clarification_requested",
+                    phase="intent",
+                    status="blocked",
+                    clarification_count=shopping_intent.clarification_count,
+                )
+            return ItemPickerOutput(
+                status="insufficient_data",
+                picks=[],
+                rejected_brief=rejected,
+                ranking_method="deterministic_fallback",
+                fallback_reason="insufficient_intent",
+                duplicate_summary=summary,
+                candidate_groups_before_selection=len(groups),
+                candidate_groups_after_selection=0,
+            ).model_dump(mode="json")
+
+        if shopping_intent and shopping_intent.intent_mode == "exact_product":
+            identity = shopping_intent.product_identity
+            if identity is None:  # Defensive guard for deserialized legacy checkpoints.
+                raise ValueError("exact_product requires product_identity")
+            exact_group = _requested_identity_group(groups, identity)
+            exact_groups = [exact_group] if exact_group is not None else []
+            output = _deterministic_from_groups(
+                exact_groups,
+                rejected,
+                summary,
+                category_context,
+                1,
+                ranking_method="deterministic_exact",
+                fallback_reason=None if exact_groups else "exact_identity_not_found",
+                before=groups_before_selection,
+                selection_method="deterministic_exact",
+            )
+            return output.model_dump(mode="json")
+
+        selection: HybridSelection | None = None
+        if shopping_intent is not None and len(groups) > settings.candidate_hybrid_group_threshold:
+            if monitor is not None:
+                await monitor.report_catalog(
+                    "candidate_hybrid_started",
+                    phase="candidate_selection",
+                    status="running",
+                    candidate_pool=len(groups),
+                    candidate_limit=settings.candidate_hybrid_group_limit,
+                )
+            hybrid_started = time.perf_counter()
+            try:
+                active_encoder = candidate_encoder or get_candidate_embedding_encoder()
+                async with asyncio.timeout(settings.candidate_embedding_timeout_seconds):
+                    selection = await asyncio.to_thread(
+                        select_hybrid_groups,
+                        groups,
+                        lexical_query=shopping_intent.lexical_query
+                        or shopping_intent.primary_query
+                        or goal,
+                        semantic_query=shopping_intent.semantic_query
+                        or shopping_intent.primary_query
+                        or goal,
+                        encoder=active_encoder,
+                        limit=settings.candidate_hybrid_group_limit,
+                        rank_constant=settings.candidate_rrf_rank_constant,
+                    )
+                groups = selection.groups
+                if monitor is not None:
+                    await monitor.report_catalog(
+                        "candidate_hybrid_completed",
+                        phase="candidate_selection",
+                        status="finished",
+                        candidate_pool=groups_before_selection,
+                        returned=len(groups),
+                        duration_ms=int((time.perf_counter() - hybrid_started) * 1000),
+                        embedding_duration_ms=selection.embedding_duration_ms,
+                        bm25_duration_ms=selection.bm25_duration_ms,
+                        faiss_duration_ms=selection.faiss_duration_ms,
+                        embedding_cache_hits=selection.embedding_cache_hits,
+                        embedding_cache_misses=selection.embedding_cache_misses,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                selection = select_bm25_groups(
+                    groups,
+                    shopping_intent.lexical_query or shopping_intent.primary_query or goal,
+                    settings.candidate_hybrid_group_limit,
+                )
+                groups = selection.groups
+                if monitor is not None:
+                    await monitor.report_catalog(
+                        "candidate_hybrid_degraded",
+                        phase="candidate_selection",
+                        status="degraded",
+                        candidate_pool=groups_before_selection,
+                        returned=len(groups),
+                        duration_ms=int((time.perf_counter() - hybrid_started) * 1000),
+                        fallback_reason=type(exc).__name__.casefold(),
+                    )
+        elif len(groups) > settings.candidate_hybrid_group_limit:
+            groups = cap_groups_balanced(groups, settings.candidate_hybrid_group_limit)
+
+        summary["ranked_product_groups"] = len(groups)
         repository = _group_repository()
         if repository is not None:
             try:
@@ -514,13 +773,16 @@ def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
             except Exception:
                 pass
         if model is None:
-            output = _deterministic_output(
-                items,
-                active_constraints,
+            output = _deterministic_from_groups(
+                groups,
+                rejected,
+                summary,
                 category_context,
                 bounded_limit,
                 status="degraded",
                 fallback_reason="reranker_not_configured",
+                selection=selection,
+                before=groups_before_selection,
             )
             if monitor is not None:
                 await monitor.report_catalog(
@@ -611,18 +873,26 @@ def build_item_picker_tool(model: BaseChatModel | None) -> BaseTool:
                 rejected_brief=rejected,
                 ranking_method="llm",
                 duplicate_summary=summary,
+                **_selection_fields(
+                    selection,
+                    before=groups_before_selection,
+                    after=len(groups),
+                ),
             ).model_dump(mode="json")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             reason = type(exc).__name__.casefold()
-            output = _deterministic_output(
-                items,
-                active_constraints,
+            output = _deterministic_from_groups(
+                groups,
+                rejected,
+                summary,
                 category_context,
                 bounded_limit,
                 status="degraded",
                 fallback_reason=reason,
+                selection=selection,
+                before=groups_before_selection,
             )
             if monitor is not None:
                 await monitor.report_catalog(

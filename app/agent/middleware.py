@@ -136,7 +136,7 @@ def compact_tool_content(tool_name: str, content: Any) -> Any:
         candidates = payload.get("candidates")
         candidate_limit = (
             settings.direct_candidates_per_platform
-            if payload.get("search_strategy") == "direct_llm"
+            if payload.get("search_strategy") in {"direct_llm", "intent_routed"}
             else settings.fork_candidate_limit
         )
         if isinstance(candidates, list) and len(candidates) > candidate_limit:
@@ -240,6 +240,11 @@ async def guarded_tool_call(
     if name == "item_search" and not arguments.get("intent") and state.get("shopping_intent"):
         arguments = {**arguments, "intent": state["shopping_intent"]}
         request = request.override(tool_call={**call, "args": arguments})
+    if name == "item_picker" and not arguments.get("shopping_intent") and state.get(
+        "shopping_intent"
+    ):
+        arguments = {**arguments, "shopping_intent": state["shopping_intent"]}
+        request = request.override(tool_call={**call, "args": arguments})
     monitor = current_monitor()
     started = time.perf_counter()
     if monitor is not None:
@@ -292,6 +297,35 @@ async def guarded_tool_call(
                 call_id,
                 {
                     "status": "needs_planning",
+                    "tool_name": name,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
+        return rejected
+    active_intent = arguments.get("shopping_intent") or state.get("shopping_intent") or {}
+    if (
+        name == "dispatch_tool"
+        and isinstance(active_intent, dict)
+        and active_intent.get("intent_mode") == "goal_explore"
+    ):
+        payload = {
+            "status": "needs_clarification",
+            "message": "目标型购物意图必须先收敛为一个明确品类，暂不调用商品 Provider。",
+        }
+        rejected = ToolMessage(
+            content=_json(payload), name=name, tool_call_id=call_id, status="error"
+        )
+        await _observe_rejected_tool(
+            request,
+            rejected,
+            started_at=started,
+            phase=state.get("decision_phase"),
+        )
+        if monitor is not None:
+            await monitor.report_tool_end(
+                call_id,
+                {
+                    "status": "needs_clarification",
                     "tool_name": name,
                     "duration_ms": int((time.perf_counter() - started) * 1000),
                 },

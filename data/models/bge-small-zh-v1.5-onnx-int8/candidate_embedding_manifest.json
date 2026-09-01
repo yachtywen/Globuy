@@ -1,0 +1,8 @@
+{
+  "model_id": "BAAI/bge-small-zh-v1.5",
+  "requested_revision": "main",
+  "resolved_revision": "7999e1d3359715c523056ef9478215996d62a620",
+  "dimensions": 512,
+  "normalized": true,
+  "quantization_config": "avx512_vnni"
+}

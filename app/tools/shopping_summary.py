@@ -75,7 +75,7 @@ class ShoppingSummaryOutput(BaseModel):
     picks: list[PickedItem] = Field(default_factory=list, max_length=3)
     unresolved: list[str] = Field(default_factory=list)
     learned_preferences: list[PreferenceCandidate] = Field(default_factory=list)
-    ranking_method: Literal["llm", "deterministic_fallback"] | None = None
+    ranking_method: Literal["llm", "deterministic_exact", "deterministic_fallback"] | None = None
     ranking_status: Literal["ok", "degraded", "insufficient_data"] | None = None
     ranking_version: str | None = None
     ranking_fallback_reason: str | None = None
@@ -126,7 +126,9 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
         config: RunnableConfig,
         unresolved: list[str] | None = None,
         learned_preferences: list[PreferenceCandidate] | None = None,
-        ranking_method: Literal["llm", "deterministic_fallback"] | None = None,
+        ranking_method: Literal[
+            "llm", "deterministic_exact", "deterministic_fallback"
+        ] | None = None,
         ranking_status: Literal["ok", "degraded", "insufficient_data"] | None = None,
         ranking_version: str | None = None,
         ranking_fallback_reason: str | None = None,

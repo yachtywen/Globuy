@@ -38,7 +38,9 @@ class CandidateGroup(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_group_id: str
-    match_method: Literal["singleton", "gtin_exact", "brand_model_variant_exact"]
+    match_method: Literal[
+        "singleton", "gtin_exact", "brand_model_variant_exact", "requested_identity_exact"
+    ]
     identity_evidence: dict[str, Any] = Field(default_factory=dict)
     representative: Candidate
     offers: list[Candidate] = Field(min_length=1)
