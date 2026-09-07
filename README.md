@@ -48,7 +48,7 @@ Product / Offer      长期记忆当前态
 - FAISS CPU、ONNX Runtime、SentenceTransformers
 - React、TypeScript、Vite
 - 可选 Redis，仅用于登录失败限流
-- 可选 Kimi K2.6、阿里云 IQS、Just One Provider、LangFuse
+- 可选 DeepSeek（deepseek-v4-flash，1M 窗口）、阿里云 IQS、Just One Provider、LangFuse
 
 当前七个业务工具：`Planner`、`ChatFallback`、`WebSearch`、`ItemSearch`、`ItemPicker`、`PriceCompare`、`ShoppingSummary`。`dispatch_tool` 是同质 fork 元工具，不计入业务工具。
 
@@ -125,7 +125,7 @@ GLOBUY_CANDIDATE_EMBEDDING_ONNX_PATH=data/models/bge-small-zh-v1.5-onnx-int8
 GLOBUY_MEMORY_STORE_BACKEND=pgvector
 ```
 
-真实能力按需配置：Kimi、Just One、阿里云 IQS 和 LangFuse。所有凭据只放在服务器 `.env` 或密钥管理服务中。
+真实能力按需配置：DeepSeek（deepseek-v4-flash）、Just One、阿里云 IQS 和 LangFuse。所有凭据只放在服务器 `.env` 或密钥管理服务中。
 
 ## 验证
 

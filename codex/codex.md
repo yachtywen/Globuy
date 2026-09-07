@@ -13,7 +13,7 @@
 
 主要技术栈：Python 3.12、Conda、FastAPI、Uvicorn、WebSocket、LangChain、LangGraph、
 React、TypeScript、Vite、PostgreSQL/pgvector 和请求内临时 FAISS。对话模型通过 OpenAI
-兼容接口接入 Kimi K2.6，模型标识固定为 `kimi-k2.6`，上下文窗口按 256K 计算。
+兼容接口接入 DeepSeek（deepseek-v4-flash，OpenAI 兼容端点 api.deepseek.com/v1），上下文窗口按 1M 计算，Cache Breakpoint 在 75%（75 万）触发、目标压回 50%（50 万）。
 
 ## 2. 事实来源和严格程度
 

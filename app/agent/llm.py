@@ -78,9 +78,9 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
         # stores the portable LangChain message contract, so disable vendor-specific
         # thinking rather than risk a later Think/Reflect HTTP 400.
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-    if is_kimi:
-        # Kimi K2.6 defaults to a 32K output budget. Make that reserve explicit so
-        # the request and the context-breakpoint calculation use the same contract.
+    if is_kimi or _is_deepseek_endpoint(settings.llm_base_url):
+        # Make the 32K output reserve explicit so the request and the
+        # context-breakpoint calculation use the same contract.
         kwargs["max_tokens"] = settings.llm_max_output_tokens
     if settings.llm_requests_per_minute is not None:
         kwargs["rate_limiter"] = InMemoryRateLimiter(

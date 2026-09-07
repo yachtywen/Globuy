@@ -27,11 +27,11 @@ class Settings(BaseSettings):
     )
 
     model_provider: Literal["mock", "openai-compatible"] = "mock"
-    llm_model: str = "kimi-k2.6"
+    llm_model: str = "deepseek-v4-flash"
     llm_api_key: SecretStr | None = None
-    llm_base_url: str | None = "https://api.moonshot.cn/v1"
+    llm_base_url: str | None = "https://api.deepseek.com/v1"
     llm_temperature: float = Field(default=0.3, ge=0, le=2)
-    llm_context_window_tokens: int = Field(default=262_144, ge=8_192)
+    llm_context_window_tokens: int = Field(default=1_000_000, ge=8_192)
     llm_max_output_tokens: int = Field(default=32_768, ge=256)
     # Per-HTTP-request ceiling for one model call. A slow provider response must
     # fail fast and free the main-run budget instead of stalling for minutes.

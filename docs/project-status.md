@@ -3,6 +3,12 @@
 > 最后更新时间：2026-09-07
 > 当前口径：商品检索只使用 PostgreSQL 候选集 + 请求内 FAISS；长期记忆只使用 PostgreSQL/pgvector。两者共用冻结 `BAAI/bge-small-zh-v1.5` 512 维本地 ONNX INT8 编码（用户 2026-09-06 批准），向量空间仍严格隔离。下方更早日期中关于 OpenSearch、CategoryInsight、商品索引 Outbox、三塔和 BGE-M3/1024d 记忆的描述仅是历史记录，不再代表当前实现。
 
+# 2026-09-07：模型切换为 deepseek-v4-flash，1M 窗口与 75% 压缩边界（用户批准）
+
+- 用户要求主对话模型从 kimi-k2.6/Moonshot 切换为官方 DeepSeek `deepseek-v4-flash`（`https://api.deepseek.com/v1`），本地 `.env` 已写入对应 Key（不提交、不打印）；`.env.example`、`app/config.py` 默认值、`codex/codex.md`、README 同步更新。
+- 上下文窗口改为 1M（`GLOBUY_LLM_CONTEXT_WINDOW_TOKENS=1000000`），Cache Breakpoint 维持 0.75/0.50 比例推导：触发 75 万、目标压回 50 万；已用设置代码验证（`compression_trigger_tokens=750000`）。`llm.py` 为 deepseek 端点显式补 32K max_tokens 预算（与 kimi 一致）。
+- 真实冒烟：`deepseek-v4-flash` 最小请求 373ms 成功（模型与 Key 均有效）；请求级超时 120s/重试 1 保持。历史 Kimi 相关记录仅作背景，不再代表当前运行配置。
+
 # 2026-09-07：真实链路复现定位“Kimi 无法完成商品搜索”并修复三层根因
 
 - 用真实 kimi-k2.6 + 当前代码复现原失败线程 `b31d04d6`（通勤降噪耳机→头戴/TWS→500元）及单轮全约束请求：历史结论“Kimi 反复 goal_explore/需澄清”被推翻——模型其实正确产出 `category_explore(high)`，真正链路在**意图产出之后**断裂。
