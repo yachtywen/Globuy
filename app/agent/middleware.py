@@ -38,7 +38,7 @@ def _json(value: Any) -> str:
 def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, value in arguments.items():
-        if key in {"items", "picks", "learned_preferences"} and isinstance(value, list):
+        if key in {"items", "picks"} and isinstance(value, list):
             safe[f"{key}_count"] = len(value)
         elif isinstance(value, str):
             safe[key] = value[:500]
@@ -134,11 +134,7 @@ def compact_tool_content(tool_name: str, content: Any) -> Any:
     settings = get_settings()
     if tool_name == "item_search" and isinstance(payload, dict):
         candidates = payload.get("candidates")
-        candidate_limit = (
-            settings.direct_candidates_per_platform
-            if payload.get("search_strategy") in {"direct_llm", "intent_routed"}
-            else settings.fork_candidate_limit
-        )
+        candidate_limit = settings.faiss_candidates_per_platform
         if isinstance(candidates, list) and len(candidates) > candidate_limit:
             payload["candidates"] = candidates[:candidate_limit]
             payload["truncated"] = True
@@ -177,6 +173,7 @@ def _result_summary(tool_name: str, content: Any) -> dict[str, Any]:
         "cache_ttl_seconds",
         "partial",
         "degraded_reason",
+        "repaired",
     ):
         if key in payload:
             summary[key] = payload[key]
@@ -245,6 +242,22 @@ async def guarded_tool_call(
     ):
         arguments = {**arguments, "shopping_intent": state["shopping_intent"]}
         request = request.override(tool_call={**call, "args": arguments})
+    # Honesty guard: never let the model claim unverified system statuses
+    # (maintenance/failure) when the product chain simply has no candidates.
+    if name == "chat_fallback" and isinstance(arguments.get("message"), str):
+        import re as _re
+
+        if _re.search(
+            r"维护中|正在维护|维修|服务不可用|系统[^，。？!]{0,10}(故障|维护)|无法(?:直接)?搜索|不能搜索|搜索不了|无法检索|检索(?:不到|不了|失败)|检索工具?(?:暂时)?(?:无法|不能)使用|搜索功能?(?:暂时)?(?:无法|不能)(?:使用|用|访问)|商品数据库|数据库暂?无法|暂时无法(?:直接)?搜索",
+            arguments["message"],
+        ):
+            arguments = {
+                **arguments,
+                "message": (
+                    "当前没有检索到可核验的商品结果，请补充具体品牌或型号，或稍后再试。"
+                ),
+            }
+            request = request.override(tool_call={**call, "args": arguments})
     monitor = current_monitor()
     started = time.perf_counter()
     if monitor is not None:
@@ -331,6 +344,103 @@ async def guarded_tool_call(
                 },
             )
         return rejected
+    # Deterministic search-first guard for chat_fallback: once Planner produced an
+    # executable category/exact intent, the model must run the real search before it
+    # can fall back to chat. Loop-detected or budget-exhausted terminations stay
+    # allowed so the graph can still converge to an honest terminal message.
+    iteration_count = state.get("iteration") or 0
+    search_ran = any(
+        getattr(message, "name", None) in {"item_search", "dispatch_tool"}
+        for message in (state.get("messages") or [])
+    )
+    executable_intent = False
+    if not search_ran and name == "chat_fallback":
+        for message in reversed(state.get("messages") or []):
+            if getattr(message, "name", None) != "planner":
+                continue
+            try:
+                content = message.content
+                payload = (
+                    json.loads(content)
+                    if isinstance(content, str)
+                    else (content if isinstance(content, dict) else {})
+                )
+                intent = payload.get("shopping_intent") or {}
+                executable_intent = intent.get("intent_mode") in {
+                    "category_explore",
+                    "exact_product",
+                }
+            except (ValueError, TypeError):
+                executable_intent = False
+            break
+        if (
+            executable_intent
+            and not bool(state.get("loop_detected"))
+            and iteration_count < 12
+        ):
+            payload = {
+                "status": "search_required",
+                "message": (
+                    "品类与约束已明确，必须先检索真实候选：请调用 dispatch_tool "
+                    "（或 item_search）获取各平台候选后再继续，禁止跳过检索直接回复。"
+                ),
+            }
+            rejected = ToolMessage(
+                content=_json(payload), name=name, tool_call_id=call_id, status="error"
+            )
+            await _observe_rejected_tool(
+                request,
+                rejected,
+                started_at=started,
+                phase=state.get("decision_phase"),
+            )
+            if monitor is not None:
+                await monitor.report_tool_end(
+                    call_id,
+                    {
+                        "status": "search_required",
+                        "tool_name": name,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                )
+            return rejected
+    # Deterministic guard: ItemPicker must only run after a real search produced
+    # candidates. If the model never called item_search/dispatch_tool in this
+    # conversation, reject the call and tell it to search instead of letting it
+    # filter fabricated or empty candidates.
+    if name == "item_picker" and current_fork_depth() == 0:
+        search_messages = [
+            message
+            for message in (state.get("messages") or [])
+            if getattr(message, "name", None) in {"item_search", "dispatch_tool"}
+        ]
+        if not search_messages:
+            payload = {
+                "status": "search_required",
+                "message": (
+                    "本轮还没有任何真实商品检索：必须先通过 dispatch_tool 让各平台 "
+                    "ItemSearch 返回候选，禁止直接筛选或臆造候选。"
+                ),
+            }
+            rejected = ToolMessage(
+                content=_json(payload), name=name, tool_call_id=call_id, status="error"
+            )
+            await _observe_rejected_tool(
+                request,
+                rejected,
+                started_at=started,
+                phase=state.get("decision_phase"),
+            )
+            if monitor is not None:
+                await monitor.report_tool_end(
+                    call_id,
+                    {
+                        "status": "search_required",
+                        "tool_name": name,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                )
+            return rejected
     if name == "item_picker" and current_fork_depth() > 0:
         payload = {
             "status": "parent_only",

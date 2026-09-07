@@ -8,12 +8,10 @@ from datetime import datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy import event, text
-from sqlalchemy.dialects import mysql
-from sqlalchemy.schema import CreateTable
 
 from app.api.server import create_app
 from app.config import Settings
-from app.database.models import Base, User
+from app.database.models import Base
 from app.database.session import Database
 from app.products.import_snapshot import import_snapshot
 from app.products.schedule import next_daily_refresh
@@ -24,7 +22,7 @@ async def _agent(query: str, thread_id: str) -> tuple[str, dict]:
 
 
 def _database(tmp_path, *, enforce_foreign_keys: bool = False) -> tuple[str, Database]:
-    url = f"sqlite+aiosqlite:///{tmp_path.as_posix()}/mysql-contract.sqlite3"
+    url = f"sqlite+aiosqlite:///{tmp_path.as_posix()}/database-contract.sqlite3"
     database = Database(url)
 
     if enforce_foreign_keys:
@@ -147,10 +145,6 @@ def test_registration_flushes_user_before_foreign_key_children(tmp_path) -> None
         )
         assert task.status_code == 202
 
-
-def test_mysql_schema_uses_microsecond_datetimes() -> None:
-    ddl = str(CreateTable(User.__table__).compile(dialect=mysql.dialect()))
-    assert "DATETIME(6)" in ddl
 
 
 def test_price_refresh_uses_next_beijing_0300() -> None:
@@ -275,20 +269,15 @@ def test_authenticated_user_data_flow(tmp_path) -> None:
         assert removed.status_code == 204
         assert client.get("/api/v1/wishlists/default").json()["items"] == []
 
-        memory = client.post(
+        assert client.post(
             "/api/v1/memories",
-            json={
-                "category": "preference",
-                "key": "budget_style",
-                "content": "优先考虑性价比",
-            },
+            json={"memory": "优先考虑性价比"},
             headers=headers,
-        )
-        assert memory.status_code == 201
-        assert client.get("/api/v1/memories").json()["items"][0]["version"] == 1
+        ).status_code == 404
+        assert client.get("/api/v1/memories").status_code == 404
 
         assert client.post("/api/v1/auth/logout", headers=headers).status_code == 204
-        assert client.get("/api/v1/memories").status_code == 401
+        assert client.get("/api/v1/memories").status_code == 404
 
 
 def test_snapshot_import_flushes_product_before_offer_with_foreign_keys(tmp_path) -> None:

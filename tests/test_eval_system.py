@@ -314,5 +314,6 @@ def test_health_exposes_safe_evaluation_preflight_flags(tmp_path: Path) -> None:
         payload = client.get("/healthz").json()
     assert payload["product_provider_configured"] is False
     assert payload["web_search_configured"] is False
-    assert payload["category_cache_enabled"] is False
+    assert payload["product_search_backend"] == "faiss"
+    assert payload["memory_store_backend"] == "pgvector"
     assert "api_key" not in payload

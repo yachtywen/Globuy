@@ -94,41 +94,11 @@ export interface PriceHistory {
   items: PriceObservation[];
 }
 
-export interface MemoryEntry {
-  memory_id: string;
-  category: "blacklist" | "preference" | "history";
-  key: string;
-  content: string;
-  confidence: number;
-  source: "user" | "agent_confirmed" | "import";
-  version: number;
-  created_at: string;
-  updated_at: string;
-  lifecycle_status: "active" | "archived" | "deleted";
-  keywords: string[];
-  last_reinforced_at: string;
-  reinforcement_count: number;
-}
-
-export interface MemoryCandidate {
-  candidate_id: string;
-  category: MemoryEntry["category"];
-  key: string;
-  content: string;
-  keywords: string[];
-  confidence: number;
-  status: "pending" | "confirmed" | "rejected" | "expired";
-  created_at: string;
-  expires_at: string;
-}
-
 export interface TaskResult {
   status: "complete" | "incomplete" | "not_configured" | "error";
   final_text: string;
   picks: ProductPick[];
   unresolved: Array<unknown>;
-  learned_preferences: Array<unknown>;
-  memory_status: string;
   source_kind: "offline_snapshot" | string;
   search_attempted?: boolean;
   search_candidate_count?: number;
@@ -254,7 +224,6 @@ export interface RunStatusResponse {
   terminal_event: MonitorEvent | null;
   result: TaskResult | null;
   artifacts: Artifact[];
-  memory_status: string;
   error: { code: string; message: string } | null;
 }
 

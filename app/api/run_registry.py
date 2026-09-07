@@ -23,10 +23,6 @@ from app.search.catalog_images import enrich_task_result
 
 AgentRunner = Callable[[str, str], Awaitable[tuple[str, dict[str, Any]]]]
 AgentStreamRunner = Callable[[str, str], AsyncIterator[dict[str, Any]]]
-MemoryCandidateSink = Callable[
-    [str, str, str, list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]
-]
-
 logger = logging.getLogger(__name__)
 
 
@@ -129,7 +125,6 @@ class RunRegistry:
         stream_runner: AgentStreamRunner | None,
         session_dir: Callable[[str], Path],
         product_image_catalog_path: Path,
-        memory_candidate_sink: MemoryCandidateSink | None = None,
         observability: ObservabilityManager | None = None,
         cancel_grace_seconds: float = 5.0,
     ) -> None:
@@ -139,7 +134,6 @@ class RunRegistry:
         self.stream_runner = stream_runner
         self.session_dir = session_dir
         self.product_image_catalog_path = product_image_catalog_path
-        self.memory_candidate_sink = memory_candidate_sink
         self.observability = observability
         self.cancel_grace_seconds = cancel_grace_seconds
         self.active_tasks: dict[str, RunHandle] = {}
@@ -352,11 +346,6 @@ class RunRegistry:
             **cursor,
             "result": result,
             "artifacts": [self._public_artifact(item, thread_id, run_id) for item in artifacts],
-            "memory_status": (
-                result.get("memory_status", "not_configured")
-                if isinstance(result, dict)
-                else "not_configured"
-            ),
             "error": (
                 {
                     "code": record["error_code"],
@@ -487,44 +476,6 @@ class RunRegistry:
             final_text, result, state_metadata = self._final_result(
                 final_state, "".join(deltas), metadata
             )
-            preferences = result.get("learned_preferences") or []
-            if self.memory_candidate_sink is not None and preferences:
-                try:
-                    candidates = await self.memory_candidate_sink(
-                        handle.user_id,
-                        handle.thread_id,
-                        handle.run_id,
-                        [item for item in preferences if isinstance(item, dict)],
-                    )
-                    result["memory_candidates"] = [
-                        {
-                            "candidate_id": item["candidate_id"],
-                            "category": item["category"],
-                            "key": item["key"],
-                            "status": item["status"],
-                        }
-                        for item in candidates
-                    ]
-                    for item in candidates:
-                        await self.broker.publish(
-                            EventType.CUSTOM,
-                            handle.thread_id,
-                            handle.run_id,
-                            message="发现一条待你确认的长期记忆",
-                            data={
-                                "name": "memory_candidate_created",
-                                "candidate_id": item["candidate_id"],
-                                "category": item["category"],
-                                "key": item["key"],
-                            },
-                        )
-                except Exception:
-                    logger.exception(
-                        "Memory candidate persistence failed for thread_id=%s run_id=%s",
-                        handle.thread_id,
-                        handle.run_id,
-                    )
-                    result["memory_candidate_status"] = "partial"
             metadata.update(state_metadata)
             joined = "".join(deltas)
             if final_text and final_text != joined:
@@ -687,7 +638,6 @@ class RunRegistry:
             if raw_status in {"complete", "incomplete", "not_configured", "error"}
             else "complete"
         )
-        memory_status = metadata.get("memory_status", "not_configured")
         picks = terminal.get("picks", [])
         search_attempted, search_candidate_count = _product_search_summary(state)
         if picks:
@@ -701,11 +651,6 @@ class RunRegistry:
                 if picks
                 else terminal.get("unresolved", [])
             ),
-            "learned_preferences": terminal.get(
-                "learned_preferences", metadata.get("learned_preferences", [])
-            ),
-            "memory_status": memory_status,
-            "memory_metrics": metadata.get("memory_metrics"),
             "source_kind": "offline_snapshot",
             "search_attempted": search_attempted,
             "search_candidate_count": search_candidate_count,

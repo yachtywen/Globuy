@@ -1,11 +1,10 @@
-"""Eight core shopping tools and their runtime registry."""
+"""Seven core shopping tools and their runtime registry."""
 
 from collections.abc import Iterable
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from app.tools.category_insight import category_insight
 from app.tools.chat_fallback import chat_fallback
 from app.tools.item_picker import build_item_picker_tool
 from app.tools.item_search import item_search
@@ -18,7 +17,6 @@ CORE_TOOL_NAMES: tuple[str, ...] = (
     "planner",
     "chat_fallback",
     "web_search",
-    "category_insight",
     "item_search",
     "item_picker",
     "price_compare",
@@ -31,14 +29,12 @@ TOOL_PHASES: dict[str, frozenset[str]] = {
             "planner",
             "chat_fallback",
             "web_search",
-            "category_insight",
             "item_search",
             "dispatch_tool",
         }
     ),
     "reflect": frozenset(
         {
-            "category_insight",
             "price_compare",
             "item_picker",
             "shopping_summary",
@@ -50,13 +46,12 @@ TERMINAL_TOOLS = frozenset({"shopping_summary", "chat_fallback"})
 
 
 def build_core_tools(model: BaseChatModel | None = None) -> tuple[BaseTool, ...]:
-    """Build the immutable nine-tool business set for one homogeneous family."""
+    """Build the immutable seven-tool business set for one homogeneous family."""
 
     return (
         planner,
         chat_fallback,
         web_search,
-        category_insight,
         item_search,
         build_item_picker_tool(model),
         price_compare,

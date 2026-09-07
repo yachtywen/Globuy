@@ -88,6 +88,8 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel | None:
             check_every_n_seconds=0.25,
             max_bucket_size=1,
         )
+    kwargs["request_timeout"] = settings.llm_request_timeout_seconds
+    kwargs["max_retries"] = settings.llm_max_retries
     return ChatOpenAI(**kwargs)
 
 

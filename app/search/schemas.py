@@ -66,5 +66,5 @@ class ItemSearchOutput(BaseModel):
     catalog_candidate_count: int = Field(default=0, ge=0)
     captured_at: str | None = None
     provider_status: str | None = None
-    search_strategy: Literal["hybrid", "direct_llm", "intent_routed"] = "hybrid"
-    retrieval_route: Literal["exact_direct", "category_direct", "category_hybrid"] | None = None
+    search_strategy: Literal["faiss"] = "faiss"
+    retrieval_route: Literal["exact_direct", "category_faiss"] | None = None

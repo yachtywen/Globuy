@@ -5,7 +5,6 @@ import pytest
 from app.agent.llm import get_chat_model
 from app.agent.prompts import get_planner_prompt, get_shopping_summary_prompt, get_system_prompt
 from app.api.monitor import AgentEvent, EventType, Monitor
-from app.recall import FaissHNSWIndex
 from app.utils.path_utils import safe_join, upload_path
 from app.utils.thread_ctx import (
     current_fork_depth,
@@ -73,14 +72,3 @@ def test_mock_model_is_process_cached(monkeypatch: pytest.MonkeyPatch) -> None:
         assert get_chat_model() is get_chat_model()
     finally:
         get_chat_model.cache_clear()
-
-
-def test_faiss_hnsw_round_trip(tmp_path: Path) -> None:
-    index = FaissHNSWIndex(3, hnsw_m=8)
-    index.add([101, 202], [[1, 0, 0], [0, 1, 0]])
-    assert index.search([0.9, 0.1, 0], limit=1)[0][0] == 101
-
-    path = tmp_path / "items.faiss"
-    index.save(path)
-    loaded = FaissHNSWIndex.load(path)
-    assert loaded.search([0, 1, 0], limit=1)[0][0] == 202

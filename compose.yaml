@@ -6,18 +6,15 @@ services:
         required: false
     environment:
       GLOBUY_HOST: 0.0.0.0
-      GLOBUY_PORT: 8000
-      GLOBUY_OPENSEARCH_URL: http://opensearch:9200
+      GLOBUY_PORT: 6412
       GLOBUY_REDIS_URL: redis://redis:6379/0
       GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-postgresql+psycopg://globuy_app:globuy_dev_change_me@postgres:5432/globuy}
     ports:
-      - "8000:8000"
+      - "6412:6412"
     volumes:
       - ./output:/workspace/output
     depends_on:
       postgres:
-        condition: service_healthy
-      opensearch:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -52,21 +49,18 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  product-outbox-worker:
+  memory-consolidation-worker:
     build: .
-    command: ["python", "-m", "app.products.outbox_worker", "--serve"]
+    command: ["python", "-m", "app.memory.consolidation_worker", "--serve"]
     env_file:
       - path: .env
         required: false
     environment:
       GLOBUY_DATABASE_URL: ${GLOBUY_DOCKER_DATABASE_URL:-postgresql+psycopg://globuy_app:globuy_dev_change_me@postgres:5432/globuy}
-      GLOBUY_OPENSEARCH_URL: http://opensearch:9200
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
-        condition: service_healthy
-      opensearch:
         condition: service_healthy
     restart: unless-stopped
 
@@ -97,25 +91,5 @@ services:
       retries: 20
       start_period: 10s
 
-  opensearch:
-    image: opensearchproject/opensearch:3.7.0
-    environment:
-      discovery.type: single-node
-      DISABLE_INSTALL_DEMO_CONFIG: "true"
-      DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
-    ports:
-      - "9200:9200"
-      - "9600:9600"
-    volumes:
-      - opensearch-data:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-
 volumes:
   postgres-data:
-  opensearch-data:

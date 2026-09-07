@@ -15,7 +15,7 @@ from app.auth.service import AuthService, IssuedSession, Principal
 def _service(request: Request) -> AuthService:
     service = getattr(request.app.state, "auth_service", None)
     if service is None:
-        raise ApiError(503, "DATABASE_NOT_CONFIGURED", "MySQL 尚未配置")
+        raise ApiError(503, "DATABASE_NOT_CONFIGURED", "PostgreSQL 尚未配置")
     return service
 
 

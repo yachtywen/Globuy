@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.3, ge=0, le=2)
     llm_context_window_tokens: int = Field(default=262_144, ge=8_192)
     llm_max_output_tokens: int = Field(default=32_768, ge=256)
+    # Per-HTTP-request ceiling for one model call. A slow provider response must
+    # fail fast and free the main-run budget instead of stalling for minutes.
+    llm_request_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    # Bounded retry count so timeout/transient failures cannot triple the stall.
+    llm_max_retries: int = Field(default=1, ge=0, le=3)
     # Optional client-side throttle for providers with a low organization RPM.
     llm_requests_per_minute: float | None = Field(default=None, gt=0)
 
@@ -111,14 +116,6 @@ class Settings(BaseSettings):
     catalog_lease_seconds: int = Field(default=120, ge=10)
     provider_max_concurrency: int = Field(default=3, ge=1, le=20)
     provider_per_platform_concurrency: int = Field(default=1, ge=1, le=1)
-    product_outbox_batch_size: int = Field(default=100, ge=1, le=1000)
-    product_outbox_max_bytes: int = Field(default=1_000_000, ge=1024)
-    product_outbox_max_attempts: int = Field(default=8, ge=1, le=100)
-    product_outbox_retry_base_seconds: int = Field(default=2, ge=1)
-    product_outbox_retry_max_seconds: int = Field(default=300, ge=1)
-    product_index_deleted_ratio_threshold: float = Field(default=0.25, ge=0, le=1)
-    product_index_disk_percent_threshold: float = Field(default=80.0, ge=1, le=100)
-    product_index_retention_seconds: int = Field(default=86_400, ge=0)
 
     @field_validator(
         "database_url",
@@ -174,8 +171,6 @@ class Settings(BaseSettings):
             raise ValueError("catalog limits must satisfy minimum <= target <= hard cap")
         if self.catalog_soft_deadline_seconds > self.catalog_hard_deadline_seconds:
             raise ValueError("catalog soft deadline cannot exceed hard deadline")
-        if self.candidate_hybrid_group_threshold != self.candidate_hybrid_group_limit:
-            raise ValueError("candidate Hybrid threshold and group limit must match")
         return self
 
     web_search_provider: Literal["none", "iqs"] = "iqs"
@@ -186,12 +181,14 @@ class Settings(BaseSettings):
     iqs_max_results: int = Field(default=10, ge=1, le=50)
     web_search_content_chars: int = Field(default=1_200, ge=100, le=4_000)
 
-    ann_backend: Literal["faiss"] = "faiss"
-    ann_index_path: Path = Path("data/item_index.faiss")
-    embedding_model_name: str = "BAAI/bge-m3"
+    product_search_backend: Literal["faiss"] = "faiss"
+    # Long-term memory shares the same frozen 512d BGE-small encoder as transient
+    # candidate FAISS. The local ONNX INT8 artifact is the only inference runtime;
+    # nothing is downloaded or exported at request/worker time.
+    embedding_model_name: str = "BAAI/bge-small-zh-v1.5"
     embedding_model_revision: str = "main"
-    embedding_device: Literal["auto", "cpu", "cuda"] = "auto"
-    embedding_dimensions: int = Field(default=1024, ge=1)
+    embedding_device: Literal["auto", "cpu", "cuda"] = "cpu"
+    embedding_dimensions: int = Field(default=512, ge=1)
     embedding_batch_size: int = Field(default=16, ge=1)
     embedding_max_length: int = Field(default=256, ge=1)
 
@@ -204,71 +201,38 @@ class Settings(BaseSettings):
     candidate_embedding_batch_size: int = Field(default=64, ge=1)
     candidate_embedding_max_length: int = Field(default=128, ge=1)
     candidate_embedding_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
-    candidate_hybrid_group_threshold: int = Field(default=36, ge=3, le=120)
-    candidate_hybrid_group_limit: int = Field(default=36, ge=3, le=120)
+    candidate_faiss_group_limit: int = Field(default=36, ge=3, le=120)
     candidate_embedding_cache_size: int = Field(default=10_000, ge=0, le=100_000)
     candidate_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=1)
     candidate_rrf_rank_constant: int = Field(default=60, ge=1, le=1_000)
 
     memory_store_backend: Literal["pgvector"] = "pgvector"
-    memory_candidate_min_confidence: float = Field(default=0.75, ge=0, le=1)
-    memory_candidate_ttl_days: int = Field(default=30, ge=1)
-    memory_preference_half_life_days: int = Field(default=180, ge=1)
-    memory_history_half_life_days: int = Field(default=30, ge=1)
-    memory_preference_archive_days: int = Field(default=730, ge=1)
-    memory_history_archive_days: int = Field(default=180, ge=1)
     memory_recall_limit: int = Field(default=10, ge=1, le=50)
     memory_recall_candidate_pool: int = Field(default=50, ge=10, le=500)
     memory_prompt_token_limit: int = Field(default=1_200, ge=128, le=20_000)
-    memory_structured_facts_enabled: bool = True
-    memory_conflict_resolution_enabled: bool = True
-    memory_retrieval_v2_enabled: bool = True
-    opensearch_url: str = "http://127.0.0.1:9200"
-    opensearch_product_index: str = "globuy-products-v2-initial"
-    opensearch_product_index_prefix: str = "globuy-products-v2-"
-    opensearch_product_alias: str = "globuy-products"
-    opensearch_product_pipeline: str = "globuy-products-rrf"
-    opensearch_timeout_seconds: float = Field(default=10.0, gt=0)
+    memory_processing_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    memory_consolidation_run_threshold: int = Field(default=10, ge=1, le=100)
+    memory_consolidation_idle_seconds: int = Field(default=900, ge=60, le=86_400)
+    memory_consolidation_poll_seconds: int = Field(default=5, ge=1, le=300)
+    memory_consolidation_lease_seconds: int = Field(default=300, ge=30, le=3_600)
+    memory_decay_window_days: int = Field(default=180, ge=1, le=3_650)
+    memory_decay_floor: float = Field(default=0.6, ge=0.1, le=1.0)
+    memory_history_retention_days: int = Field(default=180, ge=1, le=3_650)
+    memory_outbox_max_attempts: int = Field(default=8, ge=1, le=32)
+    memory_outbox_lease_seconds: int = Field(default=300, ge=30, le=3_600)
     product_dataset_path: Path = Path(
         "datasets/headphones_1000/structured/itemsearch_candidates.jsonl"
     )
     product_image_catalog_path: Path = Path(
         "datasets/justone_headphones/normalized/headphones.jsonl"
     )
-    item_search_pool_floor: int = Field(default=60, ge=1)
-    item_search_pool_max: int = Field(default=150, ge=1)
     fork_candidate_limit: int = Field(default=10, ge=1, le=50)
-    item_search_strategy: Literal[
-        "hybrid", "direct_llm", "intent_routed", "progressive"
-    ] = "hybrid"
-    direct_rerank_rollout_percent: int = Field(default=0, ge=0, le=100)
-    direct_candidates_per_platform: int = Field(default=15, ge=1, le=50)
-    direct_rerank_group_limit: int = Field(default=36, ge=3, le=60)
+    faiss_candidates_per_platform: int = Field(default=15, ge=1, le=50)
+    item_rerank_group_limit: int = Field(default=36, ge=3, le=60)
     item_rerank_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     fork_max_depth: int = Field(default=1, ge=1, le=1)
 
-    category_dataset_path: Path = Path(
-        "datasets/headphones_1000/structured/itemsearch_candidates.jsonl"
-    )
-    category_source_category: str = "耳机"
-    category_aliases_path: Path = Path("app/category/category_aliases.yml")
-    category_build_output_dir: Path = Path("output/category")
-    opensearch_category_alias: str = "globuy-category"
-    opensearch_category_index_prefix: str = "globuy-category-v1"
-    opensearch_category_pipeline_exact: str = "globuy-category-exact-v1"
-    opensearch_category_pipeline_balanced: str = "globuy-category-balanced-v1"
-    opensearch_category_pipeline_semantic: str = "globuy-category-semantic-v1"
-    category_coarse_k: int = Field(default=30, ge=1, le=100)
-    category_quick_k: int = Field(default=8, ge=1, le=30)
-    category_deep_k: int = Field(default=15, ge=1, le=50)
-    category_min_confidence: float = Field(default=0.5, ge=0, le=1)
-    reranker_endpoint: str | None = None
-    reranker_timeout_seconds: float = Field(default=3.0, gt=0)
-    category_reranker_required: bool = False
-    category_rerank_bypass_score: float | None = Field(default=None, ge=0)
     redis_url: str | None = "redis://127.0.0.1:6379/0"
-    category_cache_ttl_seconds: int = Field(default=3600, ge=1)
-    category_cache_timeout_seconds: float = Field(default=0.25, gt=0)
 
 
 @lru_cache

@@ -1,342 +1,165 @@
-<div align="center">
-  <img src="frontend/src/assets/globuy-mark.webp" width="88" alt="Globuy logo" />
-  <h1>Globuy</h1>
-  <p><strong>面向真实购物场景的对话式 Agent 系统</strong></p>
-  <p>把自然语言购物需求转化为可追踪、可恢复、可核验的跨平台商品决策。</p>
+zzzzzzzzzz# globuy
 
-  <p>
-    <img alt="Python 3.12" src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" />
-    <img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-AgentLoop-1C3C3C" />
-    <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.116+-009688?logo=fastapi&logoColor=white" />
-    <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" />
-    <img alt="OpenSearch" src="https://img.shields.io/badge/OpenSearch-Hybrid-005EB8?logo=opensearch&logoColor=white" />
-    <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white" />
-  </p>
-</div>
+`globuy` 是一个基于 FastAPI、LangGraph 和 React 的对话式购物 Agent。当前仓库已收敛为适合服务器部署的两套向量能力：
 
-<p align="center">
-  <img src="docs/assets/screenshots/globuy-login-cover.png" width="100%" alt="Globuy 登录封面与品牌主视觉" />
-</p>
+- 商品搜索：PostgreSQL 候选目录 + 请求内 FAISS `IndexFlatIP`。
+- 长期记忆：LangGraph `BaseStore` + PostgreSQL 17 + pgvector。
 
-## 项目简介
+项目不再依赖 OpenSearch，也不保留 CategoryInsight/OpenSearch、商品索引投影、持久化 FAISS 或三塔实验链路。未配置模型、商品 Provider 或网页搜索 Provider 时，相应能力返回 `not_configured`，不会伪造商品、价格、库存或来源。
 
-Globuy 是一个从零设计并实现的全栈购物 Agent 项目。用户只需要描述预算、用途和偏好，系统便会将需求结构化，按需派生同质 fork 并行检索淘宝、京东和抖音候选，再完成证据整理、确定性筛选与购物清单生成。
-
-项目重点不只是“调用一次大模型”，而是实现一条可以长期运行的 Agent 工程链路：显式阶段状态、工具边界、循环收敛、上下文压缩、用户确认型长期记忆、异步任务、WebSocket 增量事件、商品事实库、混合检索、心愿库、价格观测和离线/真实双层评测。
-
-> [!IMPORTANT]
-> 仓库不会伪造商品、价格、库存或外部检索结果。未配置模型、Provider、OpenSearch 或数据包时，相关能力返回 `not_configured`；自动测试不调用真实付费服务。
-
-## 实机演示
-
-### 对话式选品与运行轨迹
-
-用户输入预算和用途后，前端持续展示 Agent 阶段、工具调用和完成状态，并将经过验证的候选渲染为可比较、可收藏、可追溯来源的商品卡片。
-
-![Globuy 对话式购物工作台](docs/assets/screenshots/globuy-agent-workbench.png)
-
-### 心愿库与价格追踪
-
-推荐商品可以进入用户心愿库。系统保留加入价格、当前价格、最近观测时间和下一次检查时间，并支持手动刷新与独立价格 Worker。
-
-![Globuy 心愿库与价格追踪](docs/assets/screenshots/globuy-wishlist-price-tracking.png)
-
-## 已实现能力
-
-| 模块 | 当前实现 |
-|---|---|
-| AgentLoop | 使用 LangGraph 显式建模 `Think → Act → Observe → Reflect`，八个业务工具按阶段白名单调用 |
-| 同质 fork | 主 Agent 通过 `dispatch_tool` 按需派生子任务；fork 继承完整工具集与 System Prompt，拥有独立 thread/checkpoint，最大深度固定为 1 |
-| Harness 防护 | 决策预算、循环指纹检测、主循环递归上限、fork 90 秒超时、候选截断与确定性终结，避免无效自旋和上下文膨胀 |
-| Cache Breakpoint | 在 Observe 后压缩旧历史，保留最近 3 个完整工具调用组和合法的 tool-call/tool-result 配对 |
-| 长期记忆 | PostgreSQL 保存用户确认的偏好事实和版本；pgvector + 关键词 RRF 检索，支持候选确认和软衰减 |
-| 商品检索 | `hybrid / direct_llm / intent_routed / progressive`：按明确商品、品类探索和目标探索三级路由，按需执行临时 Hybrid 与一次 LLM 精排 |
-| 混合召回基线 | `BM25(title) + BAAI/bge-m3 Dense Vector + Lucene HNSW/COSINE + 无权重 RRF` 完整保留；Embedding/OpenSearch 投影继续由 Outbox 异步维护 |
-| 临时候选筛选 | 分组超过 36 时才运行 `BM25 + bge-small-zh-v1.5 512d + FAISS IndexFlatIP + RRF`；索引仅存在于单次请求，失败降级 BM25 |
-| 实时任务 | FastAPI 返回 HTTP `202`，后台执行 Agent；WebSocket 按 thread/run 推送带 sequence 的事件，支持 replay、心跳、多订阅、取消与终态恢复 |
-| 用户系统 | Argon2id 密码哈希、服务端可撤销会话、HttpOnly Cookie、CSRF、幂等写入和资源归属校验 |
-| 产品闭环 | React 工作台、会话归档、商品卡片、比较、来源链接、心愿库、价格历史、长期记忆管理和响应式布局 |
-| 评测体系 | YAML 双层用例、P0 确定性事实/安全门禁、可选独立 LLM Judge、正式 HTTP/WS live runner、脱敏轨迹和 Markdown 报告 |
-| Agent 可观测 | 可选 LangFuse v4 全链路 Trace；关联主图、模型、八个工具与同质 fork，采集 Token/RT，并支持 Eval Score 回写；默认脱敏摘要且 fail-open |
-
-## 核心技术亮点
-
-### 1. 主 Agent + 同质 fork，而不是八个独立 Agent
-
-八个工具属于主 AgentLoop 的行动空间。单平台需求由主 Loop 直接处理；明确的多平台任务由 `dispatch_tool` 创建同质 fork 并行执行。子任务共享模型实例、工具定义和 System Prompt，但使用独立 `thread_id` 与 checkpointer，结果压缩后回流父 Loop 的 Observe/Reflect 阶段。
-
-当前八个业务工具为：`Planner`、`ChatFallback`、`WebSearch`、`CategoryInsight`、`ItemSearch`、`ItemPicker`、`PriceCompare` 和 `ShoppingSummary`；`dispatch_tool` 是 fork 元工具，不计入八个业务工具。
-
-### 2. 可收敛的生产型 AgentLoop
-
-LLM 决策之外还存在确定性控制层：阶段工具白名单阻止跨阶段调用；滑动窗口对工具名、参数和结果摘要建立循环指纹；达到决策预算或发现重复无进展时，根 Agent 会汇总三路候选并只调用一次 ItemPicker 和 Summary 收尾。fork 深度固定为 1，直搜模式每个平台最多保留 15 条候选。
-
-### 3. Cache Breakpoint 上下文压缩
-
-长对话不会在每轮无边界累积。Kimi K2.6 的上下文窗口按 256K 配置：消息估算达到 75%（196,608 Token）才触发压缩，并尽量压回 50%（131,072 Token）；另外为最多 32K 输出以及 System Prompt、工具声明和估算误差保留 16K 安全空间。系统在 Observe 后识别历史边界，保留稳定 Prompt 前缀、当前约束和最近 3 个完整工具调用组，用确定性摘要替换更旧历史，同时保证未完成工具调用及其结果不会被拆散。摘要只在越过高水位时变化，不会每轮重写前缀；如显式设置 `GLOBUY_COMPRESSION_TOKEN_LIMIT`，则继续使用该兼容阈值。
-
-### 4. PostgreSQL 事实库 + pgvector/OpenSearch 检索
-
-PostgreSQL 是用户、会话、任务、Product、Offer、价格观测、心愿库和长期记忆的权威事实库。pgvector 承担长期记忆语义投影，OpenSearch 继续负责商品与品类知识检索。事务 Outbox 将事实写入与异步投影解耦，支持失败重试、幂等更新和索引重建。
-
-### 5. AG-UI 风格事件与可恢复 WebSocket
-
-正式任务通过 HTTP `202` 立即返回 `thread_id/run_id`，WebSocket 只负责订阅增量事件。EventBroker 为事件分配严格递增的 sequence，维护有界重放缓冲和独立订阅队列；客户端断线后可携带游标恢复，遇到 replay gap 会显式同步任务状态。成功、失败和取消均走统一终态与清理路径。
-
-### 6. 不以手写综合分伪装模型效果
-
-直搜链不计算手写综合分：ItemPicker 先以代码重验硬约束，按 GTIN 或品牌、型号及完整关键变体的强证据聚合同款，再让 LLM 只返回已有商品组 ID 的顺序和枚举判断。模型不可用、超时或输出非法时不重试，按来源顺位、可比较评分、价格和稳定输入顺序降级。项目仍不训练或微调 Query/User/Item 编码器，也不建设依赖点击或人工标签的学习排序闭环。
-
-## 系统架构
-
-```mermaid
-flowchart LR
-    U[React 工作台] -->|HTTP 202| API[FastAPI / RunRegistry]
-    API -->|thread_id + run_id| U
-    API --> LOOP[LangGraph AgentLoop]
-    LOOP --> THINK[Think]
-    THINK --> ACT[Act / ToolNode]
-    ACT --> OBSERVE[Observe]
-    OBSERVE --> REFLECT[Reflect]
-    REFLECT -->|信息不足| THINK
-    REFLECT -->|完成| RESULT[ShoppingSummary]
-
-    ACT -->|dispatch_tool| FORK[同质 fork]
-    FORK --> TOOLS[八个业务工具]
-    ACT --> TOOLS
-
-    TOOLS --> CATALOG[PostgreSQL Product / Offer]
-    CATALOG --> OUTBOX[Transactional Outbox]
-    OUTBOX --> OS[(OpenSearch)]
-    TOOLS --> REDIS[(Redis)]
-
-    API --> BROKER[EventBroker]
-    LOOP --> BROKER
-    BROKER -->|WebSocket + replay| U
-
-    MEMORY[用户确认型长期记忆] --> CATALOG
-    MEMORY --> PGVECTOR[(PostgreSQL + pgvector)]
-    PGVECTOR -->|BaseStore recall| LOOP
-```
-
-## 一次购物请求如何执行
-
-1. FastAPI 校验用户会话、CSRF 和幂等键，创建 run 后立即返回 `202`。
-2. Agent 从 PostgreSQL/pgvector 读取当前用户已确认的相关偏好，拼装本轮上下文。
-3. Think/Planner 一次结构化调用同时完成意图路由、约束抽取和查询构造；目标型需求每轮只澄清一个问题，最多两轮。
-4. ItemSearch 检查目录覆盖；本地目录不足且 Provider 明确启用时，受控补充候选并写入 PostgreSQL。
-5. `intent_routed` 下，明确型号/商品 ID 走确定性选择且不编码；品类探索在商品组超过 36 时才用临时 Hybrid 筛到 36；目标探索在澄清前不调用 Provider。
-6. 品类探索最多调用一次 LLM 全局精排，并确定性选择组内最低已知商品价 Offer；同款其他平台报价保留。Embedding 失败不重试，按 BM25 和来源顺位降级。
-7. Product Outbox 在后台继续更新 Embedding/OpenSearch；`hybrid` 策略仍执行原 BM25 + Dense Vector + RRF 基线。
-8. ShoppingSummary 输出带价格、平台、理由、跨平台报价和来源链接的清单；前端通过 WebSocket 增量呈现全过程。
-
-## 技术栈
-
-| 层级 | 技术 |
-|---|---|
-| Agent | LangChain 1.x、LangGraph 1.x、Kimi K2.6（OpenAI-compatible） |
-| Backend | Python 3.12、FastAPI、Uvicorn、Pydantic、SQLAlchemy Async、Alembic |
-| Retrieval | OpenSearch 3.7 + BGE-M3 长期投影基线；BM25 + BGE-small 512d + FAISS IndexFlatIP 请求内候选筛选 |
-| Data | PostgreSQL 17、pgvector 0.8、Redis 7、Transactional Outbox |
-| Frontend | React 19、TypeScript 5.8、Vite 7、Vitest |
-| Protocol | HTTP 202、WebSocket、AG-UI 风格事件、sequence replay |
-| Quality | Pytest、Ruff、双层 Eval、可选独立 LLM Judge |
-| Observability | LangFuse Cloud（可选旁路）、确定性 W3C Trace ID、LangChain Callback、脱敏 OTEL Export |
-
-## 快速开始
-
-默认演示模式使用 `mock` 模型，不调用 Kimi、阿里云 IQS 或商品 Provider。`intent_routed` 的临时候选语义筛选需要预先准备 BGE-small ONNX INT8 或本机 CUDA 模型缓存；缺失时显式降级 BM25，不在用户请求中下载或导出模型。
-
-### 环境要求
-
-- Miniconda / Anaconda
-- Python 3.12（项目固定使用 Conda 环境 `globuy`）
-- Node.js 20.19+
-- Docker Desktop 与 Docker Compose
-- Docker Desktop（运行 PostgreSQL 17 + pgvector；完整检索还会运行 OpenSearch/Redis）
-
-### 1. 克隆与安装
-
-```cmd
-git clone https://github.com/yachtywen/Globuy.git
-cd /d Globuy
-
-conda env create -f environment.yml
-conda activate globuy
-
-pushd frontend
-npm ci
-popd
-```
-
-### 2. 配置 PostgreSQL 与本地环境
-
-项目正式接口依赖 PostgreSQL 17 + pgvector；未配置数据库时后端会拒绝启动。先复制配置模板，将模板中的 PostgreSQL 密码替换为本地随机密码，再启动数据库并执行迁移：
-
-```cmd
-copy .env.example .env
-
-REM 在 .env 中为下列三项设置同一个随机本地密码；URL 中的密码需要 URL 编码。
-REM GLOBUY_POSTGRES_PASSWORD
-REM GLOBUY_DATABASE_URL（主机通过 127.0.0.1:5433 连接）
-REM GLOBUY_DOCKER_DATABASE_URL（Compose 服务通过 postgres:5432 连接）
-
-docker compose up -d --wait postgres
-alembic upgrade head
-```
-
-开发演示可设置 `GLOBUY_MODEL_PROVIDER=mock`、`GLOBUY_WEB_SEARCH_PROVIDER=none`，这样不会调用付费模型或商品 Provider。不要提交 `.env`、密码、Token、数据库卷或真实 Provider 响应。
-
-联网搜索使用阿里云 IQS UnifiedSearch。启用时在本地 `.env` 设置 `GLOBUY_WEB_SEARCH_PROVIDER=iqs` 与 `GLOBUY_IQS_API_KEY`；默认采用 `LiteAdvanced`、最多 10 条结果，关闭增强摘要和网页正文，只返回来源摘要与重排分数。接口与计费边界以[阿里云 IQS 联网搜索官方文档](https://help.aliyun.com/zh/document_detail/2883041.html)为准。
-
-可选启用 Agent 全链路观测：在 LangFuse 日本区项目中创建 API Key，把 Key 写入本地 `.env`，设置
-`GLOBUY_OBSERVABILITY_PROVIDER=langfuse`。默认 `summary` 模式不会上传完整 Prompt、商品数组或用户
-ID；`/healthz` 可检查 `observability_configured/enabled/status`，但不会回显凭据。完整配置、看板字段和
-排障流程见 [Agent 可观测实施与运维文档](docs/agent-observability-langfuse-implementation-plan.md)。
-
-LangFuse 中的 generation 使用稳定名称 `coordinator.think`、`coordinator.reflect`、
-`fork.think`、`fork.reflect`、`shopping_summary.generation` 和
-`category_insight.extractor`；显式 live Eval Judge 以 `eval.judge` 关联回对应任务 Trace。每次调用同时
-记录 Provider 实际 usage 与调用前上下文估算；Provider 返回的可核验 Prompt Cache usage 会归一化为互斥的 cache-read/input bucket，避免成本
-重复计算。工具 observation 保留真实 RT、状态、结果估算大小和安全的业务缓存指标；
-`context.compress` 单独记录 Cache Breakpoint，三类缓存不会混为一个 `cache_hit`。
-
-### 3. 启动前后端
-
-终端 A：
-
-```cmd
-conda activate globuy
-python -m app.api
-```
-
-终端 B：
-
-```cmd
-cd /d frontend
-npm run dev -- --host 127.0.0.1
-```
-
-访问 <http://127.0.0.1:5173>，注册本地账号后即可创建会话。Vite 只负责前端并将 `/api/*`、`/healthz` 代理到 `127.0.0.1:8000`；若后端未启动，页面会显示代理 500。
-
-### 4. 启用完整检索（可选）
-
-```cmd
-docker compose up -d --wait --wait-timeout 300 postgres opensearch redis
-
-REM 需要有权使用的 Candidate 数据包
-python -m app.products.import_snapshot
-python -m app.search.build_index
-
-REM 部署/开发阶段准备临时候选模型；不要在在线请求中执行
-python scripts/prepare_candidate_embedding.py
-
-REM 使用冻结的 CandidateGroup JSON 做 45/60/120 组本机基准
-python scripts/benchmark_candidate_hybrid.py candidate-groups.json --query "通勤降噪耳机"
-
-REM 可选：构建确定性品类知识卡片
-python -m app.category.build_index --deterministic
-```
-
-首次建库需要下载约 2.3 GB 的 `BAAI/bge-m3`。仓库不发布 `.env`、模型缓存、数据库卷、OpenSearch 索引或未获授权的商品快照；检索结果代表数据采集时的快照，不代表实时库存或平台官方推荐。
-
-PostgreSQL 迁移、长期记忆衰减和 Worker 运维见 [PostgreSQL 迁移实施方案](docs/pg迁移.md) 与 [接口文档](docs/globuy接口文档v1.md)。
-
-## 测试与评测
-
-一次执行提交门禁（Ruff、compileall、后端全量测试、shopping + memory 离线评测、前端 Vitest 与生产构建）：
-
-```cmd
-conda activate globuy
-python scripts/test_all.py --output output/test-runs/latest
-```
-
-如需同时验证隔离 PostgreSQL/pgvector，设置 `GLOBUY_TEST_POSTGRES_URL`；脚本不会允许模型或 Provider 调用，每个子命令默认有 300 秒硬超时。
-
-### 后端与前端验证
-
-```cmd
-conda activate globuy
-python -m ruff check app datasets tests
-python -m compileall -q app datasets tests
-python -m pytest -q
-
-pushd frontend
-npm run test
-npm run build
-popd
-```
-
-测试使用 Fake/Mock Encoder、OpenSearch、Agent 和 Provider，不应访问真实付费服务。最近一次记录的离线评测为 6/6 case PASS、平均分 1.000；完整验证基线和已知例外以 [项目状态](docs/project-status.md) 为准。
-
-### 双层评测
-
-```cmd
-REM 默认离线契约层：合成事实，不访问模型、Provider、数据库或向量服务
-python scripts/eval_regression.py --suite offline
-
-REM 只运行长期记忆 integration cases
-python scripts/eval_regression.py --suite offline --domain memory
-
-REM 合并 shopping 与 memory 报告
-python scripts/eval_regression.py --suite offline --domain all
-
-REM 真实质量层必须使用隔离账号，并显式授权模型调用
-python scripts/eval_regression.py --suite live --allow-model-calls
-
-REM 只运行长期记忆跨会话 live case；Provider 已配置时还需第二个显式开关
-python scripts/eval_regression.py --suite live --domain memory --allow-model-calls --allow-external-tools
-
-REM 仅在明确希望向 LangFuse 写入分数时增加此开关
-python scripts/eval_regression.py --suite live --allow-model-calls --publish-langfuse-scores
-```
-
-P0 事实与安全条件由代码硬判；P1/P2 可以交给独立 Judge，但 Judge 不能覆盖 P0 失败。真实层复用正式登录、CSRF、HTTP 202、任务轮询、WebSocket replay、长期记忆 API 与 PostgreSQL 商品事实。详见 [评测系统文档](docs/evaluation-system.md)。
-
-## 项目结构
+## 运行架构
 
 ```text
-globuy/
-├─ app/
-│  ├─ agent/          # LangGraph 主图、同质 fork、循环与压缩中间件
-│  ├─ api/            # FastAPI、RunRegistry、EventBroker、WebSocket
-│  ├─ tools/          # 八个业务工具
-│  ├─ products/       # Product/Offer、Provider、目录、Outbox、价格 Worker
-│  ├─ search/         # BGE-M3、OpenSearch Hybrid、索引生命周期
-│  ├─ memory/         # BaseStore、记忆索引与 Outbox Worker
-│  ├─ category/       # CategoryInsight 知识卡片 RAG
-│  ├─ database/       # SQLAlchemy 模型、Repository 与会话持久化
-│  └─ eval/           # 双层评测、硬门禁、Judge 与报告
-├─ frontend/          # React + TypeScript + Vite 工作台
-├─ alembic/           # PostgreSQL Schema 迁移
-├─ tests/             # 后端离线测试
-├─ eval/              # YAML 评测用例与夹具
-├─ docs/              # 架构契约、接口、状态与运维文档
-├─ scripts/           # 评测与验收入口
-└─ compose.yaml       # API、OpenSearch、Redis 与后台 Worker
+React / HTTP 202 / WebSocket
+            |
+      FastAPI + LangGraph
+            |
+    PostgreSQL 17 + pgvector
+       |                 |
+Product / Offer      长期记忆当前态
+       |                 |
+请求内 BM25 + FAISS   pgvector + 关键词 RRF
+       |
+一次 LLM 精排 + ShoppingSummary
 ```
 
-## 当前边界与路线
+商品搜索的固定行为：
 
-- 商品与价格来自已授权 Provider 或离线快照；失败时不生成占位数据。
-- 默认 `GLOBUY_PRODUCT_PROVIDER=none`，不会静默产生付费调用。
-- ItemSearch 默认仍为 `hybrid` 安全基线，可显式切换 `intent_routed`；`progressive` 按稳定用户哈希灰度到新路由。临时 FAISS 只处理本次真实候选，不作为 OpenSearch 故障后备。
-- 长期记忆只写入用户明确确认的内容，不把一次浏览自动升级为永久偏好。
-- 当前不包含 SFT、Agentic RL、三塔训练或学习排序；这些内容不得作为已实现成果描述。
-- 首版 RunRegistry/EventBroker 是单进程边界；启用多 worker 前需要迁移到共享任务和事件基础设施。
+1. Planner 生成结构化 `ShoppingIntent`。
+2. `exact_product` 使用可靠型号或平台商品 ID 做确定性匹配。
+3. `category_explore` 从 PostgreSQL 读取各平台新鲜候选；目录不足且已配置 Provider 时按需补充。
+4. 硬过滤和保守同款聚合后，使用冻结的 `BAAI/bge-small-zh-v1.5` 生成 512 维归一化向量，在单次请求内创建 FAISS `IndexFlatIP`。
+5. BM25 与 FAISS 名次使用无权重 RRF 融合，最多保留 36 个商品组，再执行一次严格 JSON 的 LLM 精排。
+6. FAISS 编码不可用时，只对同一批真实候选做 BM25 降级，不切换其他向量后端。
 
-后续任务、当前差距和每次验证记录见 [docs/ToDo.md](docs/ToDo.md) 与 [docs/project-status.md](docs/project-status.md)。
+长期记忆固定使用 PostgreSQL/pgvector：
 
-## 相关文档
-### 以下是我用codex aicoding时生成的相关文档（还有一些都在/docs）
-- [v1 接口文档](docs/globuy接口文档v1.md)
-- [项目状态与验证基线](docs/project-status.md)
-- [向量与检索固定契约](docs/vector-infrastructure.md)
-- [ItemSearch 具体方案](docs/itemsearch-no-training-implementation-plan.md)
-- [AgentLoop 收尾实现](docs/itempicker-agentloop-10-14-implementation.md)
-- [双层评测系统](docs/evaluation-system.md)
-- [PostgreSQL 与 pgvector 迁移](docs/pg迁移.md)
+- LangGraph `BaseStore` 是 Agent 读接口。
+- 当前态、审计、沉淀游标和 Outbox 都保存在 PostgreSQL。
+- BGE-small 512 维编码同时服务长期记忆（pgvector）与商品候选（请求内 FAISS）；两个向量空间严格隔离，不互用、不混写。推理统一使用仓库内本地 ONNX INT8 产物，不在线下载模型。
+- 向量与关键词两路使用无权重 RRF；向量元数据不匹配时显式降级到关键词召回。
+- 记忆投影失败采用租约、退避和 dead-letter，失败不会改变本轮商品结果。
 
-## 说明
+## 主要组件
 
-Globuy 是一个以 Agent 工程化、检索系统和全栈产品闭环为重点的个人学习项目。项目代码为独立实现；参考资料用于理解业务和架构目标，不代表复制了任何未公开源码。
+- Python 3.12、FastAPI、Uvicorn
+- LangChain、LangGraph、WebSocket 增量事件
+- PostgreSQL 17、pgvector 0.8
+- FAISS CPU、ONNX Runtime、SentenceTransformers
+- React、TypeScript、Vite
+- 可选 Redis，仅用于登录失败限流
+- 可选 Kimi K2.6、阿里云 IQS、Just One Provider、LangFuse
+
+当前七个业务工具：`Planner`、`ChatFallback`、`WebSearch`、`ItemSearch`、`ItemPicker`、`PriceCompare`、`ShoppingSummary`。`dispatch_tool` 是同质 fork 元工具，不计入业务工具。
+
+## 本地启动
+
+前置条件：Docker、Conda、Node.js 20+。
+
+```cmd
+conda env create -f environment.yml
+conda activate globuy
+pip install -e .
+copy .env.example .env
+docker compose up -d --wait postgres redis
+alembic upgrade head
+python -m uvicorn app.api.server:app --host 127.0.0.1 --port 8000
+```
+
+另开终端启动前端：
+
+```cmd
+cd frontend
+npm ci
+npm run dev
+```
+
+访问 `http://127.0.0.1:5173`。后端健康检查：`http://127.0.0.1:8000/healthz`。
+
+零付费本地运行保持：
+
+```dotenv
+GLOBUY_MODEL_PROVIDER=mock
+GLOBUY_PRODUCT_PROVIDER=none
+GLOBUY_WEB_SEARCH_PROVIDER=none
+GLOBUY_OBSERVABILITY_PROVIDER=none
+```
+
+## Docker Compose
+
+Compose 包含 `api`、`postgres`、`redis`、`price-worker`、`memory-consolidation-worker` 和 `memory-outbox-worker`。商品 FAISS 使用仓库内预准备的 ONNX INT8 模型，不需要独立容器。镜像内也包含 Alembic 文件，可在发布前执行：
+
+```cmd
+docker compose build
+docker compose up -d postgres redis
+docker compose run --rm api alembic upgrade head
+docker compose up -d
+docker compose ps
+```
+
+生产环境必须修改 PostgreSQL 密码、Cookie 安全选项、CORS 域名和外部 Provider 凭据。`.env` 已被 Git 忽略，禁止提交或写入镜像。
+
+全新空数据库的首次迁移请走仓库设计的基线路径（直接 `alembic upgrade head` 会在 `20260823_0004` 处因当前 ORM 不再定义中间表 `memory_candidates` 而失败）：
+
+```cmd
+python -m alembic upgrade 20260721_0001
+psql -h 127.0.0.1 -p 5433 -U globuy_app -d globuy -c "CREATE INDEX IF NOT EXISTS ix_memory_entries_keywords_gin ON memory_entries USING gin (keywords);" -c "CREATE INDEX IF NOT EXISTS ix_memory_embeddings_hnsw_cosine ON memory_embeddings USING hnsw (embedding vector_cosine_ops);"
+python -m alembic stamp 20260901_0007
+```
+
+已有数据库升级仍使用普通 `alembic upgrade head`。
+
+阿里云部署建议使用单实例 API。当前 `RunRegistry`、事件缓冲与 LangGraph checkpointer 仍是进程内实现，不能直接把 API 横向扩容为多个 worker；如需多实例，必须先迁移到共享任务、事件和 checkpoint 基础设施。
+
+当前服务器对外访问端口固定为 `6412`（`.env` 已设 `GLOBUY_HOST=0.0.0.0` / `GLOBUY_PORT=6412`，`compose.yaml` 的 api 服务同步）。前端已按生产构建托管在同一端口：浏览器访问 `http://<IP>:6412` 即打开 `globuy Agent Console`（UI 与 `/api/v1`、WebSocket 同源同端口）。公网访问需在云安全组放行 TCP 6412；PostgreSQL（5433）与 Redis（6379）保持内网使用，后续部署其他项目时自行分配端口即可。
+
+修改前端后重新发布：先在本机（或服务器）执行 `cd frontend && npm run build`，再重启 API。
+
+## 配置重点
+
+```dotenv
+GLOBUY_DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/globuy
+GLOBUY_PRODUCT_SEARCH_BACKEND=faiss
+GLOBUY_CANDIDATE_EMBEDDING_BACKEND=onnx
+GLOBUY_CANDIDATE_EMBEDDING_ONNX_PATH=data/models/bge-small-zh-v1.5-onnx-int8
+GLOBUY_MEMORY_STORE_BACKEND=pgvector
+```
+
+真实能力按需配置：Kimi、Just One、阿里云 IQS 和 LangFuse。所有凭据只放在服务器 `.env` 或密钥管理服务中。
+
+## 验证
+
+自动测试不得访问付费模型或真实商品 Provider：
+
+```cmd
+python -m ruff check app tests scripts
+python -m compileall -q app tests scripts
+python -m pytest -q
+cd frontend
+npm run test -- --run
+npm run build
+```
+
+FAISS 候选链的离线评测与基准：
+
+```cmd
+python scripts/evaluate_candidate_hybrid.py eval/candidate-hybrid-retention.json
+python scripts/benchmark_candidate_hybrid.py candidate-groups.json --query "通勤降噪耳机"
+```
+
+## 目录
+
+```text
+app/agent/       LangGraph AgentLoop、fork 与收敛保护
+app/api/         FastAPI、任务、WebSocket 与事件重放
+app/products/    Product/Offer、Provider、目录与价格刷新
+app/recall/      请求内 BM25 + FAISS 候选选择
+app/search/      候选 Schema、商品/记忆 Embedding 编码器
+app/memory/      PostgreSQL/pgvector BaseStore、沉淀与 Outbox
+app/database/    SQLAlchemy、PostgreSQL 与业务服务
+frontend/        React 工作台
+alembic/         PostgreSQL 数据库迁移
+docs/            当前契约、状态和运维说明
+```
+
+当前实现、已验证结果和剩余部署差距以 [项目状态](docs/project-status.md) 与 [向量基础设施契约](docs/vector-infrastructure.md) 为准。

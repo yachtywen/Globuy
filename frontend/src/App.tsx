@@ -71,7 +71,6 @@ const CatalogProgressPanel = memo(function CatalogProgressPanel({ progress }: { 
 const TOOL_LABELS: Record<string, string> = {
   web_search: "网络搜索",
   item_search: "商品检索",
-  category_insight: "品类洞察",
   preference_memory: "偏好读取",
 };
 

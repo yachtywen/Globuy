@@ -7,7 +7,6 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import uuid4
@@ -35,9 +34,6 @@ from app.api.auth_routes import router as auth_router
 from app.api.connection import ConnectionManager, connection_manager
 from app.api.context import bind_context
 from app.api.domain_routes import (
-    memory_service as memory_service_dependency,
-)
-from app.api.domain_routes import (
     router as domain_router,
 )
 from app.api.domain_routes import (
@@ -63,11 +59,11 @@ from app.api.schemas import (
 from app.api.storage import SessionStore
 from app.auth.service import AuthService
 from app.config import Settings, get_settings
-from app.database.services import MemoryService, WishlistService
+from app.database.services import WishlistService
 from app.database.session import Database
 from app.database.session_store import SQLAlchemySessionStore
-from app.memory.facts import durable_candidate_allowed
 from app.memory.postgres_store import PostgresMemoryStore
+from app.memory.service import MemoryService
 from app.observability import ObservabilityManager
 from app.search.candidate_encoder import get_candidate_embedding_encoder
 from app.search.catalog_images import enrich_task_result
@@ -133,21 +129,26 @@ def create_app(
             pool_size=settings.database_pool_size,
             pool_recycle=settings.database_pool_recycle_seconds,
         )
-        store = SQLAlchemySessionStore(database)
+        store = SQLAlchemySessionStore(
+            database,
+            memory_run_threshold=settings.memory_consolidation_run_threshold,
+            memory_idle_seconds=settings.memory_consolidation_idle_seconds,
+        )
         auth_service = AuthService(database, settings)
         wishlist_service = WishlistService(
             database,
             refresh_hours=settings.price_refresh_interval_hours,
             refresh_local_hour=settings.price_refresh_local_hour,
         )
-        memory_service = MemoryService(database, settings=settings)
+        memory_service = MemoryService(database)
         if agent_runner is run_agent:
-            main_agent.store = PostgresMemoryStore(
+            memory_store = PostgresMemoryStore(
                 database,
                 memory_service,
                 get_embedding_encoder(),
                 settings,
             )
+            main_agent.store = memory_store
     else:
         # Kept only for isolated legacy tests and explicit local diagnostics.
         store = SessionStore(_database_path(settings))
@@ -160,73 +161,6 @@ def create_app(
     )
     observability = ObservabilityManager(settings)
 
-    async def persist_memory_candidates(
-        user_id: str,
-        thread_id: str,
-        run_id: str,
-        candidates: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        if memory_service is None:
-            return []
-        persisted: list[dict[str, Any]] = []
-        for candidate in candidates:
-            try:
-                confidence = Decimal(str(candidate.get("confidence", 0)))
-                category = str(candidate.get("category") or "")
-                key = str(candidate.get("key") or "").strip()
-                content = str(candidate.get("content") or "").strip()
-                persistence_scope = str(candidate.get("persistence_scope") or "long_term")
-                evidence_type = str(candidate.get("evidence_type") or "inferred")
-                allowed, _reason = durable_candidate_allowed(
-                    content=content,
-                    persistence_scope=persistence_scope,
-                    evidence_type=evidence_type,
-                )
-                structured_values = (
-                    candidate.get("subject"),
-                    candidate.get("predicate"),
-                    candidate.get("value_json"),
-                    candidate.get("polarity"),
-                    candidate.get("scope_type"),
-                )
-                if (
-                    confidence < Decimal(str(settings.memory_candidate_min_confidence))
-                    or category not in {"blacklist", "preference", "history"}
-                    or not key
-                    or not content
-                    or not allowed
-                    or (
-                        settings.memory_structured_facts_enabled
-                        and persistence_scope == "long_term"
-                        and any(value is None for value in structured_values)
-                    )
-                ):
-                    continue
-                persisted.append(
-                    await memory_service.create_candidate(
-                        user_id,
-                        category=category,
-                        key=key[:128],
-                        content=content[:4000],
-                        confidence=confidence,
-                        source_thread_id=thread_id,
-                        source_run_id=run_id,
-                        ttl_days=settings.memory_candidate_ttl_days,
-                        subject=candidate.get("subject"),
-                        predicate=candidate.get("predicate"),
-                        value_json=candidate.get("value_json"),
-                        polarity=candidate.get("polarity"),
-                        scope_type=candidate.get("scope_type"),
-                        scope_value=candidate.get("scope_value"),
-                        evidence_type=evidence_type,
-                        persistence_scope=persistence_scope,
-                        extraction_version=candidate.get("extraction_version") or "memory-fact-v2",
-                    )
-                )
-            except (TypeError, ValueError):
-                continue
-        return persisted
-
     registry = RunRegistry(
         store=store,
         broker=broker,
@@ -234,7 +168,6 @@ def create_app(
         stream_runner=stream_runner,
         session_dir=lambda thread_id: _session_dir(settings, thread_id),
         product_image_catalog_path=settings.product_image_catalog_path,
-        memory_candidate_sink=(persist_memory_candidates if memory_service is not None else None),
         observability=observability,
         cancel_grace_seconds=settings.run_cancel_grace_seconds,
     )
@@ -248,20 +181,15 @@ def create_app(
             )
         await store.open()
         await store.recover_after_restart()
-        warm_candidate_encoder = settings.item_search_strategy == "intent_routed" or (
-            settings.item_search_strategy == "progressive"
-            and settings.direct_rerank_rollout_percent > 0
-        )
-        if warm_candidate_encoder:
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(get_candidate_embedding_encoder().warmup), timeout=60
-                )
-            except Exception:  # noqa: BLE001 - missing artifacts degrade per request to BM25
-                logger.warning(
-                    "Candidate embedding warmup failed; request-time Hybrid will use BM25 fallback",
-                    exc_info=True,
-                )
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(get_candidate_embedding_encoder().warmup), timeout=60
+            )
+        except Exception:  # noqa: BLE001 - missing artifacts degrade per request to BM25
+            logger.warning(
+                "Candidate embedding warmup failed; request-time FAISS will use BM25 fallback",
+                exc_info=True,
+            )
         try:
             yield
         finally:
@@ -315,7 +243,15 @@ def create_app(
         return principal.user_id
 
     @app.get("/", tags=["system"])
-    async def root() -> dict[str, str]:
+    async def root(request: Request) -> dict[str, str]:
+        # Serve the production UI to browsers on the same origin while keeping the
+        # JSON system info for API clients/tests.
+        frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+        index_html = frontend_dist / "index.html"
+        if index_html.is_file() and "text/html" in request.headers.get("accept", ""):
+            from fastapi.responses import HTMLResponse
+
+            return HTMLResponse(index_html.read_bytes())  # type: ignore[return-value]
         return {"name": settings.app_name, "version": __version__, "docs": "/docs"}
 
     @app.get("/healthz", tags=["system"])
@@ -331,7 +267,8 @@ def create_app(
             "web_search_configured": bool(
                 settings.web_search_provider != "none" and settings.iqs_api_key is not None
             ),
-            "category_cache_enabled": bool(settings.redis_url),
+            "product_search_backend": settings.product_search_backend,
+            "memory_store_backend": settings.memory_store_backend,
             **observability.health(),
         }
         if database is not None:
@@ -589,11 +526,34 @@ def create_app(
         )
 
     router.include_router(auth_router)
-    if wishlist_service is not None and memory_service is not None:
+    if wishlist_service is not None:
         app.dependency_overrides[wishlist_service_dependency] = lambda: wishlist_service
-        app.dependency_overrides[memory_service_dependency] = lambda: memory_service
         router.include_router(domain_router)
     app.include_router(router)
+    # Serve the production frontend build on the same origin when present, so the
+    # whole product (UI + /api/v1 + WebSocket) is reachable through one port.
+    # API routes are registered above and therefore take precedence over this mount.
+    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        from fastapi.staticfiles import StaticFiles
+        from starlette.responses import PlainTextResponse
+
+        class _FrontendStatic(StaticFiles):
+            """Serve UI assets for GET/HEAD only; keep 404 for other methods so
+            removed/unknown API paths keep their original 404 semantics."""
+
+            async def __call__(self, scope, receive, send):
+                if scope.get("method") not in {"GET", "HEAD"}:
+                    response = PlainTextResponse("Not Found", status_code=404)
+                    await response(scope, receive, send)
+                    return
+                await super().__call__(scope, receive, send)
+
+        app.mount(
+            "/",
+            _FrontendStatic(directory=str(frontend_dist), html=True),
+            name="frontend",
+        )
     return app
 
 

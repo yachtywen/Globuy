@@ -6,7 +6,6 @@ import hashlib
 import json
 from datetime import timedelta
 from decimal import Decimal
-from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -17,7 +16,6 @@ from app.database.models import (
     CatalogScopeOffer,
     Offer,
     OfferObservation,
-    OutboxEvent,
     Product,
     ProductGroup,
     ProductGroupMember,
@@ -344,19 +342,6 @@ class CatalogRepository:
                     ):
                         member.source_rank = incoming_rank
                         member.source_request_key = fingerprint.request_key
-                session.add(
-                    OutboxEvent(
-                        event_id=uuid4().hex,
-                        aggregate_type="product",
-                        aggregate_id=oid,
-                        event_type="offer.upserted",
-                        aggregate_version=1,
-                        payload_json={"product_id": pid, "offer_id": oid, "item_id": item_id},
-                        created_at=now,
-                        attempts=0,
-                        available_at=now,
-                    )
-                )
                 offer_ids.append(oid)
             unique_offer_ids = list(dict.fromkeys(offer_ids))
             scope_row.status = "sufficient" if unique_offer_ids else "thin"
@@ -371,7 +356,7 @@ class CatalogRepository:
         filters: SearchFilters | None = None,
         limit: int = 15,
     ) -> list[Candidate]:
-        """Read fresh normalized offers without waiting for an OpenSearch projection."""
+        """Read fresh normalized offers for the request-local FAISS chain."""
 
         active_filters = filters or SearchFilters()
         now = utc_naive()

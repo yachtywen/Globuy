@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.agent.llm import model_request_kwargs
 from app.agent.prompts import get_shopping_summary_prompt
@@ -21,42 +21,6 @@ from app.presentation import sanitize_shopping_markdown, visible_unresolved
 from app.search.catalog_images import enrich_product_images
 from app.tools.item_picker import PickedItem
 from app.utils.thread_ctx import current_fork_depth, current_thread_id
-
-
-class PreferenceCandidate(BaseModel):
-    """A current-run preference awaiting a future BaseStore adapter."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    key: str = Field(min_length=1, max_length=120)
-    category: Literal["blacklist", "preference", "history"]
-    content: str = Field(min_length=1, max_length=500)
-    source_session: str | None = None
-    confidence: float = Field(default=1.0, ge=0, le=1)
-    persistence_scope: Literal["long_term", "session_only"] = "long_term"
-    subject: str | None = Field(default=None, max_length=128)
-    predicate: str | None = Field(default=None, max_length=64)
-    value_json: Any | None = None
-    polarity: Literal["positive", "negative"] | None = None
-    scope_type: Literal["global", "category", "brand", "product"] | None = None
-    scope_value: str | None = Field(default=None, max_length=128)
-    evidence_type: Literal["explicit", "inferred"] = "explicit"
-    extraction_version: Literal["memory-fact-v2"] = "memory-fact-v2"
-
-    @model_validator(mode="after")
-    def require_durable_fact(self) -> PreferenceCandidate:
-        if self.persistence_scope == "session_only":
-            return self
-        required = (
-            self.subject,
-            self.predicate,
-            self.value_json,
-            self.polarity,
-            self.scope_type,
-        )
-        if any(value is None for value in required):
-            raise ValueError("long_term candidates require a complete structured fact")
-        return self
 
 
 class SummaryNarrative(BaseModel):
@@ -74,7 +38,6 @@ class ShoppingSummaryOutput(BaseModel):
     final_text: str = ""
     picks: list[PickedItem] = Field(default_factory=list, max_length=3)
     unresolved: list[str] = Field(default_factory=list)
-    learned_preferences: list[PreferenceCandidate] = Field(default_factory=list)
     ranking_method: Literal["llm", "deterministic_exact", "deterministic_fallback"] | None = None
     ranking_status: Literal["ok", "degraded", "insufficient_data"] | None = None
     ranking_version: str | None = None
@@ -125,7 +88,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
         picks: list[PickedItem],
         config: RunnableConfig,
         unresolved: list[str] | None = None,
-        learned_preferences: list[PreferenceCandidate] | None = None,
         ranking_method: Literal[
             "llm", "deterministic_exact", "deterministic_fallback"
         ] | None = None,
@@ -145,17 +107,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
             item if isinstance(item, PickedItem) else PickedItem.model_validate(item)
             for item in enrich_product_images(raw_picks, catalog_path)
         ]
-        pending = [
-            item
-            if isinstance(item, PreferenceCandidate)
-            else PreferenceCandidate.model_validate(item)
-            for item in (learned_preferences or [])
-        ]
-        session = current_thread_id()
-        pending = [
-            item.model_copy(update={"source_session": item.source_session or session})
-            for item in pending
-        ]
         visible_pending = visible_unresolved(unresolved)
         ranking_metadata = {
             "ranking_method": ranking_method,
@@ -169,7 +120,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 status="incomplete",
                 picks=[],
                 unresolved=visible_pending,
-                learned_preferences=pending,
                 **ranking_metadata,
                 message="至少需要一项有效的 ItemPicker 结果才能生成终结清单。",
             ).model_dump(mode="json")
@@ -178,7 +128,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 status="incomplete",
                 picks=validated_picks,
                 unresolved=visible_pending,
-                learned_preferences=pending,
                 **ranking_metadata,
                 message="精选商品缺少来源链接，不能生成可核验的终结清单。",
             ).model_dump(mode="json")
@@ -187,7 +136,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 status="not_configured",
                 picks=validated_picks,
                 unresolved=visible_pending,
-                learned_preferences=pending,
                 **ranking_metadata,
                 message="ShoppingSummary 的共享模型未配置。",
             ).model_dump(mode="json")
@@ -237,7 +185,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 status="error",
                 picks=validated_picks,
                 unresolved=visible_pending,
-                learned_preferences=pending,
                 **ranking_metadata,
                 message="ShoppingSummary 模型调用超时。",
             ).model_dump(mode="json")
@@ -246,7 +193,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 status="error",
                 picks=validated_picks,
                 unresolved=visible_pending,
-                learned_preferences=pending,
                 **ranking_metadata,
                 message=f"ShoppingSummary 结构化输出无效：{exc}",
             ).model_dump(mode="json")
@@ -257,7 +203,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
                 status="error",
                 picks=validated_picks,
                 unresolved=visible_pending,
-                learned_preferences=pending,
                 **ranking_metadata,
                 message=f"ShoppingSummary 模型调用失败：{exc}",
             ).model_dump(mode="json")
@@ -270,7 +215,6 @@ def build_shopping_summary_tool(model: BaseChatModel | None) -> BaseTool:
             final_text=final_text,
             picks=validated_picks,
             unresolved=visible_pending,
-            learned_preferences=pending,
             **ranking_metadata,
             terminal=True,
         ).model_dump(mode="json")
@@ -283,7 +227,6 @@ shopping_summary = build_shopping_summary_tool(None)
 
 
 __all__ = [
-    "PreferenceCandidate",
     "ShoppingSummaryOutput",
     "SummaryNarrative",
     "build_shopping_summary_tool",

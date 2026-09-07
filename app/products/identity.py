@@ -1,4 +1,4 @@
-"""Stable identifiers shared by MySQL and OpenSearch projections."""
+"""Stable identifiers shared by PostgreSQL product and offer records."""
 
 from __future__ import annotations
 

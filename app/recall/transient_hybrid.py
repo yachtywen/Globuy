@@ -37,7 +37,7 @@ _VOLATILE_ATTRIBUTE_PARTS = (
 
 
 @dataclass(frozen=True)
-class HybridSelection:
+class FaissSelection:
     groups: list[CandidateGroup]
     method: str
     embedding_model: str | None = None
@@ -206,18 +206,18 @@ def _balanced(groups: list[CandidateGroup], limit: int) -> list[CandidateGroup]:
 
 def select_bm25_groups(
     groups: list[CandidateGroup], lexical_query: str, limit: int
-) -> HybridSelection:
+) -> FaissSelection:
     started = time.perf_counter()
     ordered = bm25_order(groups, lexical_query)
     duration = int((time.perf_counter() - started) * 1000)
-    return HybridSelection(
+    return FaissSelection(
         groups=_balanced(ordered, limit),
         method="bm25_fallback",
         bm25_duration_ms=duration,
     )
 
 
-def select_hybrid_groups(
+def select_faiss_groups(
     groups: list[CandidateGroup],
     *,
     lexical_query: str,
@@ -225,7 +225,7 @@ def select_hybrid_groups(
     encoder: CandidateEmbeddingEncoder,
     limit: int,
     rank_constant: int = 60,
-) -> HybridSelection:
+) -> FaissSelection:
     bm25_started = time.perf_counter()
     lexical = bm25_order(groups, lexical_query)
     bm25_duration = int((time.perf_counter() - bm25_started) * 1000)
@@ -262,9 +262,9 @@ def select_hybrid_groups(
             group.input_order,
         ),
     )
-    return HybridSelection(
+    return FaissSelection(
         groups=_balanced(ordered, limit),
-        method="hybrid_rrf",
+        method="faiss_rrf",
         embedding_model=metadata.model_id,
         embedding_revision=metadata.revision,
         embedding_cache_hits=batch.cache_hits,
@@ -275,5 +275,5 @@ def select_hybrid_groups(
     )
 
 
-def selection_summary(selection: HybridSelection) -> dict[str, Any]:
+def selection_summary(selection: FaissSelection) -> dict[str, Any]:
     return json.loads(json.dumps(selection.__dict__, default=str, ensure_ascii=False))

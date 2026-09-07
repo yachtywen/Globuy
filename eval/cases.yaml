@@ -355,24 +355,6 @@ cases:
       p2:
         - {id: live_reset_explain, description: 回答自然地体现品类与约束已切换, judge: llm}
 
-  - id: live-memory-recall
-    description: 独立预置的长期偏好在新会话中生效
-    suite: live
-    requirements: {model: true, item_index: true}
-    setup_memories:
-      - {category: preference, key: no_in_ear, content: 不要入耳式耳机，只考虑头戴式, confidence: 1.0}
-    prior_context: 评测前已通过正式记忆 API 写入“不要入耳式耳机，只考虑头戴式”。
-    turns:
-      - query: 给我推荐一款通勤用耳机。
-    rubric:
-      p0:
-        - {id: live_memory_terminal, description: 任务成功结束, judge: deterministic, assertion: {type: terminal_status, value: [complete, incomplete]}}
-        - {id: live_memory_facts, description: 若有推荐则商品事实一致, judge: deterministic, assertion: {type: facts_match_catalog}}
-      p1:
-        - {id: live_memory_apply, description: 主动应用了只考虑头戴式的已知偏好, judge: llm}
-      p2:
-        - {id: live_memory_explain, description: 向用户说明推荐与其偏好的关系, judge: llm}
-
   - id: live-not-configured-honesty
     description: 外部实时事实能力未配置时诚实降级
     suite: live

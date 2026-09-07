@@ -236,7 +236,7 @@ async def test_hard_filter_requires_url_and_reliable_required_attribute() -> Non
 
 
 @pytest.mark.asyncio
-async def test_36_groups_skip_candidate_embedding() -> None:
+async def test_36_groups_use_faiss_candidate_embedding() -> None:
     model = FakeRerankModel()
     encoder = FakeCandidateEncoder()
     tool = build_item_picker_tool(model, candidate_encoder=encoder)  # type: ignore[arg-type]
@@ -259,14 +259,14 @@ async def test_36_groups_skip_candidate_embedding() -> None:
             },
         }
     )
-    assert encoder.calls == 0
+    assert encoder.calls == 1
     assert model.calls == 1
-    assert result["candidate_selection_method"] == "not_needed"
+    assert result["candidate_selection_method"] == "faiss_rrf"
     assert result["candidate_groups_after_selection"] == 36
 
 
 @pytest.mark.asyncio
-async def test_37_groups_use_one_batch_hybrid_then_one_llm_call() -> None:
+async def test_37_groups_use_one_batch_faiss_then_one_llm_call() -> None:
     model = FakeRerankModel()
     encoder = FakeCandidateEncoder()
     tool = build_item_picker_tool(model, candidate_encoder=encoder)  # type: ignore[arg-type]
@@ -295,7 +295,7 @@ async def test_37_groups_use_one_batch_hybrid_then_one_llm_call() -> None:
     )
     assert encoder.calls == 1
     assert model.calls == 1
-    assert result["candidate_selection_method"] == "hybrid_rrf"
+    assert result["candidate_selection_method"] == "faiss_rrf"
     assert result["candidate_groups_before_selection"] == 37
     assert result["candidate_groups_after_selection"] == 36
 

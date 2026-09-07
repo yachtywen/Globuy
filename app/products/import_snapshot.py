@@ -1,4 +1,4 @@
-"""Idempotently import the verified JSONL snapshot into MySQL."""
+"""Idempotently import the verified JSONL snapshot into PostgreSQL."""
 
 from __future__ import annotations
 
@@ -10,15 +10,11 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
-
-from sqlalchemy import select
 
 from app.config import get_settings
 from app.database.models import (
     Offer,
     OfferObservation,
-    OutboxEvent,
     Product,
     SourceSnapshot,
 )
@@ -159,30 +155,6 @@ async def import_snapshot(path: Path, database: Database) -> dict[str, Any]:
                 session.add(observation)
                 inserted_observations += 1
             offer.last_observation_id = observation_id
-            event_exists = await session.scalar(
-                select(OutboxEvent.event_id).where(
-                    OutboxEvent.aggregate_type == "product",
-                    OutboxEvent.aggregate_id == pid,
-                    OutboxEvent.aggregate_version == 1,
-                )
-            )
-            if event_exists is None:
-                session.add(
-                    OutboxEvent(
-                        event_id=uuid4().hex,
-                        aggregate_type="product",
-                        aggregate_id=pid,
-                        event_type="product.upserted",
-                        aggregate_version=1,
-                        payload_json={
-                            "product_id": pid,
-                            "offer_id": oid,
-                            "item_id": item_id,
-                        },
-                        created_at=now,
-                        attempts=0,
-                    )
-                )
     return {
         "snapshot_id": snapshot_id,
         "rows": len(rows),

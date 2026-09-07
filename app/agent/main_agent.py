@@ -85,13 +85,13 @@ class AgentState(TypedDict, total=False):
     last_observation_digest: str | None
     terminal_result: dict[str, Any] | None
     original_query: str
-    learned_preferences: list[dict[str, Any]]
     loop_detected: bool
     memory_context: str | None
     memory_status: str
     memory_metrics: dict[str, int | str] | None
     shopping_intent: dict[str, Any] | None
     catalog_summary: dict[str, Any] | None
+    auto_search: dict[str, Any] | None
     compression_metrics: dict[str, Any] | None
 
 
@@ -252,7 +252,6 @@ def _forced_termination_response(state: AgentState) -> AIMessage:
                         "args": {
                             "goal": state.get("original_query") or "商品推荐",
                             "picks": picks[:3],
-                            "learned_preferences": state.get("learned_preferences", []),
                             "ranking_method": latest_picker.get("ranking_method"),
                             "ranking_status": latest_picker.get("status"),
                             "ranking_version": latest_picker.get("ranking_version"),
@@ -426,7 +425,7 @@ class AgentLoop:
             )
             prompt = self.system_prompt
             if state.get("memory_context"):
-                prompt += "\n\n用户已确认的长期记忆：\n" + str(state["memory_context"])
+                prompt += "\n\n用户长期记忆：\n" + str(state["memory_context"])
             model_messages = [SystemMessage(content=prompt), phase_prompt, *state["messages"]]
             response = await think_model.ainvoke(
                 model_messages,
@@ -452,6 +451,43 @@ class AgentLoop:
             must_terminate = bool(state.get("loop_detected")) or _decision_budget_exhausted(
                 iteration
             )
+            # Deterministic auto-search: once Planner produced an executable intent and
+            # no real search has run yet, issue one item_search per platform directly
+            # instead of relying on the model to remember dispatch_tool.
+            auto_intent = state.get("auto_search")
+            if auto_intent and not must_terminate and current_fork_depth() == 0:
+                platforms = list(dict.fromkeys(auto_intent.get("platforms") or []))
+                query = str(
+                    auto_intent.get("primary_query")
+                    or auto_intent.get("lexical_query")
+                    or auto_intent.get("semantic_query")
+                    or ""
+                ).strip()
+                if platforms and query:
+                    calls = [
+                        {
+                            "name": "item_search",
+                            "args": {
+                                "query": query,
+                                "platform": platform,
+                                "top_k": 20,
+                                "filters": dict(auto_intent.get("filters") or {}),
+                                "intent": auto_intent,
+                            },
+                            "id": f"auto-search-{platform}-{uuid4().hex[:10]}",
+                            "type": "tool_call",
+                        }
+                        for platform in platforms
+                    ]
+                    response = AIMessage(content="", tool_calls=calls)
+                    await _report_phase("reflect", started=False, iteration=iteration)
+                    return {
+                        "messages": [response],
+                        "phase": "act",
+                        "decision_phase": "think",
+                        "auto_search": None,
+                        "iteration": iteration,
+                    }
             if must_terminate:
                 guard = (
                     "循环防护已触发：不要重复此前相同工具和参数。"
@@ -467,7 +503,7 @@ class AgentLoop:
             )
             prompt = self.system_prompt
             if state.get("memory_context"):
-                prompt += "\n\n用户已确认的长期记忆：\n" + str(state["memory_context"])
+                prompt += "\n\n用户长期记忆：\n" + str(state["memory_context"])
             force_root_termination = must_terminate and current_fork_depth() == 0
             fallback_message = _deterministic_summary_fallback(state)
             response = (
@@ -531,7 +567,6 @@ class AgentLoop:
             recent = history[-get_settings().loop_detection_window :]
             detected = loop_detected(recent)
             terminal_result: dict[str, Any] | None = None
-            terminal_name: str | None = None
             shopping_intent = state.get("shopping_intent")
             catalog_summary = state.get("catalog_summary")
             for message in reversed(state["messages"]):
@@ -561,7 +596,7 @@ class AgentLoop:
                     and payload
                     and payload.get("status") == "needs_clarification"
                 ):
-                    terminal_result, terminal_name = payload, message.name
+                    terminal_result = payload
                     break
                 if payload and (
                     payload.get("terminal") is True
@@ -569,7 +604,6 @@ class AgentLoop:
                 ):
                     terminal_result = dict(payload)
                     terminal_result["terminal"] = True
-                    terminal_name = message.name
                     break
             if state.get("shopping_intent") is None and shopping_intent:
                 monitor = current_monitor()
@@ -590,19 +624,34 @@ class AgentLoop:
                     )
             phase: Phase = "done" if terminal_result is not None else "reflect"
             await _report_phase("observe", started=False, iteration=iteration)
+            auto_search: dict[str, Any] | None = None
+            if (
+                current_fork_depth() == 0
+                and phase == "reflect"
+                and isinstance(shopping_intent, dict)
+                and shopping_intent.get("intent_mode")
+                in {"category_explore", "exact_product"}
+                and not shopping_intent.get("needs_clarification")
+                and not any(
+                    getattr(message, "name", None)
+                    in {"item_search", "dispatch_tool"}
+                    for message in (state.get("messages") or [])
+                )
+            ):
+                try:
+                    if get_settings().product_provider != "none":
+                        auto_search = shopping_intent
+                except Exception:
+                    auto_search = None
             return {
                 "phase": phase,
                 "tool_history": recent,
                 "last_observation_digest": recent[-1]["result_digest"] if recent else None,
                 "terminal_result": terminal_result,
-                "learned_preferences": (
-                    terminal_result.get("learned_preferences", [])
-                    if terminal_name == "shopping_summary" and terminal_result
-                    else state.get("learned_preferences", [])
-                ),
                 "loop_detected": detected,
                 "shopping_intent": shopping_intent,
                 "catalog_summary": catalog_summary,
+                "auto_search": auto_search,
             }
 
         async def compress(state: AgentState) -> dict[str, Any]:
@@ -672,7 +721,6 @@ class AgentLoop:
             "last_observation_digest": None,
             "terminal_result": None,
             "original_query": content,
-            "learned_preferences": [],
             "loop_detected": False,
             "memory_context": None,
             "memory_status": "not_configured" if self.store is None else "ready",
@@ -694,34 +742,26 @@ class AgentLoop:
                 query=content,
                 limit=settings.memory_recall_limit,
             )
-            hard_lines: list[str] = []
-            ordinary_lines: list[str] = []
-            ordinary_tokens = 0
+            lines: list[str] = []
+            injected_tokens = 0
             budget = settings.memory_prompt_token_limit
             for memory in memories:
-                category = str(memory.value.get("category") or "preference")
-                content_value = str(memory.value.get("content") or "").strip()
+                content_value = str(memory.value.get("memory") or "").strip()
                 if content_value:
-                    line = f"- [{category}] {memory.key}: {content_value}"
-                    if category == "blacklist":
-                        hard_lines.append(line)
-                        continue
-                    if len(ordinary_lines) >= settings.memory_recall_limit:
+                    line = f"- {content_value}"
+                    if len(lines) >= settings.memory_recall_limit:
                         continue
                     estimated = max(1, len(line) // 4)
-                    if ordinary_tokens + estimated <= budget:
-                        ordinary_lines.append(line)
-                        ordinary_tokens += estimated
-            state["memory_context"] = "\n".join([*hard_lines, *ordinary_lines]) or None
+                    if injected_tokens + estimated <= budget:
+                        lines.append(line)
+                        injected_tokens += estimated
+            state["memory_context"] = "\n".join(lines) or None
             state["memory_status"] = "ready"
             state["memory_metrics"] = {
                 "recalled_count": len(memories),
-                "hard_rule_count": len(hard_lines),
-                "injected_ordinary_count": len(ordinary_lines),
-                "dropped_ordinary_count": max(
-                    0, len(memories) - len(hard_lines) - len(ordinary_lines)
-                ),
-                "injected_estimated_tokens": ordinary_tokens,
+                "injected_count": len(lines),
+                "dropped_count": max(0, len(memories) - len(lines)),
+                "injected_estimated_tokens": injected_tokens,
             }
         except Exception:
             state["memory_status"] = "partial"
@@ -811,10 +851,7 @@ class AgentLoop:
     def _compact_tool_results(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for message in messages:
-            if not isinstance(message, ToolMessage) or message.name not in {
-                "item_search",
-                "category_insight",
-            }:
+            if not isinstance(message, ToolMessage) or message.name != "item_search":
                 continue
             payload = _tool_payload(message)
             if payload is not None:
@@ -921,7 +958,6 @@ class AgentLoop:
             "iteration": state.get("iteration", 0),
             "memory_status": state.get("memory_status", "not_configured"),
             "memory_metrics": state.get("memory_metrics"),
-            "learned_preferences": state.get("learned_preferences", []),
         }
         return answer, metadata
 

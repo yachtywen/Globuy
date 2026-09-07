@@ -1,13 +1,10 @@
-"""LangGraph BaseStore backed by PostgreSQL truth and pgvector recall."""
+"""LangGraph BaseStore backed by plain-text PostgreSQL/pgvector memory."""
 
 from __future__ import annotations
 
 import asyncio
-import math
 from collections.abc import Iterable
 from contextvars import ContextVar
-from datetime import UTC, datetime
-from decimal import Decimal
 
 from langgraph.store.base import (
     BaseStore,
@@ -22,40 +19,24 @@ from langgraph.store.base import (
 )
 from sqlalchemy import and_, func, not_, select
 
+from app.auth.service import utc_naive
 from app.config import Settings
 from app.database.models import MemoryEmbedding, MemoryEntry, User
-from app.database.services import MemoryService
 from app.database.session import Database
 from app.memory.keywords import extract_keywords
+from app.memory.service import MemoryService
 from app.search.encoder import EmbeddingEncoder
 
 _RRF_K = 60
-_MEMORY_TEXT_VERSION = "memory-content-v1"
+_MEMORY_TEXT_VERSION = "memory-text-v2"
 _recall_metrics: ContextVar[dict[str, int | str] | None] = ContextVar(
     "globuy_memory_recall_metrics", default=None
 )
-_SCOPE_ALIASES = {
-    "headphones": ("耳机", "headphone", "headphones"),
-    "jeans": ("牛仔裤", "jeans"),
-    "keyboard": ("键盘", "keyboard"),
-}
 
 
-def _scope_rank(entry: MemoryEntry, query: str) -> int:
-    if not entry.scope_type or entry.scope_type == "global" or not entry.scope_value:
-        return 1
-    normalized = query.casefold()
-    values = _SCOPE_ALIASES.get(entry.scope_value.casefold(), (entry.scope_value.casefold(),))
-    return 2 if any(value in normalized for value in values) else 0
-
-
-def _injection_rank(entry: MemoryEntry, query: str) -> int:
-    scope = _scope_rank(entry, query)
-    if scope == 0:
-        return 0
-    if entry.category == "history":
-        return 1
-    return 3 if scope == 2 else 2
+def memory_decay_factor(age_days: float, *, window_days: int = 180, floor: float = 0.6) -> float:
+    age = min(max(0.0, age_days), float(window_days))
+    return 1 - (1 - floor) * age / window_days
 
 
 def current_memory_recall_metrics() -> dict[str, int | str]:
@@ -88,7 +69,7 @@ class PostgresMemoryStore(BaseStore):
             asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.abatch(ops))
-        raise RuntimeError("Use abatch/aget/asearch/aput from asynchronous Agent code")
+        raise RuntimeError("Use asynchronous BaseStore methods from Agent code")
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
         results: list[Result] = []
@@ -106,14 +87,12 @@ class PostgresMemoryStore(BaseStore):
                 raise NotImplementedError(type(op).__name__)
         return results
 
-    async def _entry_by_key(self, user_id: str, key: str) -> MemoryEntry | None:
+    async def _entry(self, user_id: str, memory_id: str) -> MemoryEntry | None:
         async with self.database.sessions() as session:
             return await session.scalar(
                 select(MemoryEntry).where(
                     MemoryEntry.user_id == user_id,
-                    MemoryEntry.key == key,
-                    MemoryEntry.status == "active",
-                    MemoryEntry.lifecycle_status == "active",
+                    MemoryEntry.memory_id == memory_id,
                 )
             )
 
@@ -121,73 +100,28 @@ class PostgresMemoryStore(BaseStore):
     def _item(entry: MemoryEntry) -> Item:
         return Item(
             namespace=("users", entry.user_id, "memories"),
-            key=entry.key,
-            value={
-                "memory_id": entry.memory_id,
-                "category": entry.category,
-                "content": entry.content,
-                "confidence": float(entry.confidence),
-                "source": entry.source,
-                "keywords": list(entry.keywords or []),
-                "lifecycle_status": entry.lifecycle_status,
-                "subject": entry.subject,
-                "predicate": entry.predicate,
-                "value_json": entry.value_json,
-                "polarity": entry.polarity,
-                "scope_type": entry.scope_type,
-                "scope_value": entry.scope_value,
-                "fact_slot": entry.fact_slot,
-            },
-            created_at=entry.created_at.replace(tzinfo=UTC),
-            updated_at=entry.updated_at.replace(tzinfo=UTC),
+            key=entry.memory_id,
+            value={"memory_id": entry.memory_id, "memory": entry.memory, "source": entry.source},
+            created_at=entry.created_at,
+            updated_at=entry.updated_at,
         )
 
     async def _get(self, op: GetOp) -> Item | None:
-        entry = await self._entry_by_key(self._user(op.namespace), op.key)
+        entry = await self._entry(self._user(op.namespace), op.key)
         return self._item(entry) if entry else None
 
     async def _put(self, op: PutOp) -> None:
         user_id = self._user(op.namespace)
-        entry = await self._entry_by_key(user_id, op.key)
+        entry = await self._entry(user_id, op.key)
         if op.value is None:
             if entry:
                 await self.service.delete(user_id, entry.memory_id)
             return
-        if not bool(op.value.get("confirmed_by_user")):
-            raise PermissionError("long-term memory writes require explicit user confirmation")
-        category = str(op.value.get("category") or "preference")
-        content = str(op.value.get("content") or op.value.get("memory") or "").strip()
-        confidence = Decimal(str(op.value.get("confidence", 1)))
+        memory = str(op.value.get("memory") or op.value.get("content") or "").strip()
         if entry is None:
-            await self.service.create(
-                user_id,
-                category=category,
-                key=op.key,
-                content=content,
-                confidence=confidence,
-                source_thread_id=op.value.get("source_thread_id"),
-                source_run_id=op.value.get("source_run_id"),
-            )
+            await self.service.create(user_id, memory=memory, source="agent")
         else:
-            await self.service.update(
-                user_id,
-                entry.memory_id,
-                category=category,
-                content=content,
-                confidence=confidence,
-            )
-
-    def _decay(self, entry: MemoryEntry, now: datetime) -> float:
-        if entry.category == "blacklist":
-            return 1.0
-        half_life = (
-            self.settings.memory_preference_half_life_days
-            if entry.category == "preference"
-            else self.settings.memory_history_half_life_days
-        )
-        anchor = entry.last_reinforced_at or entry.updated_at
-        age_days = max(0.0, (now - anchor).total_seconds() / 86400)
-        return math.pow(2.0, -age_days / half_life)
+            await self.service.update(user_id, entry.memory_id, memory=memory)
 
     async def _vector_lane(
         self, user_id: str, vector: list[float], limit: int
@@ -209,207 +143,179 @@ class PostgresMemoryStore(BaseStore):
                         .join(MemoryEmbedding, MemoryEmbedding.memory_id == MemoryEntry.memory_id)
                         .where(
                             MemoryEntry.user_id == user_id,
-                            MemoryEntry.status == "active",
-                            MemoryEntry.lifecycle_status == "active",
-                            MemoryEntry.category != "blacklist",
                             compatible,
                         )
                         .order_by(distance)
                         .limit(limit)
                     )
                 ).all()
-                mismatch_count = int(
+                mismatches = int(
                     await session.scalar(
                         select(func.count())
                         .select_from(MemoryEmbedding)
                         .join(MemoryEntry, MemoryEntry.memory_id == MemoryEmbedding.memory_id)
                         .where(
                             MemoryEntry.user_id == user_id,
-                            MemoryEntry.status == "active",
-                            MemoryEntry.lifecycle_status == "active",
                             not_(compatible),
                         )
                     )
                     or 0
                 )
-                return (
-                    [(entry, max(0.0, float(score))) for entry, score in rows],
-                    mismatch_count,
-                )
-
+                return [(entry, max(0.0, float(score))) for entry, score in rows], mismatches
             rows = (
                 await session.execute(
                     select(MemoryEntry, MemoryEmbedding)
                     .join(MemoryEmbedding, MemoryEmbedding.memory_id == MemoryEntry.memory_id)
-                    .where(
-                        MemoryEntry.user_id == user_id,
-                        MemoryEntry.status == "active",
-                        MemoryEntry.lifecycle_status == "active",
-                        MemoryEntry.category != "blacklist",
-                    )
+                    .where(MemoryEntry.user_id == user_id)
                 )
             ).all()
         scored: list[tuple[MemoryEntry, float]] = []
-        mismatch_count = 0
-        for entry, embedding in rows:
-            if (
-                embedding.embedding_model != metadata.model_id
-                or embedding.embedding_revision != metadata.revision
-                or embedding.dimensions != metadata.dimensions
-                or not embedding.normalized
-                or embedding.semantic_text_version != _MEMORY_TEXT_VERSION
-            ):
-                mismatch_count += 1
+        mismatches = 0
+        for entry, projection in rows:
+            compatible = (
+                projection.embedding_model == metadata.model_id
+                and projection.embedding_revision == metadata.revision
+                and projection.dimensions == metadata.dimensions
+                and projection.normalized
+                and projection.semantic_text_version == _MEMORY_TEXT_VERSION
+            )
+            if not compatible:
+                mismatches += 1
                 continue
-            dot = sum(a * b for a, b in zip(vector, embedding.embedding, strict=False))
-            scored.append((entry, max(0.0, dot)))
-        return sorted(scored, key=lambda pair: pair[1], reverse=True)[:limit], mismatch_count
+            score = sum(a * b for a, b in zip(vector, projection.embedding, strict=False))
+            scored.append((entry, max(0.0, score)))
+        return sorted(scored, key=lambda pair: pair[1], reverse=True)[:limit], mismatches
 
     async def _keyword_lane(
-        self,
-        user_id: str,
-        query_keywords: set[str],
-        active: list[MemoryEntry],
-        limit: int,
+        self, user_id: str, query_keywords: set[str], limit: int
     ) -> list[tuple[MemoryEntry, float]]:
         if not query_keywords:
             return []
         async with self.database.sessions() as session:
+            statement = select(MemoryEntry).where(
+                MemoryEntry.user_id == user_id
+            )
             if session.bind is not None and session.bind.dialect.name == "postgresql":
-                candidates = list(
-                    (
-                        await session.scalars(
-                            select(MemoryEntry)
-                            .where(
-                                MemoryEntry.user_id == user_id,
-                                MemoryEntry.status == "active",
-                                MemoryEntry.lifecycle_status == "active",
-                                MemoryEntry.category != "blacklist",
-                                MemoryEntry.keywords.op("&&")(sorted(query_keywords)),
-                            )
-                            .limit(limit * 5)
-                        )
-                    ).all()
-                )
-            else:
-                candidates = [entry for entry in active if entry.category != "blacklist"]
+                statement = statement.where(
+                    MemoryEntry.keywords.op("&&")(sorted(query_keywords))
+                ).limit(limit * 5)
+            candidates = list((await session.scalars(statement)).all())
         scored = [
             (entry, float(len(query_keywords.intersection(entry.keywords or []))))
             for entry in candidates
             if query_keywords.intersection(entry.keywords or [])
         ]
-        return sorted(
-            scored,
-            key=lambda pair: (pair[1], pair[0].updated_at),
-            reverse=True,
-        )[:limit]
+        return sorted(scored, key=lambda pair: (pair[1], pair[0].updated_at), reverse=True)[:limit]
 
-    async def _search(self, op: SearchOp) -> list[SearchItem]:
-        user_id = self._user(op.namespace_prefix)
-        limit = op.limit + op.offset
-        now = datetime.now(UTC).replace(tzinfo=None)
-        async with self.database.sessions() as session:
-            active = list(
-                (
-                    await session.scalars(
-                        select(MemoryEntry).where(
-                            MemoryEntry.user_id == user_id,
-                            MemoryEntry.status == "active",
-                            MemoryEntry.lifecycle_status == "active",
+    async def _search_ranked(
+        self,
+        user_id: str,
+        *,
+        query: str | None,
+        limit: int,
+        offset: int,
+        apply_decay: bool,
+    ) -> list[SearchItem]:
+        if not query:
+            async with self.database.sessions() as session:
+                entries = list(
+                    (
+                        await session.scalars(
+                            select(MemoryEntry)
+                            .where(MemoryEntry.user_id == user_id)
+                            .order_by(MemoryEntry.updated_at.desc())
+                            .offset(offset)
+                            .limit(limit)
                         )
-                    )
-                ).all()
-            )
-        hard_rules = [entry for entry in active if entry.category == "blacklist"]
-        if not op.query:
-            ordered = sorted(
-                active,
-                key=lambda item: (item.category != "blacklist", -item.updated_at.timestamp()),
-            )[op.offset : op.offset + op.limit]
-            _recall_metrics.set(
-                {
-                    "vector_hits": 0,
-                    "keyword_hits": 0,
-                    "fused_count": 0,
-                    "final_count": len(ordered),
-                    "hard_rule_count": sum(item.category == "blacklist" for item in ordered),
-                    "vector_metadata_mismatches": 0,
-                }
-            )
-            return [self._search_item(item, None) for item in ordered]
+                    ).all()
+                )
+            return [self._search_item(entry, None) for entry in entries]
 
-        pool = max(self.settings.memory_recall_candidate_pool, limit * 5)
-        vector = self.encoder.encode_query(op.query)
-        vector_lane, metadata_mismatches = await self._vector_lane(user_id, vector, pool)
-        query_keywords = set(extract_keywords(op.query))
-        keyword_lane = await self._keyword_lane(user_id, query_keywords, active, pool)
-
+        requested = limit + offset
+        pool = max(self.settings.memory_recall_candidate_pool, requested * 5)
+        vector_lane, mismatches = await self._vector_lane(
+            user_id, self.encoder.encode_query(query), pool
+        )
+        keyword_lane = await self._keyword_lane(
+            user_id, set(extract_keywords(query)), pool
+        )
         fused: dict[str, tuple[MemoryEntry, float]] = {}
         for lane in (vector_lane, keyword_lane):
-            for rank, (entry, _lane_score) in enumerate(lane, start=1):
+            for rank, (entry, _score) in enumerate(lane, start=1):
                 previous = fused.get(entry.memory_id, (entry, 0.0))[1]
                 fused[entry.memory_id] = (entry, previous + 1 / (_RRF_K + rank))
-        ranked_v2 = bool(self.settings.memory_retrieval_v2_enabled)
-        ranked = sorted(
-            (
+        scored = list(fused.values())
+        if apply_decay:
+            now = utc_naive()
+            window = self.settings.memory_decay_window_days
+            floor = self.settings.memory_decay_floor
+            scored = [
                 (
                     entry,
-                    score * float(entry.confidence) * self._decay(entry, now),
-                    _injection_rank(entry, op.query),
+                    score * memory_decay_factor(
+                        (now - entry.last_confirmed_at).total_seconds() / 86400,
+                        window_days=window,
+                        floor=floor,
+                    ),
                 )
-                for entry, score in fused.values()
-                if not ranked_v2 or _injection_rank(entry, op.query) > 0
-            ),
-            key=(
-                lambda pair: (
-                    (pair[2], pair[1], pair[0].updated_at)
-                    if ranked_v2
-                    else (pair[1], pair[0].updated_at)
-                )
+                for entry, score in scored
+            ]
+        ranked = sorted(
+            scored,
+            key=lambda pair: (
+                pair[1],
+                pair[0].last_confirmed_at,
+                pair[0].updated_at,
+                pair[0].memory_id,
             ),
             reverse=True,
-        )
-        hard = [
-            (entry, None) for entry in sorted(hard_rules, key=lambda x: x.updated_at, reverse=True)
-        ]
-        normal = [(entry, score) for entry, score, _scope in ranked]
-        # V2 keeps all hard rules outside the ordinary Top-K budget. The disabled
-        # path preserves the original key/content + RRF slicing semantics.
-        selected = (
-            hard + normal[op.offset : op.offset + op.limit]
-            if ranked_v2
-            else (hard + normal)[op.offset : op.offset + op.limit]
-        )
+        )[offset : offset + limit]
         _recall_metrics.set(
             {
                 "vector_hits": len(vector_lane),
                 "keyword_hits": len(keyword_lane),
                 "fused_count": len(fused),
-                "final_count": len(selected),
-                "hard_rule_count": len(hard),
-                "vector_metadata_mismatches": metadata_mismatches,
-                **({"degraded_reason": "vector_metadata_mismatch"} if metadata_mismatches else {}),
+                "final_count": len(ranked),
+                "vector_metadata_mismatches": mismatches,
+                **({"degraded_reason": "vector_metadata_mismatch"} if mismatches else {}),
             }
         )
-        return [self._search_item(entry, score) for entry, score in selected]
+        return [self._search_item(entry, score) for entry, score in ranked]
+
+    async def _search(self, op: SearchOp) -> list[SearchItem]:
+        return await self._search_ranked(
+            self._user(op.namespace_prefix),
+            query=op.query,
+            limit=op.limit,
+            offset=op.offset,
+            apply_decay=True,
+        )
+
+    async def asearch_for_consolidation(
+        self, user_id: str, *, query: str, limit: int = 5
+    ) -> list[SearchItem]:
+        return await self._search_ranked(
+            user_id,
+            query=query,
+            limit=limit,
+            offset=0,
+            apply_decay=False,
+        )
 
     def _search_item(self, entry: MemoryEntry, score: float | None) -> SearchItem:
         return SearchItem(
             namespace=("users", entry.user_id, "memories"),
-            key=entry.key,
+            key=entry.memory_id,
             value=self._item(entry).value,
-            created_at=entry.created_at.replace(tzinfo=UTC),
-            updated_at=entry.updated_at.replace(tzinfo=UTC),
+            created_at=entry.created_at,
+            updated_at=entry.updated_at,
             score=score,
         )
 
     async def _namespaces(self, op: ListNamespacesOp) -> list[tuple[str, ...]]:
         async with self.database.sessions() as session:
-            user_ids = list(
-                (await session.scalars(select(User.user_id).order_by(User.user_id))).all()
-            )
-        namespaces = [("users", user_id, "memories") for user_id in user_ids]
-        return namespaces[op.offset : op.offset + op.limit]
+            ids = list((await session.scalars(select(User.user_id).order_by(User.user_id))).all())
+        return [("users", user_id, "memories") for user_id in ids][op.offset : op.offset + op.limit]
 
 
 __all__ = ["PostgresMemoryStore", "current_memory_recall_metrics"]

@@ -1,4 +1,4 @@
-"""MySQL-backed application persistence."""
+"""PostgreSQL-backed application persistence."""
 
 from app.database.session import Database
 

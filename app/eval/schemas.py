@@ -72,13 +72,6 @@ class EvalTurn(StrictModel):
     query: str = Field(min_length=1, max_length=20_000)
 
 
-class MemorySetup(StrictModel):
-    category: Literal["blacklist", "preference", "history"]
-    key: str = Field(min_length=1, max_length=100)
-    content: str = Field(min_length=1, max_length=1000)
-    confidence: float = Field(default=1.0, ge=0, le=1)
-
-
 class EvalRequirements(StrictModel):
     model: bool = False
     item_index: bool = False
@@ -93,7 +86,6 @@ class EvaluationCase(StrictModel):
     requirements: EvalRequirements = Field(default_factory=EvalRequirements)
     timeout_seconds: float = Field(default=300, gt=0, le=1800)
     prior_context: str = Field(default="", max_length=8000)
-    setup_memories: list[MemorySetup] = Field(default_factory=list)
     turns: list[EvalTurn] = Field(min_length=1)
     rubric: EvalRubric
     fixture: dict[str, Any] | None = None

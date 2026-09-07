@@ -11,7 +11,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.products.grouping import group_candidates
-from app.recall.transient_hybrid import bm25_order, select_hybrid_groups
+from app.recall.transient_hybrid import bm25_order, select_faiss_groups
 from app.search.candidate_encoder import CandidateEmbeddingEncoder
 from app.search.schemas import Candidate
 
@@ -76,7 +76,7 @@ def main() -> int:
     for case in suite["cases"]:
         pool = _case_pool(case, by_id, candidates, args.pool_size)
         groups, grouping = group_candidates(pool)
-        selection = select_hybrid_groups(
+        selection = select_faiss_groups(
             groups,
             lexical_query=case["lexical_query"],
             semantic_query=case["semantic_query"],

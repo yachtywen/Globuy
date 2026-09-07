@@ -1,16 +1,19 @@
-"""No-training product retrieval backed by OpenSearch hybrid search."""
+"""Schemas and encoders shared by FAISS product search and pgvector memory."""
 
-from app.search.encoder import BgeM3Encoder, EmbeddingEncoder, EmbeddingMetadata
+from app.search.encoder import (
+    EmbeddingEncoder,
+    EmbeddingMetadata,
+    LocalOnnxEmbeddingEncoder,
+)
+from app.search.errors import SearchNotConfiguredError
 from app.search.schemas import Candidate, ItemSearchOutput, SearchFilters
-from app.search.service import ProductSearchService, SearchNotConfiguredError
 
 __all__ = [
-    "BgeM3Encoder",
     "Candidate",
     "EmbeddingEncoder",
     "EmbeddingMetadata",
     "ItemSearchOutput",
-    "ProductSearchService",
+    "LocalOnnxEmbeddingEncoder",
     "SearchFilters",
     "SearchNotConfiguredError",
 ]

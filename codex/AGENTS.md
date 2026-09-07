@@ -28,8 +28,9 @@ Before doing any project work:
 - Never expose or document `.env` secrets.
 - Streaming is mandatory: new AgentLoop/API behavior must use incremental events suitable for AG-UI,
   instead of being designed around one blocking final response.
-- Vector choices in `docs/vector-infrastructure.md` are fixed. Do not replace Faiss, OpenSearch,
-  LangGraph BaseStore, the three-tower Query encoder, or their metrics without user approval.
+- Vector choices in `docs/vector-infrastructure.md` are fixed. Product search uses request-local
+  Faiss only; long-term memory uses LangGraph BaseStore with PostgreSQL/pgvector only. Do not
+  replace their models, dimensions, normalization, distance, or fusion rules without user approval.
 
 ## Automatic documentation maintenance
 
@@ -55,4 +56,3 @@ Pure explanation with no project-fact change does not require a meaningless stat
 Before declaring a feature complete, verify its Think/Reflect/Act phase, distinguish main-loop tools
 from homogeneous forks and heterogeneous experts, define state/API/event contracts, obey the vector
 contract, expose stream/errors, run relevant tests without paid calls, and update project status.
-

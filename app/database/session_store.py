@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -17,6 +17,7 @@ from app.api.storage import TERMINAL_RUN_STATUSES
 from app.database.models import (
     Artifact,
     IdempotencyKey,
+    MemoryConsolidationState,
     Message,
     Run,
     RunResult,
@@ -89,8 +90,16 @@ def _artifact_dict(item: Artifact) -> dict[str, Any]:
 class SQLAlchemySessionStore:
     """PostgreSQL-backed store preserving the RunRegistry storage protocol."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        memory_run_threshold: int = 10,
+        memory_idle_seconds: int = 900,
+    ) -> None:
         self.database = database
+        self.memory_run_threshold = memory_run_threshold
+        self.memory_idle_seconds = memory_idle_seconds
 
     async def open(self) -> None:
         await self.database.ping()
@@ -282,6 +291,17 @@ class SQLAlchemySessionStore:
                     active.archived_at = now
                     active.updated_at = now
                     active.archive_reason = "new_thread"
+                    consolidation = await session.get(
+                        MemoryConsolidationState, active.thread_id, with_for_update=True
+                    )
+                    if consolidation is not None and consolidation.pending_successful_runs:
+                        consolidation.due_at = now
+                        consolidation.attempts = 0
+                        consolidation.last_error_code = None
+                        consolidation.dead_lettered_at = None
+                        consolidation.claimed_at = None
+                        consolidation.claim_token = None
+                        consolidation.updated_at = now
                 else:
                     await session.delete(active)
                     await session.flush()
@@ -382,9 +402,8 @@ class SQLAlchemySessionStore:
                 created_at=now,
             )
             session.add(run)
-            # Message.run_id references this row.  These models deliberately do
-            # not expose ORM relationships, so make the parent INSERT ordering
-            # explicit for MySQL instead of relying on a combined flush.
+            # Message.run_id references this row. These models deliberately do not
+            # expose ORM relationships, so flush the parent before inserting children.
             await session.flush()
             session.add(
                 Message(
@@ -498,6 +517,34 @@ class SQLAlchemySessionStore:
                         created_at=now,
                     )
                 )
+            consolidation = await session.get(
+                MemoryConsolidationState, thread_id, with_for_update=True
+            )
+            if status == "succeeded":
+                if consolidation is None:
+                    thread = await session.get(Thread, thread_id)
+                    if thread is None:
+                        raise ApiError(404, "THREAD_NOT_FOUND", "指定会话不存在")
+                    consolidation = MemoryConsolidationState(
+                        thread_id=thread_id,
+                        user_id=thread.user_id,
+                        processed_through_ordinal=0,
+                        pending_successful_runs=0,
+                        attempts=0,
+                        updated_at=now,
+                    )
+                    session.add(consolidation)
+                consolidation.pending_successful_runs += 1
+                consolidation.attempts = 0
+                consolidation.last_error_code = None
+                consolidation.dead_lettered_at = None
+            if consolidation is not None and consolidation.pending_successful_runs:
+                consolidation.due_at = (
+                    now
+                    if consolidation.pending_successful_runs >= self.memory_run_threshold
+                    else now + timedelta(seconds=self.memory_idle_seconds)
+                )
+                consolidation.updated_at = now
             await session.execute(
                 update(Thread).where(Thread.thread_id == thread_id).values(updated_at=now)
             )

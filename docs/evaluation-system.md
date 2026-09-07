@@ -7,7 +7,7 @@
 静态种子商品或“全部交给 LLM 判断”的事实校验方式。
 
 - `offline` 是默认路径，只读取仓库内合成夹具并运行确定性评分，不访问模型、Provider、数据库、
-  OpenSearch 或 Redis。
+  外部模型、商品 Provider、pgvector 或 Redis。
 - `live` 使用正式认证、HTTP 202、WebSocket replay、任务状态与 PostgreSQL 商品事实，必须显式允许模型
   调用；外部工具已配置时还需要第二次明确允许。
 - P0 只由代码判断，覆盖终态、工具、预算、结构化商品、PostgreSQL 事实和来源链接；LLM Judge 只能判断
@@ -17,7 +17,7 @@
 ## 2. 用例与评分契约
 
 `eval/cases.yaml` 使用 `schema_version: "1.0"`。每个 case 独立声明 suite、查询轮次、能力要求、
-可选记忆 setup、前置事实和三档 Rubric。criterion ID 在 case 内必须唯一；P0 必须使用
+前置事实和三档 Rubric。公共记忆 API 与 live memory setup 已移除；criterion ID 在 case 内必须唯一；P0 必须使用
 `deterministic`，P1/P2 可选择 `deterministic` 或 `llm`。离线 case 必须携带明确标记为合成测试
 数据的 fixture，真实 case 不硬编码固定商品答案。
 
@@ -29,13 +29,13 @@
 - `PARTIAL`：需要 LLM Judge，但未配置或未执行。
 - `SKIP`：预留给后续能力缺失时的显式跳过；首版运行器不会把错误自动改写为 SKIP。
 
-确定性事实校验使用最终结构化 `picks` 和该次运行后读取的 MySQL `Product + Offer`。价格容差为
+确定性事实校验使用最终结构化 `picks` 和该次运行后读取的 PostgreSQL `Product + Offer`。价格容差为
 0.01 CNY；标题、平台、币种和来源链接必须相等。回答中的来源 URL 必须属于已验证商品。动态目录
 的具体商品不写入 live case，因此目录变化不会因固定 ID 自身导致误报。
 
 ## 3. 运行方式
 
-长期记忆使用独立严格 Schema `eval/memory-cases.yaml`，当前基线为 50 条确定性 P0 case。`memory_integration` 在隔离 SQLite test double 或通过 `GLOBUY_TEST_POSTGRES_URL` 指定的 PostgreSQL/pgvector 中运行真实 `MemoryService`、BaseStore、Outbox 与 Fake Encoder，不调用模型；报告包含候选、正式记忆、版本、投影、召回 lane、迁移、Prompt 和 Embedding 指纹。
+长期记忆使用独立严格 Schema `eval/memory-cases.yaml`。`memory_integration` 在隔离 SQLite test double 或通过 `GLOBUY_TEST_POSTGRES_URL` 指定的 PostgreSQL/pgvector 中运行真实 `MemoryService`、BaseStore、Outbox 与 Fake Encoder，不调用模型；当前覆盖精确重复、更新与重复确认、硬删除和跨用户隔离。后端测试另用 Fake LLM/Fake Manager 与可控时间覆盖事实动作准确性、关键词结构、10 Run/15 分钟调度、租约、游标、退避、dead-letter 和线性衰减。Memory Action Accuracy 以这些固定提取/决策样例中合法目标动作的命中率作为门禁，不访问付费模型。
 
 默认零外部调用：
 
@@ -52,7 +52,6 @@ python scripts/eval_regression.py --suite offline --domain all
 $env:GLOBUY_EVAL_EMAIL='<专用评测账号>'
 $env:GLOBUY_EVAL_PASSWORD='<密码>'
 python scripts/eval_regression.py --suite live --allow-model-calls
-python scripts/eval_regression.py --suite live --domain memory --allow-model-calls --allow-external-tools
 ```
 
 启用独立 Judge 时，在项目根目录被 Git 忽略的 `.env` 中配置
@@ -65,8 +64,7 @@ live runner 会把每轮 API 返回的确定性 `trace_id` 写入 evidence 和�
 `globuy.eval.p0_pass`；该开关仅允许用于 live suite，LangFuse 未配置时直接拒绝，不会静默丢分。
 
 可用参数：`--cases` 指定用例文件，`--only` 选择单 case，`--base-url` 指定服务，`--output`
-指定本轮产物目录。真实 case 按顺序执行，但每个 case 建立独立 thread，记忆条目使用 `eval_` 前缀并在
-case 结束后通过正式 API 删除，所以不依赖另一 case 的副作用。
+指定本轮产物目录。真实购物 case 按顺序执行，但每个 case 建立独立 thread。长期记忆不提供公共 setup/cleanup API，因此自动长期记忆回归只在隔离离线数据库中运行。
 
 ## 4. 产物、可复现性与安全
 

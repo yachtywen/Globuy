@@ -97,7 +97,8 @@ def test_health(client: TestClient) -> None:
     assert payload["model_provider"] == "mock"
     assert isinstance(payload["product_provider_configured"], bool)
     assert isinstance(payload["web_search_configured"], bool)
-    assert isinstance(payload["category_cache_enabled"], bool)
+    assert payload["product_search_backend"] == "faiss"
+    assert payload["memory_store_backend"] == "pgvector"
     assert payload["observability_status"] == "disabled"
     assert payload["observability_configured"] is False
     assert all("key" not in key and "token" not in key for key in payload)

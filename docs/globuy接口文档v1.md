@@ -9,7 +9,7 @@
 
 ## 1. 当前接口范围与部署前提
 
-当前版本已实现服务状态、注册登录、会话、Agent 任务、运行结果、WebSocket 实时事件、运行产物、默认心愿库、价格历史和长期记忆接口。除注册、登录、根信息和健康检查外，核心业务接口均要求登录。业务数据按当前登录用户隔离，前端不得通过传入 `user_id` 指定身份。
+当前版本已实现服务状态、注册登录、会话、Agent 任务、运行结果、WebSocket 实时事件、运行产物、默认心愿库和价格历史接口。长期记忆是内部 Agent 能力，不提供公共接口。除注册、登录、根信息和健康检查外，核心业务接口均要求登录。业务数据按当前登录用户隔离，前端不得通过传入 `user_id` 指定身份。
 
 领域接口依赖 PostgreSQL 17。正式启动时必须配置 `GLOBUY_DATABASE_URL`；未配置时生产启动会失败。代码与 Alembic 迁移已经实现，但接口可访问不代表当前部署已经完成建库、商品导入和 Worker 启动。
 
@@ -407,8 +407,7 @@ type RunStatus =
   "started_at":"2026-07-21T08:30:01.000Z",
   "finished_at":"2026-07-21T08:30:10.000Z",
   "last_sequence":18,"earliest_available_sequence":1,
-  "terminal_event":"RUN_FINISHED","result":{},"artifacts":[],
-  "memory_status":"not_requested","error":null
+  "terminal_event":"RUN_FINISHED","result":{},"artifacts":[],"error":null
 }
 ```
 
@@ -422,8 +421,6 @@ interface TaskResult {
   final_text: string;
   picks: ProductPick[];
   unresolved: string[];
-  learned_preferences: unknown[];
-  memory_status: string;
   source_kind: "offline_snapshot";
   search_attempted: boolean;
   search_candidate_count: number;
@@ -552,17 +549,15 @@ HTTPS 使用 `wss://`。浏览器自动随同源握手发送会话 Cookie。首�
 - `{name: "thread_archived", thread_id, new_thread_id}`：当前会话归档，切换只读并跟随新会话。
 - 商品目录临时状态：`shopping_intent_resolved`、`catalog_cache_checked`、`catalog_fetch_started`、
   `catalog_fetch_progress`、`catalog_fetch_finished`、`catalog_normalization_progress`、
-  `catalog_persistence_progress`、`catalog_index_progress`、`hybrid_retrieval_progress`、
+  `catalog_persistence_progress`、`faiss_retrieval_progress`、
   `candidate_filter_completed`、`candidate_grouping_completed`、`llm_rerank_started`、
   `llm_rerank_completed`、`llm_rerank_degraded`。这些事件只包含品类名、平台、
   是否有预算、阶段状态和候选计数等白名单字段；不得包含 Token、游标、Provider 原文、原始业务码或异常堆栈。
   前端按 `sequence` 幂等合并平台快照，不把事件转换成 assistant 消息，并在终态、取消、错误、新 run、切换会话或
   `replay_gap` 状态同步后清理临时进度。
 
-ItemSearch 仍保持一次调用只搜索一个平台。`search_strategy` 为
-`hybrid | direct_llm | intent_routed`；运行配置还可使用 `progressive` 按稳定用户哈希把流量灰度到
-`intent_routed`，普通请求不会双跑 Provider。响应可带可选
-`retrieval_route=exact_direct|category_direct|category_hybrid`，旧客户端可忽略。内部调用可携带同一份已验证结构化购物意图，返回状态为
+ItemSearch 仍保持一次调用只搜索一个平台。`search_strategy` 固定为 `faiss`，不再支持运行时切链或灰度。响应可带可选
+`retrieval_route=exact_direct|category_faiss`，旧客户端可忽略。内部调用携带同一份已验证结构化购物意图，返回状态为
 `ok | partial | not_configured | error | cancelled`，并可包含 `catalog_status`、`catalog_candidate_count`、
 `captured_at` 和 `provider_status`。Provider 默认关闭时仍搜索已有本地目录；目录不足不会触发真实网络请求，而返回
 `not_configured`。候选不新增无法验证的库存、运费或综合评分字段。
@@ -571,15 +566,15 @@ ItemSearch 仍保持一次调用只搜索一个平台。`search_strategy` 为
 `ranking_method=llm|deterministic_exact|deterministic_fallback`、`ranking_version`、
 `status=ok|degraded|insufficient_data`、脱敏 `fallback_reason` 与去重统计；这些诊断字段不允许
 模型修改商品事实。另返回
-`candidate_selection_method=not_needed|hybrid_rrf|bm25_fallback|deterministic_exact`、筛选前后组数、
+`candidate_selection_method=not_needed|faiss_rrf|bm25_fallback|deterministic_exact`、筛选前后组数、
 Embedding 模型/revision、缓存命中/未命中及 Embedding、BM25、FAISS 分段耗时。明确商品路由不调用
-Embedding 或 LLM；品类探索仅在分组超过 36 时执行临时 Hybrid，LLM 最多接收 36 组且不自动重试。
+Embedding 或 LLM；品类探索统一执行请求内 FAISS 链，LLM 最多接收 36 组且不自动重试。
 
 结构化 `ShoppingIntent` 新增 `intent_mode`、`intent_confidence`、`product_identity`、
 `primary_query/lexical_query/semantic_query` 与 `clarification_count`。`goal_explore` 在澄清完成前不得
 调用 Provider；每轮只问一个问题，最多两轮，仍不能收敛到一个主品类时返回 `insufficient_intent`。
 检索过程可发出脱敏事件 `shopping_intent_routed`、`intent_clarification_requested`、
-`candidate_hybrid_started/completed/degraded`；事件不包含完整候选、向量或 Prompt。
+`candidate_faiss_started/completed/degraded`；事件不包含完整候选、向量或 Prompt。
 
 ### 8.3 重连规则
 
@@ -709,88 +704,11 @@ price_change_percent = price_change / added_price × 100
 
 观测按时间升序。`price` 可为空；绘图时跳过无有效价格的点，不显示为 0。
 
-## 10. 长期记忆
+## 10. 长期记忆对外边界
 
-管理页面直接读 PostgreSQL API。OpenSearch 通过 Outbox 异步同步，搜索索引可短暂滞后，CRUD 响应是权威状态。Agent 识别的偏好不能自动持久化，必须经用户确认后调用创建或修改接口。
+长期记忆按登录用户隔离，但仅供 Agent 内部使用。所有 `/api/v1/memories` 路由均不存在，用户和前端不能列表、新增、修改、删除、查看历史或撤销记忆。
 
-### 10.1 数据结构
-
-```ts
-interface MemoryEntry {
-  memory_id: string;
-  user_id: string;
-  category: "blacklist" | "preference" | "history";
-  key: string;
-  content: string;
-  confidence: number;
-  source: string;
-  status: "active" | "deleted";
-  source_thread_id: string | null;
-  source_run_id: string | null;
-  version: number;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | null;
-}
-```
-
-### 10.2 查询
-
-`GET /api/v1/memories`
-
-响应 `{ "items": MemoryEntry[] }`。当前仅返回有效记忆，按更新时间倒序。
-
-### 10.3 创建
-
-`POST /api/v1/memories`
-
-要求 CSRF。
-
-```json
-{
-  "category":"preference","key":"headphone_preference",
-  "content":"偏好轻量、主动降噪的头戴式耳机","confidence":1.0,
-  "subject":"headphones","predicate":"wearing_style",
-  "value_json":"over-ear","polarity":"positive",
-  "scope_type":"category","scope_value":"headphones",
-  "source_thread_id":"thr_example","source_run_id":"run_example"
-}
-```
-
-| 字段 | 约束 |
-| --- | --- |
-| `category` | 必填：`blacklist`、`preference`、`history` |
-| `key` | 必填，1～128 字符；active v2 记忆以 `fact_slot` 处理同槽冲突，旧数据仍兼容 key 路径 |
-| `content` | 必填，1～4000 字符 |
-| `confidence` | 可选，0～1，默认 1 |
-| `subject/predicate/value_json` | 可选的结构化事实；Agent v2 长期候选必须提供 |
-| `polarity` | 可选：`positive`、`negative` |
-| `scope_type/scope_value` | 可选作用域：`global/category/brand/product` 及其值 |
-| 来源 ID | 可选，若提供必须属于当前用户 |
-
-响应 `201`，返回完整 `MemoryEntry`。
-
-### 10.4 修改
-
-`PATCH /api/v1/memories/{memory_id}`
-
-要求 CSRF。可修改 `category`、`content`、`confidence`；`key` 不可修改。每次更新递增 `version` 并保存历史。前端应至少提交一个真实变化字段。响应 `200`。
-
-### 10.5 删除
-
-`DELETE /api/v1/memories/{memory_id}`
-
-要求 CSRF。响应 `204`。当前为软删除并记录版本及搜索同步事件；已归档但未删除的记忆可通过恢复接口重建投影。
-
-### 10.6 候选确认、拒绝、归档与恢复
-
-- `GET /api/v1/memory-candidates?status=pending`：查询当前用户候选。
-- `POST /api/v1/memory-candidates/{candidate_id}/confirm`：要求 CSRF，可兼容原有 category/key/content 编辑字段。相同结构化事实只强化原记录；普通同槽冲突会归档旧记录并返回新的 active 记忆。
-- `POST /api/v1/memory-candidates/{candidate_id}/reject`：要求 CSRF，响应 `204`。
-- `GET /api/v1/memories?status=archived`：查询已归档记忆。
-- `POST /api/v1/memories/{memory_id}/restore`：要求 CSRF，强化并恢复记忆，Outbox 异步重建 pgvector 投影。
-
-普通偏好试图覆盖 active 黑名单时返回 `409`，错误码 `MEMORY_HARD_RULE_CONFLICT`。响应新增的 `subject/predicate/value_json/polarity/scope_type/scope_value/fact_slot/conflicts_with_memory_id/supersedes_memory_id/extraction_version` 均为兼容性可选字段。
+成功 Run 只保存在线程并更新内部沉淀调度；累计 10 个成功 Run、空闲 15 分钟或 Thread 归档时，后台 Worker 才批量提取和写入。沉淀状态不会出现在 TaskResult、运行状态或 WebSocket 用户事件中，失败也不改变任务结果。接口消费者不得依赖 `memory_status`、`memory_changes`、`memory_processing_*` 或 `memory_changed`。
 
 ## 11. 兼容接口
 

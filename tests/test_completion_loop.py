@@ -96,7 +96,7 @@ def test_product_search_summary_reads_fork_search_results() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_prompt_budget_never_truncates_blacklists(monkeypatch, tmp_path: Path) -> None:
+async def test_memory_prompt_budget_limits_plain_text_memories(monkeypatch, tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     class FakeMemoryStore:
@@ -105,8 +105,8 @@ async def test_memory_prompt_budget_never_truncates_blacklists(monkeypatch, tmp_
             return [
                 SearchItem(
                     namespace=("users", "user-1", "memories"),
-                    key="hard-rule",
-                    value={"category": "blacklist", "content": "never recommend in-ear"},
+                    key="first-memory",
+                    value={"memory": "prefer over-ear headphones"},
                     created_at=now,
                     updated_at=now,
                 ),
@@ -114,7 +114,7 @@ async def test_memory_prompt_budget_never_truncates_blacklists(monkeypatch, tmp_
                     SearchItem(
                         namespace=("users", "user-1", "memories"),
                         key=f"ordinary-{index}",
-                        value={"category": "preference", "content": "x" * 400},
+                        value={"memory": "x" * 400},
                         created_at=now,
                         updated_at=now,
                     )
@@ -129,8 +129,8 @@ async def test_memory_prompt_budget_never_truncates_blacklists(monkeypatch, tmp_
     loop = AgentLoop(model=None, tools=[], store=FakeMemoryStore(), enable_dispatch=False)
     with thread_scope("thread", tmp_path, run_id="run", user_id="user-1"):
         state = await loop._state_with_memory("headphones")
-    assert "hard-rule" in state["memory_context"]
-    assert state["memory_metrics"]["hard_rule_count"] == 1
+    assert "prefer over-ear headphones" in state["memory_context"]
+    assert state["memory_metrics"]["injected_count"] >= 1
     assert state["memory_metrics"]["injected_estimated_tokens"] <= 128
 
 
@@ -138,7 +138,7 @@ def test_cross_phase_tool_calls_are_removed_before_history() -> None:
     response = AIMessage(
         content="",
         tool_calls=[
-            {"name": "category_insight", "args": {}, "id": "valid", "type": "tool_call"},
+            {"name": "price_compare", "args": {}, "id": "valid", "type": "tool_call"},
             {"name": "item_search", "args": {}, "id": "invalid", "type": "tool_call"},
         ],
     )
@@ -149,7 +149,7 @@ def test_cross_phase_tool_calls_are_removed_before_history() -> None:
     )
 
     assert had_invalid is True
-    assert [call["name"] for call in normalized.tool_calls] == ["category_insight"]
+    assert [call["name"] for call in normalized.tool_calls] == ["price_compare"]
 
 
 def test_summary_is_the_only_and_single_terminal_call() -> None:
@@ -224,9 +224,9 @@ def test_partial_parallel_tool_group_gets_only_missing_response() -> None:
             tool_calls=[
                 {"name": "planner", "args": {}, "id": "planner-1", "type": "tool_call"},
                 {
-                    "name": "category_insight",
+                    "name": "web_search",
                     "args": {},
-                    "id": "category-1",
+                    "id": "web-1",
                     "type": "tool_call",
                 },
             ],
@@ -239,7 +239,7 @@ def test_partial_parallel_tool_group_gets_only_missing_response() -> None:
 
     assert update is not None
     tool_messages = [message for message in update if isinstance(message, ToolMessage)]
-    assert [message.tool_call_id for message in tool_messages] == ["planner-1", "category-1"]
+    assert [message.tool_call_id for message in tool_messages] == ["planner-1", "web-1"]
     assert json.loads(tool_messages[1].content)["status"] == "interrupted"
 
 
@@ -308,7 +308,6 @@ def test_forced_termination_selects_verified_candidates_then_summarizes() -> Non
                 )
             ],
             "original_query": "买500元左右的牛仔裤",
-            "learned_preferences": [],
         }
     )
 
@@ -608,7 +607,6 @@ async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
         "sales": 1280,
         "reasons": ["检索顺位 1"],
         "flags": [],
-        "category_annotations": {},
     }
     with thread_scope("thread-1", tmp_path, run_id="run-1"):
         message = await summary.ainvoke(
@@ -619,21 +617,6 @@ async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
                 "args": {
                     "goal": "购买耳机",
                     "picks": [picked],
-                    "learned_preferences": [
-                        {
-                            "key": "material",
-                            "category": "blacklist",
-                            "content": "不要塑料",
-                            "confidence": 1,
-                            "subject": "headphones",
-                            "predicate": "material",
-                            "value_json": "plastic",
-                            "polarity": "negative",
-                            "scope_type": "category",
-                            "scope_value": "headphones",
-                            "evidence_type": "explicit",
-                        }
-                    ],
                 },
             },
             config={"metadata": {"parent": "main"}},
@@ -649,7 +632,6 @@ async def test_shopping_summary_calls_shared_model_once_and_preserves_facts(
     assert "¥199" in payload["final_text"]
     assert payload["picks"][0]["rating"] == 4.5
     assert payload["picks"][0]["sales"] == 1280
-    assert payload["learned_preferences"][0]["source_session"] == "thread-1"
     assert model.summary_configs[0]["metadata"]["model_role"] == "shopping_summary"
     assert model.summary_configs[0]["run_name"] == "shopping_summary.generation"
     assert model.summary_configs[0]["metadata"]["context_message_count"] == 2
@@ -668,7 +650,6 @@ async def test_shopping_summary_not_configured_is_non_terminal() -> None:
                     **candidate("one", rank=1, price=199),
                     "reasons": [],
                     "flags": [],
-                    "category_annotations": {},
                 }
             ],
         }
@@ -696,7 +677,6 @@ async def test_shopping_summary_timeout_does_not_retry(
                     **candidate("one", rank=1, price=199),
                     "reasons": [],
                     "flags": [],
-                    "category_annotations": {},
                 }
             ],
         }
@@ -720,7 +700,6 @@ async def test_shopping_summary_propagates_cancellation() -> None:
                         **candidate("one", rank=1, price=199),
                         "reasons": [],
                         "flags": [],
-                        "category_annotations": {},
                     }
                 ],
             }
@@ -736,10 +715,10 @@ async def test_shopping_summary_propagates_cancellation() -> None:
     assert model.summary_calls == 1
 
 
-def test_registry_has_eight_business_tools_and_phase_contracts() -> None:
+def test_registry_has_seven_business_tools_and_phase_contracts() -> None:
     tools = build_core_tools(None)
     assert tuple(tool.name for tool in tools) == CORE_TOOL_NAMES
-    assert len(tools) == 8
+    assert len(tools) == 7
     assert "dispatch_tool" not in CORE_TOOL_NAMES
     assert TERMINAL_TOOLS == {"shopping_summary", "chat_fallback"}
     assert "dispatch_tool" in TOOL_PHASES["think"]
@@ -796,9 +775,9 @@ def test_loop_detection_uses_tool_arguments_and_result_digest() -> None:
     assert loop_detected(tool_records(different)) is False
 
 
-def test_tool_compaction_removes_private_category_fields() -> None:
+def test_tool_compaction_removes_private_search_fields() -> None:
     compacted = compact_tool_content(
-        "category_insight",
+        "item_search",
         json.dumps(
             {
                 "status": "ok",
@@ -885,7 +864,6 @@ async def test_explicit_phase_graph_runs_nested_summary_once(tmp_path: Path) -> 
         **candidate("one", rank=1, price=199),
         "reasons": ["检索顺位 1"],
         "flags": [],
-        "category_annotations": {},
     }
     model = ScriptedModel(
         [
@@ -899,7 +877,6 @@ async def test_explicit_phase_graph_runs_nested_summary_once(tmp_path: Path) -> 
                             "goal": "购买耳机",
                             "picks": [picked],
                             "unresolved": ["运费未知"],
-                            "learned_preferences": [],
                         },
                         "id": "summary-graph-1",
                         "type": "tool_call",
@@ -922,7 +899,6 @@ async def test_failed_summary_falls_back_without_model_retry(tmp_path: Path) -> 
         **candidate("one", rank=1, price=199),
         "reasons": ["verified"],
         "flags": [],
-        "category_annotations": {},
     }
     model = ScriptedModel(
         [

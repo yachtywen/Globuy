@@ -13,8 +13,6 @@ const result: TaskResult = {
     { item_id: "two", title: "候选耳机 B", price: 399, currency: "CNY", platform: "taobao", rating: null, sales: null, product_url: "https://example.com/b", reasons: ["检索顺位 2"] },
   ],
   unresolved: ["运费未知", "颜色待确认"],
-  learned_preferences: [],
-  memory_status: "not_configured",
   source_kind: "offline_snapshot",
   artifacts: [],
 };

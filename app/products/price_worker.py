@@ -17,7 +17,6 @@ from app.config import get_settings
 from app.database.models import (
     Offer,
     OfferObservation,
-    OutboxEvent,
     PriceRefreshItem,
     PriceRefreshRun,
     SourceSnapshot,
@@ -175,7 +174,6 @@ class PriceRefreshWorker:
                         current_item.next_check_at = next_daily_refresh(
                             observed_at, local_hour=self.refresh_local_hour
                         )
-                        session.add(self._product_outbox(current_offer, observation_id))
                 status = "succeeded"
                 completed_observation_id = observation_id
                 success += 1
@@ -264,26 +262,7 @@ class PriceRefreshWorker:
             current_item.failure_count = 0
             current_item.last_error_code = None
             current_item.next_check_at = next_daily_refresh(now, local_hour=self.refresh_local_hour)
-            session.add(self._product_outbox(current_offer, observation.observation_id))
             return observation.observation_id
-
-    @staticmethod
-    def _product_outbox(offer: Offer, observation_id: str) -> OutboxEvent:
-        return OutboxEvent(
-            event_id=uuid4().hex,
-            aggregate_type="product",
-            aggregate_id=offer.product_id,
-            event_type="product.upserted",
-            aggregate_version=1,
-            payload_json={
-                "product_id": offer.product_id,
-                "offer_id": offer.offer_id,
-                "item_id": f"{offer.platform}:{offer.source_item_id}",
-                "observation_id": observation_id,
-            },
-            created_at=utc_naive(),
-            attempts=0,
-        )
 
 
 class _ObservationReused(Exception):

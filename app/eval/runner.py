@@ -181,36 +181,6 @@ class LiveEvaluationClient:
         self.current_thread_id = str(response.json()["thread_id"])
         return self.current_thread_id
 
-    async def _setup_memories(self, case: EvaluationCase) -> list[str]:
-        memory_ids: list[str] = []
-        expected_keys = {f"eval_{case.id}_{item.key}" for item in case.setup_memories}
-        if expected_keys:
-            response = await self.client.get("/api/v1/memories")
-            response.raise_for_status()
-            for existing in response.json().get("items", []):
-                if existing.get("key") in expected_keys and existing.get("memory_id"):
-                    await self.client.delete(
-                        f"/api/v1/memories/{existing['memory_id']}",
-                        headers=self.write_headers,
-                    )
-        for item in case.setup_memories:
-            payload = item.model_dump(mode="json")
-            payload["key"] = f"eval_{case.id}_{payload['key']}"
-            response = await self.client.post(
-                "/api/v1/memories", headers=self.write_headers, json=payload
-            )
-            response.raise_for_status()
-            memory_ids.append(str(response.json()["memory_id"]))
-        return memory_ids
-
-    async def _delete_memories(self, memory_ids: list[str]) -> None:
-        for memory_id in memory_ids:
-            response = await self.client.delete(
-                f"/api/v1/memories/{memory_id}", headers=self.write_headers
-            )
-            if response.status_code not in {204, 404}:
-                response.raise_for_status()
-
     async def _wait_run(self, thread_id: str, run_id: str, timeout: float) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -229,13 +199,11 @@ class LiveEvaluationClient:
     async def run_case(self, case: EvaluationCase) -> CaseEvidence:
         started = time.perf_counter()
         thread_id = await self._create_thread()
-        memory_ids: list[str] = []
         all_events: list[dict[str, Any]] = []
         trace_ids: list[str] = []
         transcript: list[str] = []
         final_run: dict[str, Any] = {}
         try:
-            memory_ids = await self._setup_memories(case)
             for turn in case.turns:
                 response = await self.client.post(
                     "/api/v1/tasks",
@@ -293,8 +261,6 @@ class LiveEvaluationClient:
                 trace_ids=trace_ids,
                 error=f"{type(exc).__name__}: {exc}",
             )
-        finally:
-            await self._delete_memories(memory_ids)
 
 
 __all__ = ["LiveEvaluationClient", "fixture_evidence", "load_case_file"]

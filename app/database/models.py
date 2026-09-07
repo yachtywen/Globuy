@@ -22,17 +22,15 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MySQLDateTime
 from sqlalchemy.dialects.postgresql import TIMESTAMP as PostgreSQLTimestamp
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 UTC_DATETIME = (
     DateTime(timezone=False)
-    .with_variant(MySQLDateTime(fsp=6), "mysql")
     .with_variant(PostgreSQLTimestamp(timezone=False, precision=6), "postgresql")
 )
-KEYWORDS_TYPE = ARRAY(String(128)).with_variant(JSON(), "sqlite").with_variant(JSON(), "mysql")
-MEMORY_VECTOR_TYPE = Vector(1024).with_variant(JSON(), "sqlite").with_variant(JSON(), "mysql")
+KEYWORDS_TYPE = ARRAY(String(128)).with_variant(JSON(), "sqlite")
+MEMORY_VECTOR_TYPE = Vector(512).with_variant(JSON(), "sqlite")
 
 
 class Base(DeclarativeBase):
@@ -153,6 +151,32 @@ class Message(Base):
     )
 
 
+class MemoryConsolidationState(Base):
+    __tablename__ = "memory_consolidation_states"
+
+    thread_id: Mapped[str] = mapped_column(
+        ForeignKey("threads.thread_id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), index=True
+    )
+    processed_through_ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    pending_successful_runs: Mapped[int] = mapped_column(Integer, default=0)
+    due_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    claim_token: Mapped[str | None] = mapped_column(String(128), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(100))
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
+    updated_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
+
+    __table_args__ = (
+        CheckConstraint("processed_through_ordinal >= 0"),
+        CheckConstraint("pending_successful_runs >= 0"),
+        CheckConstraint("attempts >= 0"),
+    )
+
+
 class Artifact(Base):
     __tablename__ = "artifacts"
 
@@ -198,10 +222,10 @@ class Product(Base):
     category: Mapped[str | None] = mapped_column(String(255), index=True)
     category_key: Mapped[str | None] = mapped_column(String(128), index=True)
     category_path: Mapped[list[str] | None] = mapped_column(JSON)
-    semantic_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     description_summary: Mapped[str | None] = mapped_column(Text)
     attributes_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    semantic_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     first_seen_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     last_seen_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
@@ -489,62 +513,19 @@ class MemoryEntry(Base):
     user_id: Mapped[str] = mapped_column(
         ForeignKey("users.user_id", ondelete="CASCADE"), index=True
     )
-    category: Mapped[str] = mapped_column(String(32), index=True)
-    key: Mapped[str] = mapped_column(String(128))
-    content: Mapped[str] = mapped_column(Text)
+    memory: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
     keywords: Mapped[list[str]] = mapped_column(KEYWORDS_TYPE, default=list)
-    confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), default=Decimal("1"))
     source: Mapped[str] = mapped_column(String(32), default="user")
-    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     source_thread_id: Mapped[str | None] = mapped_column(String(128))
     source_run_id: Mapped[str | None] = mapped_column(String(128))
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
     updated_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
-    deleted_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
-    lifecycle_status: Mapped[str] = mapped_column(String(24), default="active", index=True)
-    last_reinforced_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
-    reinforcement_count: Mapped[int] = mapped_column(Integer, default=1)
-    archived_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
-    purge_after: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
-    subject: Mapped[str | None] = mapped_column(String(128))
-    predicate: Mapped[str | None] = mapped_column(String(64))
-    value_json: Mapped[Any | None] = mapped_column(JSON)
-    polarity: Mapped[str | None] = mapped_column(String(16))
-    scope_type: Mapped[str | None] = mapped_column(String(16))
-    scope_value: Mapped[str | None] = mapped_column(String(128))
-    evidence_type: Mapped[str | None] = mapped_column(String(16))
-    fact_slot: Mapped[str | None] = mapped_column(String(64), index=True)
-    supersedes_memory_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    extraction_version: Mapped[str | None] = mapped_column(String(32))
-
+    last_confirmed_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
     __table_args__ = (
-        CheckConstraint("category IN ('blacklist','preference','history')"),
-        CheckConstraint("source IN ('user','agent_confirmed','import')"),
-        CheckConstraint("lifecycle_status IN ('active','archived','deleted')"),
-        CheckConstraint(
-            "polarity IS NULL OR polarity IN ('positive','negative')",
-            name="ck_memory_entries_polarity",
-        ),
-        CheckConstraint(
-            "scope_type IS NULL OR scope_type IN ('global','category','brand','product')",
-            name="ck_memory_entries_scope_type",
-        ),
-        CheckConstraint(
-            "evidence_type IS NULL OR evidence_type IN ('explicit','inferred','imported')",
-            name="ck_memory_entries_evidence_type",
-        ),
-        Index(
-            "ix_memory_entries_active_fact_slot",
-            "user_id",
-            "fact_slot",
-            postgresql_where=(
-                (status == "active")
-                & (lifecycle_status == "active")
-                & (category != "history")
-                & fact_slot.is_not(None)
-            ),
-        ),
+        CheckConstraint("source IN ('user','agent','import')"),
+        UniqueConstraint("user_id", "content_hash", name="uq_memory_entries_user_hash"),
     )
 
 
@@ -564,72 +545,28 @@ class MemoryEmbedding(Base):
     embedded_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
 
 
-class MemoryCandidate(Base):
-    __tablename__ = "memory_candidates"
+class MemoryHistory(Base):
+    __tablename__ = "memory_history"
 
-    candidate_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    history_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    memory_id: Mapped[str] = mapped_column(String(128), index=True)
     user_id: Mapped[str] = mapped_column(
         ForeignKey("users.user_id", ondelete="CASCADE"), index=True
     )
-    category: Mapped[str] = mapped_column(String(32), index=True)
-    key: Mapped[str] = mapped_column(String(128))
-    content: Mapped[str] = mapped_column(Text)
-    keywords: Mapped[list[str]] = mapped_column(KEYWORDS_TYPE, default=list)
-    confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4))
-    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    event: Mapped[str] = mapped_column(String(24), index=True)
+    memory_version: Mapped[int | None] = mapped_column(Integer)
+    old_memory: Mapped[str | None] = mapped_column(Text)
+    new_memory: Mapped[str | None] = mapped_column(Text)
     source_thread_id: Mapped[str | None] = mapped_column(String(128))
     source_run_id: Mapped[str | None] = mapped_column(String(128))
-    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
-    expires_at: Mapped[datetime] = mapped_column(UTC_DATETIME, index=True)
-    decided_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME)
-    subject: Mapped[str | None] = mapped_column(String(128))
-    predicate: Mapped[str | None] = mapped_column(String(64))
-    value_json: Mapped[Any | None] = mapped_column(JSON)
-    polarity: Mapped[str | None] = mapped_column(String(16))
-    scope_type: Mapped[str | None] = mapped_column(String(16))
-    scope_value: Mapped[str | None] = mapped_column(String(128))
-    evidence_type: Mapped[str | None] = mapped_column(String(16))
-    persistence_scope: Mapped[str] = mapped_column(String(16), default="long_term")
-    fact_slot: Mapped[str | None] = mapped_column(String(64), index=True)
-    conflicts_with_memory_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    extraction_version: Mapped[str | None] = mapped_column(String(32))
 
     __table_args__ = (
-        CheckConstraint("category IN ('blacklist','preference','history')"),
-        CheckConstraint("status IN ('pending','confirmed','rejected','expired')"),
         CheckConstraint(
-            "persistence_scope IN ('long_term','session_only')",
-            name="ck_memory_candidates_persistence_scope",
-        ),
-        CheckConstraint(
-            "polarity IS NULL OR polarity IN ('positive','negative')",
-            name="ck_memory_candidates_polarity",
-        ),
-        CheckConstraint(
-            "scope_type IS NULL OR scope_type IN ('global','category','brand','product')",
-            name="ck_memory_candidates_scope_type",
-        ),
-        CheckConstraint(
-            "evidence_type IS NULL OR evidence_type IN ('explicit','inferred','imported')",
-            name="ck_memory_candidates_evidence_type",
+            "event IN ('ADD','UPDATE','DELETE','UNDO','LEGACY_IMPORT')",
+            name="ck_memory_history_event",
         ),
     )
-
-
-class MemoryVersion(Base):
-    __tablename__ = "memory_versions"
-
-    memory_version_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    memory_id: Mapped[str] = mapped_column(
-        ForeignKey("memory_entries.memory_id", ondelete="CASCADE"), index=True
-    )
-    version: Mapped[int] = mapped_column(Integer)
-    operation: Mapped[str] = mapped_column(String(24))
-    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(UTC_DATETIME)
-
-    __table_args__ = (UniqueConstraint("memory_id", "version", name="uq_memory_version"),)
 
 
 class OutboxEvent(Base):
@@ -648,3 +585,4 @@ class OutboxEvent(Base):
     available_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
     claimed_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)
     claim_token: Mapped[str | None] = mapped_column(String(128), index=True)
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(UTC_DATETIME, index=True)

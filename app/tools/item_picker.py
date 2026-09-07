@@ -18,20 +18,19 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.agent.llm import model_request_kwargs
 from app.api.monitor import current_monitor
-from app.category.schemas import CategoryInsightOutput
 from app.config import get_settings
 from app.database.session import Database
 from app.products.catalog.intent import ProductIdentity, ShoppingIntent
 from app.products.catalog.repository import CatalogRepository
 from app.products.grouping import CandidateGroup, cap_groups_balanced, group_candidates
 from app.recall.transient_hybrid import (
-    HybridSelection,
+    FaissSelection,
     select_bm25_groups,
-    select_hybrid_groups,
+    select_faiss_groups,
 )
 from app.search.candidate_encoder import (
     CandidateEmbeddingEncoder,
@@ -40,11 +39,13 @@ from app.search.candidate_encoder import (
 from app.search.schemas import Candidate, Platform, Scalar
 from app.utils.thread_ctx import current_thread_id
 
-RANKING_VERSION = "direct-llm-rerank-v1"
+RANKING_VERSION = "faiss-llm-rerank-v1"
 
 
 class PickerCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # LLM 常把 item_search 返回的富字段（product_id/offer_id/shop_name 等）原样回传；
+    # 核心字段仍严格校验，未知字段直接忽略，避免整次调用因 extra=forbid 报错。
+    model_config = ConfigDict(extra="ignore")
     item_id: str
     product_id: str | None = None
     offer_id: str | None = None
@@ -85,20 +86,12 @@ class PickerConstraints(BaseModel):
         return self
 
 
-class CategoryAnnotations(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    price_tier: str | None = None
-    matched_typical_attributes: list[dict[str, str]] = Field(default_factory=list)
-    component_coverage: list[str] = Field(default_factory=list)
-
-
 class PickedItem(PickerCandidate):
     model_config = ConfigDict(extra="forbid")
     product_group_id: str | None = None
     alternative_offers: list[PickerCandidate] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list, max_length=3)
     flags: list[str] = Field(default_factory=list)
-    category_annotations: CategoryAnnotations = Field(default_factory=CategoryAnnotations)
 
     @field_validator("reasons", mode="before")
     @classmethod
@@ -117,7 +110,7 @@ class ItemPickerOutput(BaseModel):
     duplicate_summary: dict[str, int] = Field(default_factory=dict)
     selection_rule: str = "source/retrieval rank, normalized rating, price, input order"
     candidate_selection_method: Literal[
-        "not_needed", "hybrid_rrf", "bm25_fallback", "deterministic_exact"
+        "not_needed", "faiss_rrf", "bm25_fallback", "deterministic_exact"
     ] = "not_needed"
     candidate_groups_before_selection: int = 0
     candidate_groups_after_selection: int = 0
@@ -164,6 +157,40 @@ def _normalized(value: Any) -> str:
     return str(value).strip().casefold()
 
 
+def _parse_picker_items(raw_items: list[Any]) -> tuple[list[PickerCandidate], int]:
+    """Tolerantly parse LLM-provided items; drop malformed entries instead of
+    failing the whole tool call (the model echoes provider-rich candidate JSON)."""
+    parsed: list[PickerCandidate] = []
+    dropped = 0
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            dropped += 1
+            continue
+        try:
+            parsed.append(PickerCandidate.model_validate(raw))
+        except ValidationError:
+            dropped += 1
+    return parsed, dropped
+
+
+def _parse_constraints(raw: Any) -> PickerConstraints:
+    if isinstance(raw, dict):
+        try:
+            return PickerConstraints.model_validate(raw)
+        except ValidationError:
+            return PickerConstraints()
+    return PickerConstraints()
+
+
+def _parse_intent(raw: Any) -> ShoppingIntent | None:
+    if isinstance(raw, dict):
+        try:
+            return ShoppingIntent.model_validate(raw)
+        except ValidationError:
+            return None
+    return None
+
+
 def _hard_failure(
     item: PickerCandidate,
     constraints: PickerConstraints,
@@ -204,31 +231,6 @@ def _hard_failure(
     return None
 
 
-def _category_annotations(
-    item: PickerCandidate, context: CategoryInsightOutput | None
-) -> CategoryAnnotations:
-    annotations = CategoryAnnotations()
-    if context is None or context.status not in {"ok", "partial"}:
-        return annotations
-    for tier in context.price_tiers:
-        if tier.range_cny[0] <= item.price <= tier.range_cny[1]:
-            annotations.price_tier = tier.tier
-            break
-    searchable = f"{item.title} {_normalized(item.attributes)}".casefold()
-    for attribute in context.attributes:
-        typical = sorted(attribute.distribution.items(), key=lambda pair: (-pair[1], pair[0]))
-        for value, _ in typical:
-            if value != "unknown" and value.casefold() in searchable:
-                annotations.matched_typical_attributes.append(
-                    {"name": attribute.name, "value": value}
-                )
-                break
-    annotations.component_coverage = [
-        component for component in context.components if component.casefold() in searchable
-    ]
-    return annotations
-
-
 def _rating_signal(value: float | None) -> float:
     if value is None:
         return -1.0
@@ -264,9 +266,7 @@ def _as_candidate(item: PickerCandidate) -> Candidate:
     return Candidate.model_validate(item.model_dump(exclude={"total_cost"}))
 
 
-def _reason_lines(
-    item: PickerCandidate, assessment: RerankAssessment | None, annotations: CategoryAnnotations
-) -> list[str]:
+def _reason_lines(item: PickerCandidate, assessment: RerankAssessment | None) -> list[str]:
     reasons: list[str] = []
     if assessment is not None:
         if assessment.relevance in {"exact", "high"}:
@@ -281,8 +281,6 @@ def _reason_lines(
         rank = item.source_rank or item.retrieval_rank
         if rank:
             reasons.append(f"来源候选顺位 {rank}")
-    if annotations.price_tier:
-        reasons.append(f"品类价格档位：{annotations.price_tier}")
     return list(dict.fromkeys(reasons))[:3]
 
 
@@ -290,10 +288,8 @@ def _picked(
     group: CandidateGroup,
     *,
     assessment: RerankAssessment | None,
-    category_context: CategoryInsightOutput | None,
 ) -> PickedItem:
     representative = PickerCandidate.model_validate(group.representative.model_dump())
-    annotations = _category_annotations(representative, category_context)
     flags = list(assessment.risk_codes) if assessment else []
     if group.possible_duplicate_group_ids:
         flags.append("possible_duplicate")
@@ -303,9 +299,8 @@ def _picked(
         alternative_offers=[
             PickerCandidate.model_validate(offer.model_dump()) for offer in group.offers[1:]
         ],
-        reasons=_reason_lines(representative, assessment, annotations),
+        reasons=_reason_lines(representative, assessment),
         flags=list(dict.fromkeys(flags)),
-        category_annotations=annotations,
     )
 
 
@@ -351,7 +346,7 @@ def _prepare_groups(
 
 
 def _selection_fields(
-    selection: HybridSelection | None,
+    selection: FaissSelection | None,
     *,
     before: int,
     after: int,
@@ -436,7 +431,6 @@ def _deterministic_from_groups(
     groups: list[CandidateGroup],
     rejected: list[str],
     summary: dict[str, int],
-    category_context: CategoryInsightOutput | None,
     limit: int,
     *,
     status: Literal["ok", "degraded"] = "ok",
@@ -444,12 +438,12 @@ def _deterministic_from_groups(
         "deterministic_fallback"
     ),
     fallback_reason: str | None = None,
-    selection: HybridSelection | None = None,
+    selection: FaissSelection | None = None,
     before: int | None = None,
     selection_method: str = "not_needed",
 ) -> ItemPickerOutput:
     picks = [
-        _picked(group, assessment=None, category_context=category_context)
+        _picked(group, assessment=None)
         for group in sorted(groups, key=_group_rank)[:limit]
     ]
     return ItemPickerOutput(
@@ -471,7 +465,6 @@ def _deterministic_from_groups(
 def _deterministic_output(
     items: list[PickerCandidate],
     constraints: PickerConstraints,
-    category_context: CategoryInsightOutput | None,
     limit: int,
     *,
     status: Literal["ok", "degraded"] = "ok",
@@ -481,14 +474,13 @@ def _deterministic_output(
     groups, rejected, summary = _prepare_groups(
         items,
         constraints,
-        get_settings().direct_rerank_group_limit,
+        get_settings().item_rerank_group_limit,
         require_source_url=require_source_url,
     )
     return _deterministic_from_groups(
         groups,
         rejected,
         summary,
-        category_context,
         limit,
         status=status,
         fallback_reason=fallback_reason,
@@ -499,7 +491,6 @@ def _deterministic_output(
 def item_picker(
     items: list[PickerCandidate],
     constraints: PickerConstraints | None = None,
-    category_context: CategoryInsightOutput | None = None,
     limit: int = 3,
     goal: str = "商品推荐",
     soft_preferences: list[str] | None = None,
@@ -509,7 +500,6 @@ def item_picker(
     return _deterministic_output(
         items,
         constraints or PickerConstraints(),
-        category_context,
         max(1, min(limit, 3)),
         require_source_url=False,
     ).model_dump(mode="json")
@@ -609,17 +599,22 @@ def build_item_picker_tool(
 ) -> BaseTool:
     @tool("item_picker")
     async def llm_item_picker(
-        items: list[PickerCandidate],
+        items: list[dict[str, Any]],
         config: RunnableConfig,
-        constraints: PickerConstraints | None = None,
-        category_context: CategoryInsightOutput | None = None,
+        constraints: dict[str, Any] | None = None,
         limit: int = 3,
         goal: str = "商品推荐",
         soft_preferences: list[str] | None = None,
-        shopping_intent: ShoppingIntent | None = None,
+        shopping_intent: dict[str, Any] | None = None,
     ) -> dict:
         """Filter, group and globally rerank provider candidates once."""
         settings = get_settings()
+        # LLM-facing args are deliberately tolerant (mirrors planner): unknown fields
+        # or malformed entries must not crash the whole call. Drop bad candidates,
+        # ignore unusable constraints/intent, and degrade to the honest empty path.
+        items, dropped_candidates = _parse_picker_items(items or [])
+        constraints = _parse_constraints(constraints)
+        shopping_intent = _parse_intent(shopping_intent)
         bounded_limit = max(1, min(limit, 3))
         active_constraints = constraints or PickerConstraints()
         groups, rejected, summary = _prepare_groups(items, active_constraints, None)
@@ -633,6 +628,7 @@ def build_item_picker_tool(
                 received=len(items),
                 accepted=summary["input_offers"],
                 rejected=summary["hard_filtered_offers"],
+                dropped_candidates=dropped_candidates,
             )
             await monitor.report_catalog(
                 "candidate_grouping_completed",
@@ -692,7 +688,6 @@ def build_item_picker_tool(
                 exact_groups,
                 rejected,
                 summary,
-                category_context,
                 1,
                 ranking_method="deterministic_exact",
                 fallback_reason=None if exact_groups else "exact_identity_not_found",
@@ -701,22 +696,22 @@ def build_item_picker_tool(
             )
             return output.model_dump(mode="json")
 
-        selection: HybridSelection | None = None
-        if shopping_intent is not None and len(groups) > settings.candidate_hybrid_group_threshold:
+        selection: FaissSelection | None = None
+        if shopping_intent is not None and groups:
             if monitor is not None:
                 await monitor.report_catalog(
-                    "candidate_hybrid_started",
+                    "candidate_faiss_started",
                     phase="candidate_selection",
                     status="running",
                     candidate_pool=len(groups),
-                    candidate_limit=settings.candidate_hybrid_group_limit,
+                    candidate_limit=settings.candidate_faiss_group_limit,
                 )
-            hybrid_started = time.perf_counter()
+            faiss_started = time.perf_counter()
             try:
                 active_encoder = candidate_encoder or get_candidate_embedding_encoder()
                 async with asyncio.timeout(settings.candidate_embedding_timeout_seconds):
                     selection = await asyncio.to_thread(
-                        select_hybrid_groups,
+                        select_faiss_groups,
                         groups,
                         lexical_query=shopping_intent.lexical_query
                         or shopping_intent.primary_query
@@ -725,18 +720,18 @@ def build_item_picker_tool(
                         or shopping_intent.primary_query
                         or goal,
                         encoder=active_encoder,
-                        limit=settings.candidate_hybrid_group_limit,
+                        limit=settings.candidate_faiss_group_limit,
                         rank_constant=settings.candidate_rrf_rank_constant,
                     )
                 groups = selection.groups
                 if monitor is not None:
                     await monitor.report_catalog(
-                        "candidate_hybrid_completed",
+                        "candidate_faiss_completed",
                         phase="candidate_selection",
                         status="finished",
                         candidate_pool=groups_before_selection,
                         returned=len(groups),
-                        duration_ms=int((time.perf_counter() - hybrid_started) * 1000),
+                        duration_ms=int((time.perf_counter() - faiss_started) * 1000),
                         embedding_duration_ms=selection.embedding_duration_ms,
                         bm25_duration_ms=selection.bm25_duration_ms,
                         faiss_duration_ms=selection.faiss_duration_ms,
@@ -749,21 +744,21 @@ def build_item_picker_tool(
                 selection = select_bm25_groups(
                     groups,
                     shopping_intent.lexical_query or shopping_intent.primary_query or goal,
-                    settings.candidate_hybrid_group_limit,
+                    settings.candidate_faiss_group_limit,
                 )
                 groups = selection.groups
                 if monitor is not None:
                     await monitor.report_catalog(
-                        "candidate_hybrid_degraded",
+                        "candidate_faiss_degraded",
                         phase="candidate_selection",
                         status="degraded",
                         candidate_pool=groups_before_selection,
                         returned=len(groups),
-                        duration_ms=int((time.perf_counter() - hybrid_started) * 1000),
+                        duration_ms=int((time.perf_counter() - faiss_started) * 1000),
                         fallback_reason=type(exc).__name__.casefold(),
                     )
-        elif len(groups) > settings.candidate_hybrid_group_limit:
-            groups = cap_groups_balanced(groups, settings.candidate_hybrid_group_limit)
+        elif len(groups) > settings.candidate_faiss_group_limit:
+            groups = cap_groups_balanced(groups, settings.candidate_faiss_group_limit)
 
         summary["ranked_product_groups"] = len(groups)
         repository = _group_repository()
@@ -777,7 +772,6 @@ def build_item_picker_tool(
                 groups,
                 rejected,
                 summary,
-                category_context,
                 bounded_limit,
                 status="degraded",
                 fallback_reason="reranker_not_configured",
@@ -853,7 +847,6 @@ def build_item_picker_tool(
                 _picked(
                     group,
                     assessment=assessments.get(group.product_group_id),
-                    category_context=category_context,
                 )
                 for group in ordered[:bounded_limit]
             ]
@@ -887,7 +880,6 @@ def build_item_picker_tool(
                 groups,
                 rejected,
                 summary,
-                category_context,
                 bounded_limit,
                 status="degraded",
                 fallback_reason=reason,

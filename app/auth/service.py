@@ -106,9 +106,8 @@ class AuthService:
             async with self.database.sessions.begin() as session:
                 session.add(user)
                 # The registration records reference users through foreign keys, but
-                # there are no ORM relationships between these models.  MySQL can
-                # therefore receive a child INSERT before the parent unless the user
-                # row is flushed explicitly first.
+                # there are no ORM relationships between these models. Flush the parent
+                # row explicitly before inserting dependent records.
                 await session.flush()
                 session.add_all(
                     [

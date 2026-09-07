@@ -1,7 +1,8 @@
 """Request-time embeddings for transient product-group selection.
 
-This encoder is deliberately independent from the frozen BGE-M3 encoder used by
-OpenSearch, CategoryInsight and long-term memory.
+Product candidates and pgvector long-term memory share the same frozen
+``BAAI/bge-small-zh-v1.5`` 512d model, but each space keeps its own vector store
+(request-local FAISS vs. PostgreSQL/pgvector) and its own encoder instance/cache.
 """
 
 from __future__ import annotations

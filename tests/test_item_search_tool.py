@@ -10,7 +10,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from app.agent.dispatch_tool import build_dispatch_node
 from app.api.monitor import AgentEvent, EventType, Monitor, monitor_scope
 from app.config import get_settings
-from app.search.schemas import Candidate, ItemSearchOutput
+from app.search.schemas import Candidate
 from app.tools import item_search as exported_item_search
 from app.utils.thread_ctx import thread_scope
 
@@ -27,29 +27,6 @@ class ToolLifecycleRecorder(AsyncCallbackHandler):
 
     async def on_tool_end(self, output, **_kwargs) -> None:
         self.ends.append(output)
-
-
-class FakeSearchService:
-    def search(self, query, platform, top_k, filters, **kwargs):
-        return ItemSearchOutput(
-            status="ok",
-            platform=platform,
-            candidates=[
-                Candidate(
-                    item_id=f"{platform}:1",
-                    platform=platform,
-                    title="主动降噪蓝牙耳机",
-                    price=299,
-                    currency="CNY",
-                    attributes={},
-                    product_url="https://example.test/item/1",
-                    retrieval_rank=1,
-                )
-            ],
-            total_recall=3,
-            catalog_candidate_count=3,
-            truncated=True,
-        )
 
 
 @pytest.mark.asyncio
@@ -80,15 +57,23 @@ async def test_middleware_rejection_emits_exactly_one_tool_lifecycle() -> None:
 class FakeCoordinator:
     def __init__(self) -> None:
         self.intents = []
+        self.repository = FakeDirectRepository(
+            [
+                Candidate(
+                    item_id="jingdong:1",
+                    platform="jingdong",
+                    title="主动降噪蓝牙耳机",
+                    price=299,
+                    currency="CNY",
+                    product_url="https://example.test/item/1",
+                    retrieval_rank=1,
+                )
+            ]
+        )
 
-    async def ensure(self, intent):
+    async def ensure(self, intent, *, target_total=None):
         self.intents.append(intent)
         return None
-
-
-class FakeWorker:
-    async def run_once(self, offer_ids):
-        raise AssertionError("no newly hydrated offers expected")
 
 
 class FakeDirectRepository:
@@ -118,9 +103,8 @@ async def test_item_search_tool_returns_contract_and_monitor_summary(
     async def publish(thread_id: str, item: AgentEvent) -> None:
         events.append((thread_id, item))
 
-    monkeypatch.setattr(
-        item_search_module, "get_product_search_service", lambda: FakeSearchService()
-    )
+    coordinator = FakeCoordinator()
+    monkeypatch.setattr(item_search_module, "get_catalog_runtime", lambda: coordinator)
     settings = get_settings().model_copy(update={"product_provider": "none"})
     monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
     with (
@@ -184,12 +168,9 @@ async def test_item_search_hydrates_only_its_requested_platform(
 ) -> None:
     coordinator = FakeCoordinator()
     monkeypatch.setattr(
-        item_search_module, "get_product_search_service", lambda: FakeSearchService()
-    )
-    monkeypatch.setattr(
         item_search_module,
         "get_catalog_runtime",
-        lambda: (coordinator, FakeWorker()),
+        lambda: coordinator,
     )
     settings = get_settings().model_copy(update={"product_provider": "justone"})
     monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
@@ -213,7 +194,7 @@ async def test_item_search_hydrates_only_its_requested_platform(
 
 
 @pytest.mark.asyncio
-async def test_direct_search_reads_fresh_postgres_candidates_without_opensearch(
+async def test_faiss_path_reads_fresh_postgres_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coordinator = FakeDirectCoordinator(
@@ -229,19 +210,12 @@ async def test_direct_search_reads_fresh_postgres_candidates_without_opensearch(
             )
         ]
     )
-    settings = get_settings().model_copy(
-        update={"product_provider": "none", "item_search_strategy": "direct_llm"}
-    )
+    settings = get_settings().model_copy(update={"product_provider": "none"})
     monkeypatch.setattr(item_search_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         item_search_module,
         "get_catalog_runtime",
-        lambda: (coordinator, FakeWorker()),
-    )
-    monkeypatch.setattr(
-        item_search_module,
-        "get_product_search_service",
-        lambda: (_ for _ in ()).throw(AssertionError("OpenSearch must not be called")),
+        lambda: coordinator,
     )
 
     payload = await exported_item_search.ainvoke(
@@ -259,26 +233,37 @@ async def test_direct_search_reads_fresh_postgres_candidates_without_opensearch(
     )
 
     assert payload["status"] == "ok"
-    assert payload["search_strategy"] == "direct_llm"
-    assert payload["retrieval_route"] == "category_direct"
+    assert payload["search_strategy"] == "faiss"
+    assert payload["retrieval_route"] == "category_faiss"
     assert payload["candidates"][0]["source_rank"] == 1
-    assert coordinator.repository.calls[0][2] == settings.direct_candidates_per_platform
+    assert coordinator.repository.calls[0][2] == settings.faiss_candidates_per_platform
 
 
-def test_progressive_strategy_honors_zero_and_full_rollout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(item_search_module, "current_user_id", lambda: "stable-user")
-    base = get_settings().model_copy(update={"item_search_strategy": "progressive"})
-    monkeypatch.setattr(
-        item_search_module,
-        "get_settings",
-        lambda: base.model_copy(update={"direct_rerank_rollout_percent": 0}),
-    )
-    assert item_search_module.resolve_search_strategy() == "hybrid"
-    monkeypatch.setattr(
-        item_search_module,
-        "get_settings",
-        lambda: base.model_copy(update={"direct_rerank_rollout_percent": 100}),
-    )
-    assert item_search_module.resolve_search_strategy() == "intent_routed"
+@pytest.mark.asyncio
+async def test_chat_fallback_guard_replaces_unverified_search_claims() -> None:
+    """Middleware must rewrite chat_fallback messages that claim the search
+    chain is unavailable (the exact hallucination seen in live runs)."""
+    from app.tools.chat_fallback import chat_fallback
+
+    for bad_message in (
+        "抱歉，我目前无法直接搜索商品数据库。不过我可以为您推荐：",
+        "我的检索工具暂时无法使用。",
+        "当前系统服务不可用，请稍后再试。",
+    ):
+        call = {
+            "name": "chat_fallback",
+            "type": "tool_call",
+            "id": f"claim-{hash(bad_message)}",
+            "args": {"message": bad_message},
+        }
+        builder = StateGraph(MessagesState)
+        builder.add_node("tools", build_dispatch_node([chat_fallback]))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        state = await builder.compile().ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[call])]}
+        )
+        payload = json.loads(state["messages"][-1].content)
+        assert payload["message"] == (
+            "当前没有检索到可核验的商品结果，请补充具体品牌或型号，或稍后再试。"
+        )

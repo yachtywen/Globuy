@@ -17,7 +17,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.products.grouping import CandidateGroup, group_candidates
-from app.recall.transient_hybrid import HybridSelection, select_hybrid_groups
+from app.recall.transient_hybrid import FaissSelection, select_faiss_groups
 from app.search.candidate_encoder import CandidateEmbeddingEncoder
 from app.search.schemas import Candidate
 
@@ -43,9 +43,9 @@ def _load_groups(path: Path) -> list[CandidateGroup]:
 
 def _select(
     groups: list[CandidateGroup], *, query: str, encoder: CandidateEmbeddingEncoder
-) -> tuple[float, HybridSelection]:
+) -> tuple[float, FaissSelection]:
     started = time.perf_counter()
-    selection = select_hybrid_groups(
+    selection = select_faiss_groups(
         groups,
         lexical_query=query,
         semantic_query=query,

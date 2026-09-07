@@ -1,4 +1,4 @@
-import type { MemoryCandidate, MemoryEntry, PriceHistory, RunStatusResponse, ThreadDetail, ThreadSummary, Wishlist } from "./types";
+import type { PriceHistory, RunStatusResponse, ThreadDetail, ThreadSummary, Wishlist } from "./types";
 
 const API_ROOT = "/api/v1";
 
@@ -170,40 +170,6 @@ export const wishlistApi = {
   },
 };
 
-export const memoryApi = {
-  list(status: "active" | "archived" = "active") {
-    return request<{ items: MemoryEntry[] }>(`/memories?status=${status}`);
-  },
-  create(category: MemoryEntry["category"], key: string, content: string) {
-    return request<MemoryEntry>("/memories", {
-      method: "POST",
-      body: JSON.stringify({ category, key, content, confidence: 1 }),
-    });
-  },
-  remove(memoryId: string) {
-    return request<void>(`/memories/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
-  },
-  restore(memoryId: string) {
-    return request<MemoryEntry>(`/memories/${encodeURIComponent(memoryId)}/restore`, {
-      method: "POST",
-    });
-  },
-  candidates() {
-    return request<{ items: MemoryCandidate[] }>("/memory-candidates?status=pending");
-  },
-  confirmCandidate(candidateId: string) {
-    return request<MemoryEntry>(`/memory-candidates/${encodeURIComponent(candidateId)}/confirm`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-  },
-  rejectCandidate(candidateId: string) {
-    return request<void>(`/memory-candidates/${encodeURIComponent(candidateId)}/reject`, {
-      method: "POST",
-    });
-  },
-};
-
 export const systemApi = {
   async health() {
     let response: Response;
@@ -223,5 +189,29 @@ export function websocketUrl(threadId: string, runId: string, after: number): st
 }
 
 export function requestId(prefix: string): string {
-  return `${prefix}_${crypto.randomUUID()}`;
+  return randomId(prefix);
+}
+
+export function randomId(prefix?: string): string {
+  // crypto.randomUUID() is only available in secure contexts (https / localhost).
+  // Plain-http deployments fall back to a getRandomValues()-based UUID v4 so that
+  // register/thread/task/wishlist calls never fail before reaching the API.
+  const uuid = (): string => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+      crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < bytes.length; i += 1) {
+        bytes[i] = Math.floor(Math.random() * 256);
+      }
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
+  return prefix ? `${prefix}_${uuid()}` : uuid();
 }

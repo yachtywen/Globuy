@@ -12,7 +12,7 @@
 - 用户资料中的参考名 `globex`，在新代码和文档中统一写成 `globuy`。
 
 主要技术栈：Python 3.12、Conda、FastAPI、Uvicorn、WebSocket、LangChain、LangGraph、
-React、TypeScript、Vite、OpenSearch 和请求内临时 Faiss。对话模型通过 OpenAI
+React、TypeScript、Vite、PostgreSQL/pgvector 和请求内临时 FAISS。对话模型通过 OpenAI
 兼容接口接入 Kimi K2.6，模型标识固定为 `kimi-k2.6`，上下文窗口按 256K 计算。
 
 ## 2. 事实来源和严格程度
@@ -24,18 +24,16 @@ React、TypeScript、Vite、OpenSearch 和请求内临时 Faiss。对话模型�
 
 ## 3. AgentLoop 目标模型
 
-九个工具不是九个子智能体，而是主 AgentLoop 循环中的行动选项：
+七个工具不是七个子智能体，而是主 AgentLoop 循环中的行动选项：
 
 | 工具 | 归属 | 目标触发时机 |
 |---|---|---|
 | `Planner` | 内部 | Think 判断需求复杂、需要拆解时 |
 | `ChatFallback` | 内部 | Think 判断非购物意图、闲聊或需要澄清时 |
 | `WebSearch` | 外部 | Think 判断需要外部事实补全时 |
-| `CategoryInsight` | 外部 | Think 判断需要品类趋势、爆款或 RAG 知识时 |
 | `ItemSearch` | 外部 | Think 判断需要跨平台商品检索时 |
 | `ItemPicker` | 内部 | Reflect 判断召回商品需要二次筛选时 |
 | `PriceCompare` | 外部 | Reflect 判断需要跨平台比价时 |
-| `ShippingCalc` | 外部 | Act 估算关税、运费和到手成本时 |
 | `ShoppingSummary` | 内部 | Reflect 判断信息足够，可以生成购物清单时 |
 
 目标阶段：`Think` 理解和拆解；`Reflect` 检查、筛选、比较和收敛；`Act` 执行成本估算、
@@ -52,16 +50,14 @@ React、TypeScript、Vite、OpenSearch 和请求内临时 Faiss。对话模型�
 详细契约见 `docs/vector-infrastructure.md`，后续实现必须严格遵守：
 
 - 当前项目不训练或微调检索模型，不建设人工评分标签、负样本或学习排序闭环。
-- ItemSearch 默认新路由为三级意图：明确型号/商品 ID 走确定性直搜；明确品类在分组后不超过
-  36 组时直接执行一次 LLM 精排，超过 36 组时才用 BM25 + 冻结
-  `BAAI/bge-small-zh-v1.5` + 请求内 `IndexFlatIP` + 无权重 RRF 筛到 36；目标型需求最多澄清两轮。
-- 临时候选向量固定为 512 维归一化向量，仅存在于单次请求内，不落盘；既有商品 OpenSearch
-  使用独立的 BGE-M3 1024 维空间、Lucene HNSW + COSINE，完整保留为 `hybrid` 基线。
-- 旧“三塔 + 分平台持久化 Faiss + min_max 0.7/0.3”目标仍已取消。临时 `IndexFlatIP` 不是
-  OpenSearch 故障后备；编码失败只在同一候选集内确定性降级为 BM25。
+- ItemSearch 使用三级意图：明确型号/商品 ID 走确定性直搜；明确品类的候选统一使用 BM25 +
+  冻结 `BAAI/bge-small-zh-v1.5` + 请求内 `IndexFlatIP` + 无权重 RRF，最多筛到 36 组后执行一次
+  LLM 精排；目标型需求最多澄清两轮。
+- 商品候选向量固定为 512 维归一化向量，仅存在于单次请求内，不落盘；OpenSearch 商品和品类链已删除。
+- 旧“三塔 + 分平台持久化 Faiss + min_max 0.7/0.3”目标仍已取消；编码失败只在同一真实候选集内确定性降级为 BM25。
 - 长期记忆接口：`LangGraph BaseStore`，PostgreSQL/pgvector 为事实与检索后端。
-- 长期记忆使用独立事实表、候选确认、版本审计和软衰减生命周期，不能直接复用商品索引；CategoryInsight 继续使用独立 OpenSearch 索引。
-- Qdrant、Redis Stack、Chroma、pgvector、Milvus 不得作为 ItemSearch 默认替代；更换模型、
+- 长期记忆使用纯文本当前态、180 天内部审计和 Outbox 异步投影；自动写入由延迟沉淀、严格动作校验、用户隔离与 Hash 幂等保护。
+- OpenSearch、Qdrant、Redis Stack、Chroma、pgvector、Milvus 不得作为 ItemSearch 替代；更换模型、
   维度、归一化方式、距离或融合策略必须先获得用户批准。
 
 ## 6. 流式与 AG-UI
@@ -92,8 +88,8 @@ React、TypeScript、Vite、OpenSearch 和请求内临时 Faiss。对话模型�
 按需跨平台并行检索，统一候选商品与报价，比较价格、运费和关税，应用黑名单与偏好做二次
 筛选，最后输出带选购理由、风险、来源和跨平台价格对照的购物清单。
 
-项目运行时可以概括为“一个主 AgentLoop、按需创建的多个同质 fork、九个业务工具和基础
-设施”。`dispatch_tool(demands)` 是主 Loop 触发同质 fork 的元工具，不计入九个业务工具：
+项目运行时可以概括为“一个主 AgentLoop、按需创建的多个同质 fork、七个业务工具和基础
+设施”。`dispatch_tool(demands)` 是主 Loop 触发同质 fork 的元工具，不计入七个业务工具：
 
 - 主 Loop 使用 `Think -> Act -> Observe -> Reflect` 循环；信息不足时回到 Think，信息充分时
   才生成 `ShoppingSummary`。
@@ -101,13 +97,13 @@ React、TypeScript、Vite、OpenSearch 和请求内临时 Faiss。对话模型�
   阈值和判定规则仍需在实现前定义，不从参考图臆造。
 - 同质 fork 对主 Loop 透明，继承完整 `tool_set/system_prompt`，拥有独立
   `thread_id/checkpoint`，工具结果回流主 Loop 的 Observe/Reflect。
-- `WebSearch`、`ItemSearch`、`ShippingCalc` 等外部工具仍受 `not_configured` 和来源真实性
+- `WebSearch`、`ItemSearch` 等外部工具仍受 `not_configured` 和来源真实性
   约束；并行不能成为伪造外部数据的理由。
 
 ## 9. thread、任务和工作目录生命周期
 
 `thread_id` 是一次会话执行链路的路由键，至少贯穿 WebSocket 连接、后台任务表、
-`session_dir`、AgentLoop checkpoint、事件和记忆的 `source_session`。`user_id` 是长期偏好的
+`session_dir`、AgentLoop checkpoint、事件和记忆来源 thread/run。`user_id` 是长期偏好的
 所有者，不能用 `thread_id` 代替；一个用户可以有多个 thread。
 
 `session_dir` 是当前任务的隔离工作目录。上传文件、工具中间产物、清单和报告只能写入经过
@@ -131,33 +127,24 @@ Loop、fork、工具和 monitor 从上下文读取，不在多层函数间手工
 
 ## 10. Cache Breakpoint 与长期记忆契约
 
-上下文压缩不能只看总 token 后整段重写。目标策略是在历史消息与当前工作区之间设置 Cache
-Breakpoint：尽量保持 System Prompt、工具声明和已稳定历史前缀不变以提高 Prompt Cache
-命中率，只压缩越过阈值的旧历史，同时保留最近 K 轮/工具调用、当前用户约束以及尚未完成的
-tool-call/tool-result 配对。压缩前后必须保持消息协议合法，摘要要标注其来源和边界。
+Cache Breakpoint 只压缩短期会话上下文，不改变长期记忆。Thread 是持续存在的对话线程，Run 是一次用户输入对应的一次 Agent 执行，Session 只是同一 Thread 内 15 分钟连续活动窗口，不建表。每个成功 Run 只增加 Thread 待沉淀计数；累计 10 个成功 Run、空闲 15 分钟或 Thread 归档时，由独立 Worker 处理最多 10 个成功 Run。失败或取消 Run 不进入提取窗口，但会推迟已有窗口的空闲截止时间。
 
-阈值必须从当前模型的上下文窗口推导，而不是固定为某个小窗口常量。Kimi K2.6 默认以 75%
-高水位触发、压回约 50% 低水位，并为最大输出、System Prompt、工具声明及估算误差留出独立
-空间。摘要只在越过高水位时更新，不得逐轮重写稳定前缀。
+长期记忆只保存从用户消息提取的、自包含且可长期复用的纯文本事实。助手消息只能帮助理解上下文，不能成为用户事实来源；寒暄、当次预算/颜色等临时条件、密钥、PII、Prompt 注入和外部工具指令必须跳过。运行时管线固定为：
 
-长期记忆存储的是从对话中提炼出的结构化结论，不保存整段原始聊天。逻辑上的
-`PreferenceEntry` 至少包含：
+```text
+最多 10 个成功 Run + 游标前 4 条只读上下文
+→ LLM 从新窗口用户消息提取 fact_index、长期事实和最多 8 个关键词/别名
+→ 与确定性关键词合并后，每条事实以 pgvector + 关键词 RRF 无衰减召回最多 5 条旧记忆
+→ LLM 选择 ADD / UPDATE / DELETE / NONE
+→ 服务端把临时整数映射回当前用户真实 UUID
+→ 整批原子校验与写入
+```
 
-- `key`：用户内稳定唯一键；同 key 写入采用可审计的覆盖/版本策略。
-- `category`：至少区分 `blacklist`、`preference`、`history`。
-- `content`：可直接用于约束或 Prompt 注入的简洁结论。
-- `source_session`、`created_at`、`confidence`：来源、时效和置信度。
+核心当前态只允许 `memory_id/user_id/memory/source/version/created_at/updated_at/last_confirmed_at` 及必要 Hash、关键词和来源字段；不再使用 status/deleted_at、slot、category、key、subject/predicate/scope、confidence、reinforcement、supersedes、候选确认或黑名单特殊语义。冲突的新状态必须原位 UPDATE；明确撤回且无替代状态才在审计同事务中硬 DELETE；精确文本以用户级规范化 SHA-256 唯一约束去重，语义近似只由动作模型判断。
 
-存储能力应覆盖读取、写入/更新、用户主动撤回删除，以及按当前 query 读取相关 Top-K。
-对外仍使用已经固定的 LangGraph BaseStore 契约，PostgreSQL/pgvector 是事实与检索后端；
-黑名单和硬规则必须全量生效，普通偏好使用 pgvector COSINE 与关键词召回的无权重 RRF 取相关
-Top-K，再乘置信度和时间软衰减。Agent 抽取只生成候选，必须经用户确认后才进入长期记忆。
+每个 fact_index 必须恰有一个动作。`NONE + existing id` 只刷新 `last_confirmed_at`，普通召回不刷新。批次必须通过严格结构、动作枚举、真实 ID、用户归属和重复目标校验，任何非法动作都导致整批零写入。单次任务内模型不立即重试；后台按 1、5、30 分钟退避并可 dead-letter，失败 fail-open，不改变商品结果、最终回答或 RUN_FINISHED。内部历史保留 180 天，不提供恢复或撤销。
 
-只有用户明确表达或高置信度抽取得到的偏好才持久化。新偏好必须同时影响当前 Observe/筛选，
-并带 `source_session` 写入 Store 供后续会话使用；推断性偏好要降低置信度，不能把一次浏览
-自动升级为永久偏好。新会话/运行入口按 `user_id + query` 读取相关记忆，格式化后追加到稳定
-System Prompt 的记忆区；只注入结构化结论和必要硬约束，不回放全部历史，且要控制 token
-预算、去重并优先使用最新有效记录。
+读取仍固定使用 LangGraph BaseStore、PostgreSQL/pgvector、BGE-small 512d（与商品候选共用冻结模型与本地 ONNX INT8 产物）、关键词召回和无权重 RRF。Agent 正常召回在 RRF 后按 `last_confirmed_at` 做 180 天内 1.0→0.6 的线性软衰减，只重排不筛除；冲突检索不衰减。Embedding 通过带租约、指数退避和 dead-letter 的 Outbox 异步投影；商品候选的请求内 FAISS 与长期记忆 pgvector 空间不允许互用。删除记忆立即退出召回；向量元数据不匹配时明确降级关键词 lane。所有公共记忆 API、TaskResult 记忆字段、用户记忆事件和前端管理界面均不存在。
 
 ## 11. AG-UI 事件、monitor 与 WebSocket 契约
 

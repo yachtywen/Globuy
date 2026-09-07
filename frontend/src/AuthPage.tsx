@@ -1,6 +1,6 @@
 import { Check, Eye, EyeSlash, GlobeHemisphereWest } from "@phosphor-icons/react";
 import { FormEvent, useMemo, useRef, useState } from "react";
-import { ApiClientError, authApi, type AuthUser } from "./api";
+import { ApiClientError, authApi, randomId, type AuthUser } from "./api";
 import heroIllustration from "./assets/globuy-hero.webp";
 import brandMark from "./assets/globuy-mark.webp";
 
@@ -57,7 +57,7 @@ export function AuthPage({ onAuthenticated }: { onAuthenticated: (user: AuthUser
       let response;
       if (mode === "login") response = await authApi.login(email, password);
       else {
-        registrationKey.current ||= crypto.randomUUID();
+        registrationKey.current ||= randomId();
         response = await authApi.register(email, password, String(form.get("display_name") || "").trim(), registrationKey.current);
       }
       const verified = await authApi.me();

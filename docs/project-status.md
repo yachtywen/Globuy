@@ -1,4 +1,92 @@
 # globuy 项目状态
+
+> 最后更新时间：2026-09-07
+> 当前口径：商品检索只使用 PostgreSQL 候选集 + 请求内 FAISS；长期记忆只使用 PostgreSQL/pgvector。两者共用冻结 `BAAI/bge-small-zh-v1.5` 512 维本地 ONNX INT8 编码（用户 2026-09-06 批准），向量空间仍严格隔离。下方更早日期中关于 OpenSearch、CategoryInsight、商品索引 Outbox、三塔和 BGE-M3/1024d 记忆的描述仅是历史记录，不再代表当前实现。
+
+# 2026-09-07：真实链路复现定位“Kimi 无法完成商品搜索”并修复三层根因
+
+- 用真实 kimi-k2.6 + 当前代码复现原失败线程 `b31d04d6`（通勤降噪耳机→头戴/TWS→500元）及单轮全约束请求：历史结论“Kimi 反复 goal_explore/需澄清”被推翻——模型其实正确产出 `category_explore(high)`，真正链路在**意图产出之后**断裂。
+- 根因三层（全部实锤）：①planner 的 `ShoppingIntent` 参数是 strict schema（extra=forbid + 必填校验），模型漏填 `category_key/category_name` 或给出 >2 个 `query_variants` 即整调用抛 ToolInvocationError，ToolNode 把晦涩错误文本回给模型；②observe 只在 planner 合法 payload 里解析 intent，错误时静默降级，自动检索与 chat_fallback 拦截护栏双双失效，模型最终把编造清单写进 chat_fallback（原回复“无法直接搜索商品数据库”+5 款带价耳机）；③`AgentState` TypedDict 从未声明 `auto_search` 字段，observe 写入的值被 LangGraph 静默丢弃，确定性自动检索自加入起从未真正触发过。
+- 修复：①`app/tools/planner.py` 重写——入参改用自动生成的宽松镜像 schema（extra=ignore、全字段可空、保留原字段描述），函数内先做确定性最小补齐（缺 category_key/category_name/primary_query 从 goal/query 派生；query_variants 等有界列表截断；goal_explore 与 needs_clarification 矛盾自动协调），再对严格 `ShoppingIntent` 做一次 model_validate；仍不合法返回 `invalid_intent` 状态字典而不是抛异常；修复信息经 `repaired/repaired_fields/degraded_reason` 透出；②`main_agent.py` AgentState 增加 `auto_search` 字段；③`prompts.yml` planner 规则明确 category_explore/exact_product 必须填写 category_key（英文小写下划线键）与 category_name、不得新增 schema 外字段；④middleware chat_fallback 诚实护栏正则扩展“无法搜索/不能搜索/检索工具无法使用/商品数据库”等未验证能力声明；`_result_summary` 增加 repaired 字段。
+- 验证（真实 Kimi/JustOne，授权执行）：修复前 5 次探测 5 连败（tool error→fallback/编造）；修复后单轮「推荐适合通勤的降噪耳机」端到端成功：planner(category_explore)→item_search×3 真实 JustOne 补水（淘宝/京东/抖音真实候选，空目录补水首次端到端跑通）→item_picker(25 组)→shopping_summary 输出带链接/价格/销量的真实清单，无编造；原失败 4 轮复现线程第 3、4 轮（tws的 / 五百元左右把）均以真实 shopping_summary 清单收尾。无付费回归：planner 自愈/未知键容忍/invalid_intent/护栏改写等新增用例 + test_framework/test_item_search_tool/test_catalog_hydration/test_dispatch_tool/test_completion_loop/test_intent_routing 全部通过，Ruff/compileall 通过。
+- 剩余已知问题（如实记录）：上一轮修复后同一类“LLM 产参过严 schema”问题在 `item_picker` 复现（`PickerCandidate extra=forbid`，模型把 item_search 富字段原样回传时偶发 ToolInvocationError）。已按 planner 同模式修复：LLM 版 `item_picker` 入参改为宽松 dict，函数内逐条容错解析（坏条目丢弃计数、constraints/intent 无法解析时忽略），`PickerCandidate` 改 `extra=ignore`；新增富字段回传/坏条目丢弃/非法 intent 三类离线用例。修复后真实链路成功完整跑通：planner → item_search×3 → item_picker(14 组) → shopping_summary 输出真实清单（竹林鸟 99 元等，带链接/店铺/销量）。
+- 本轮新观察：Moonshot（api.moonshot.cn）今日对大体量结构化调用间歇性服务端慢/挂起——10:04 UI run 的 reflect 单次 294s 触发 300s 主任务超时（AGENT_RUN_FAILED）；随后多次真实探测中相同形态请求 120s 超时，而同一窗口内小请求/裸 bind_tools 复刻全部 0.5~7s 正常，判定为上游抖动而非代码问题。已新增兜底：`GLOBUY_LLM_REQUEST_TIMEOUT_SECONDS=120`（默认）+ `GLOBUY_LLM_MAX_RETRIES=1`（ChatOpenAI request_timeout/max_retries），慢调用快速失败并释放主 run 预算，不再干等 300s；.env.example 已同步。
+- 另：探测脚本 `scripts/probe_intent_live.py` 仅作授权排障用，调用真实付费模型/Provider，测试不得依赖它。
+
+# 2026-09-06：真实 UI 链路联调与商品检索护栏修复
+
+- 用户真实使用暴露并修复：纯 `http://` 下 `crypto.randomUUID()` 不可用导致注册请求从未发出（已修并重新构建上线）；此后注册/登录/建会话/任务/WebSocket 事件/RUN 终态落库完整链路复测通过。
+- 排查确认“系统正在维护中”并非系统状态：JustOne 真实 Provider 三平台烟测均 `ok/business_code=0`（淘宝10/京东48/抖音30 条）；文案是 Kimi 在检索未发生时自编的。
+- 新增确定性护栏（`app/agent/middleware.py` + `app/agent/main_agent.py`）：①chat_fallback 与 item_picker 在本轮无任何真实检索（无 item_search/dispatch_tool 消息）且意图可执行时被拦截，禁止臆造候选或直接筛选；②chat_fallback 消息不得声称系统维护/故障/服务不可用等未经验证状态；③Planner 产出可执行意图（category_explore/exact_product）且 Provider 已配置时，observe→reflect 由系统按平台自动发起 item_search（不再依赖模型记得调 dispatch_tool）；循环/预算耗尽终态仍放行避免死锁。提示词同步补两条禁臆造/禁编系统状态。
+- 定向回归：`test_completion_loop + test_framework + test_intent_routing` 通过；全量回归另行记录。
+- 剩余差距（如实记录）：Kimi 对“品类+预算已明确”的请求仍间歇产出 `goal_explore/needs_clarification`，导致自动检索不触发并落到诚实兜底；修复方向是更确定性的意图解析/提示词，需下一轮验证。建议现阶段消息尽量含具体品牌或型号（exact 路径更稳）。
+
+# 2026-09-06：前端生产构建同端口托管（6412）
+
+- 前端以生产构建方式托管在 API 同一端口：`frontend/node_modules` 原为 Windows 平台副本（`@esbuild` 只有 win32-x64），已用 `npm ci`（npmmirror）按 Linux 重装；`npm run build` 成功（15.6s，产物 `frontend/dist` 12MB）。
+- `app/api/server.py` 新增：`frontend/dist` 存在时以 `StaticFiles(html=True)` 挂载在根路由之后；浏览器（Accept 含 text/html）访问 `/` 返回 UI 的 index.html，API 客户端仍得到原有 JSON 系统信息。UI/API/WebSocket 全部同源、同端口 6412，无需 CORS。
+- 已验证：`/`（浏览器 Accept）→ 200 text/html `<title>globuy Agent Console</title>`；默认 Accept → JSON 系统信息不变；`/assets/*.js` → 200；`/healthz`、`/docs` → 200；对外端口仍只需 6412 一个。
+- 前端代码改动后的重新发布：`cd frontend && npm run build`，再重启 API 即可（`dist` 已 gitignore）。
+- 静态托管微调：根路由静态挂载改为仅响应 GET/HEAD，其余方法仍返回 404，避免把已删除的 `/api/v1/memories` 等路径从 404 变成 405（`tests/test_mysql_persistence.py::test_authenticated_user_data_flow` 回归修复）。
+- 修复：纯 `http://`（非安全上下文）下 `crypto.randomUUID()` 不可用，导致注册/建会话/心愿库在发请求前就抛错（表现为“操作失败，请稍后重试”且后端日志无任何 POST）。`src/api.ts` 新增 `randomId()`（`randomUUID` 特性检测 + `getRandomValues` 回退的 UUID v4），`AuthPage.tsx`、`ProductResults.tsx`、`requestId()` 均改为调用它；已重新构建上线。
+
+# 2026-09-06：对外访问端口固定为 6412
+
+- 因该服务器后续还会部署其他项目，API 对外端口固定为 `6412`：`.env` 改为 `GLOBUY_HOST=0.0.0.0`、`GLOBUY_PORT=6412`，`compose.yaml` 的 api 服务 `GLOBUY_PORT` 与 `ports` 同步改为 6412。
+- 已重启 API 并验证：监听 `0.0.0.0:6412`，`http://127.0.0.1:6412/healthz` 与内网 `http://172.27.77.248:6412/healthz` 均返回 `status=ok/database=ok`；原 8000 端口已停用。
+- PostgreSQL（5433）与 Redis（6379）仍只作为本项目基础设施监听本机/内网，不直接对外；后续项目可自行分配端口互不冲突。
+- 本机无 UFW/iptables 拦截；如需公网访问，请在阿里云安全组放行 TCP 6412。
+
+# 2026-09-06：长期记忆编码统一为 BGE-small 512d（用户明确批准）
+
+- 用户明确要求长期记忆链路也统一使用商品候选的 512 维模型，替换原固定的 BGE-M3 1024d。已同步更新 `app/config.py`（模型名/维度/设备默认值）、`app/database/models.py`（`MEMORY_VECTOR_TYPE=Vector(512)`）、`.env`/`.env.example`、`README.md`、`docs/vector-infrastructure.md` 与 `codex/codex.md` 契约表述。
+- 重写 `app/search/encoder.py`：原 `BgeM3Encoder`（torch + 在线下载 BGE-M3）替换为 `LocalOnnxEmbeddingEncoder`，复用仓库内 `data/models/bge-small-zh-v1.5-onnx-int8` 的 ONNX INT8 产物在 CPU 推理，512 维归一化，不在线下载/导出模型；`get_embedding_encoder()` 接口保持不变，`app/search/__init__.py` 导出同步更新。记忆 Worker 与召回代码无需改动（只依赖 `EmbeddingEncoder` 协议）。
+- 新增 Alembic `20260906_0008`：把 `memory_embeddings.embedding` 从 `vector(1024)` 改为 `vector(512)`（先删 HNSW 索引、迁移后重建）；存在维度不兼容的旧投影会被移除并打印告警（关键词 lane 保留，向量 lane 需模型切换后由 Outbox 重投影恢复）。本机空库已升级到 `20260906_0008 (head)`。
+- 离线 fake 编码器与评测的维度常量（`tests/test_pg_memory.py`、`app/eval/memory_runner.py`）从 1024 同步为 512。
+- 已在真实 PostgreSQL 17/pgvector(512) 上验证：新编码器输出 `BAAI/bge-small-zh-v1.5@7999e1d3`、512 维、L2=1.0；真实写入 `memory_embeddings` 512 维投影后，用与生产相同的 ORM `cosine_distance` 召回命中（sim=1.0）；验证数据已清理。`compileall` 通过，API 已用新代码重启且 `/healthz` 正常。
+- 本次统一后内存收益：长期记忆向量投影只需 ONNX Runtime 加载约 24MB INT8 模型，不再需要 torch 加载 2.3GB BGE-M3，适合 2C/4G 服务器；语义长度沿用 `GLOBUY_EMBEDDING_MAX_LENGTH=256`（bge-small 上限 512）。
+
+# 2026-09-06：2C/4G 服务器最小可运行环境搭建与首次真实启动
+
+- 服务器初始状态：无 Conda、无 Python 3.11+、无 Docker 容器，只有系统 Python 3.10、原生 PostgreSQL 14（5432，无应用角色）与原生 Redis（6379）。已安装 Miniconda 并创建 Conda `globuy`（Python 3.12.14）；CPU 版 torch 走官方 CPU wheel 索引，其余依赖（含 `-e .[dev]`）走阿里云 PyPI 镜像。`python -m compileall -q app alembic scripts` 通过；torch 2.14.0+cpu、sentence-transformers 5.7、onnxruntime 1.29、faiss-cpu 1.15 等导入正常。
+- 只启动 Docker Compose 的 `postgres` 服务（`pgvector/pgvector:0.8.6-pg17-bookworm`，宿主 5433），复用既有原生 Redis（6379），未启动 compose 的 api/price/memory worker 容器；API 在宿主用 `python -m app.api` 原生运行。`.env` 已按 `.env.example` 重建并合并真实密钥（Kimi、JustOne、IQS、LangFuse、Judge），删除 MySQL/OpenSearch/Tavily/Category 等遗留键，`GLOBUY_DATABASE_POOL_SIZE=4`。
+- 新库迁移发现的部署问题：从零执行 `alembic upgrade head` 会失败——0001 按“clean installs created from current metadata”用 `create_all` 落地当前 ORM 最终 Schema，后续增量迁移（尤其 `20260823_0004`）假设旧中间表 `memory_candidates` 存在，而当前模型已不再定义该表。本机采用仓库设计的全新库基线路径：`alembic upgrade 20260721_0001` 建全量 Schema → 手工补 `ix_memory_entries_keywords_gin`（gin）与 `ix_memory_embeddings_hnsw_cosine`（hnsw vector_cosine_ops）→ `alembic stamp 20260901_0007`。数据库现为 head，27 张应用表 + alembic_version 齐备。
+- 商品 ONNX INT8 产物在本服务器上被传输截断（两个 onnx 文件都是 1.25 MB；Git 内真实体积为 94,835,369 与 24,006,982 字节），已用 `scripts/prepare_candidate_embedding.py`（经 hf-mirror.com 下载源模型）重新导出并做 warmup 验证：`onnx_int8` 后端、512 维、归一化范数 1.0、进程内二次调用缓存命中。
+- 本机 `.git` 有 6 个损坏的 loose object（随仓库复制时截断，均 1,835,008 字节）：4 个未被任何提交引用已删除；`8f10775a…`（qint8 模型，提交于本地未推送的 `a0ba231`）已用字节完全相同的重导出文件重建为有效对象；`dd03988338…`（fp32 `model.onnx`）原始内容在本机与远端均不可恢复（远端 `021ad36` 落后一个提交，不含该 blob），工作区已用功能等价的重导出文件替换。修复前先推送会导致 `git push` 失败，建议用户决定重写本地未推送提交或从原开发机补回该文件（见下方部署差距）。
+- 已用真实配置启动 API：`/healthz` 返回 `status=ok/database=ok`，模型 kimi-k2.6、JustOne、IQS、LangFuse（summary）均按配置识别；注册 → 会话落库写路径烟测通过后已删除 QA 数据。未调用真实模型/Provider/搜索；真实对话任务仍需用户显式授权后执行。
+- 无付费验证结果：全仓 pytest 两轮均收集 204 项、进度 100%、退出码 0（无失败标记，仅一条 Starlette anyio 弃用警告）；`scripts/evaluate_candidate_hybrid.py --dataset datasets/headphones_1000/structured/itemsearch_candidates.jsonl --cases eval/candidate-hybrid-retention.json` 在本地 ONNX INT8 编码器上完整跑通 BM25+FAISS+RRF+分组并输出保留报告。
+- 删除前已存档：仓库根部的 `.tmp`、`.pytest-*`、`.test-tmp*`、`.pytest_cache`、`.ruff_cache` 已打包到 `/root/globuy-archives/gitignored-junk-20260906-100004.tar.gz` 后删除；Conda/Pip/HF 缓存未清理（磁盘余量充足，避免误伤环境）。
+
+# 2026-09-05：部署前清理并收敛为 FAISS 商品搜索与 pgvector 长期记忆
+
+- 商品搜索配置已收敛为唯一 `product_search_backend=faiss`。`ItemSearch` 只从 PostgreSQL 权威目录读取真实候选，Provider 已配置时可先补充目录；明确商品使用可靠身份字段确定性匹配，品类候选统一进入 BM25 + 冻结 BGE-small 512 维 + 请求内 `IndexFlatIP` + 无权重 RRF，最多 36 组后执行一次 LLM 精排。编码失败只对同一候选集做 BM25 降级并发布 `candidate_faiss_degraded`，不得切换其他向量后端。
+- 已删除 OpenSearch 商品检索与建库代码、基础设施客户端、商品投影 Worker/索引生命周期、Compose OpenSearch 服务、相关配置和依赖。商品目录写入与价格刷新不再产生无人消费的 product Outbox 事件；旧投影 Hash/时间字段暂保留在既有 PostgreSQL Schema 中，以避免为部署前清理引入额外的数据迁移。
+- 已移除 CategoryInsight/OpenSearch 知识卡片链、独立索引/Reranker/Redis 缓存及工具注册；业务工具从八个收敛为七个。Redis 仅保留为可选登录失败限流，不参与商品检索或记忆。
+- 已删除历史三塔哈希编码、持久化 `FaissHNSWIndex` 及示例；保留的商品 FAISS 仅为请求内 `IndexFlatIP`。Docker 镜像复制部署所需的 BGE-small ONNX INT8 产物与 Alembic 文件。
+- 长期记忆保持 LangGraph BaseStore + PostgreSQL/pgvector：BGE-M3 1024 维、关键词 GIN、无权重 RRF、延迟沉淀、180 天审计和 Outbox 投影均未改用商品 FAISS；OpenSearch 不参与记忆。
+- 本轮目标是可直接部署的项目清理，不包含历史 MySQL 数据搬运：已移除一次性 MySQL→PostgreSQL 迁移脚本、迁移专用 `asyncmy` 依赖及操作文档。旧变更记录中的迁移描述仅作历史背景，不是当前部署步骤。
+- 清理了 OpenSearch/CategoryInsight 专用测试和已失效实施计划，并重写 README、向量契约、Compose 与示例配置。缓存、临时测试目录和构建残留在本轮验证完成后清理。
+- 已完成无付费验证：Ruff 全仓目标与 `compileall` 通过；后端全量 209 项通过；前端 Vitest 4 文件 / 19 项通过，TypeScript + Vite 生产构建通过；本地 ONNX INT8 候选编码器真实 warmup 成功并返回 512 维元数据；`docker-compose config -q` 返回成功。未调用真实模型、商品 Provider、网页搜索或云服务。
+- 已删除可访问的 pytest/ruff 缓存、旧评测输出、日志、QA 会话目录、构建目录和 `globuy.egg-info`。26 个历史 pytest 临时目录受宿主 Windows ACL 拒绝访问，即使申请提升权限并尝试取得所有权仍无法删除；它们均已由 `.gitignore` 与 `.dockerignore` 排除，不会进入 Git 或部署镜像。
+
+# 2026-09-01：长期记忆改为 Thread 延迟沉淀与时间软衰减
+
+- 已固定 Thread/Run/Session 边界：Thread 持续存在，Run 对应一次用户输入，Session 仅表示同一 Thread 内 15 分钟连续活动。成功 Run 在完成事务中只更新 `memory_consolidation_states`；累计 10 个成功 Run、空闲 15 分钟或归档时到期。失败/取消不计入窗口但会推迟已有空闲截止时间。
+- 新增独立 `MemoryConsolidationWorker`：按 ordinal 快照领取最多 10 个成功 Run，并携带游标前 4 条只读上下文；提取结果使用稳定 `fact_index/memory/keywords`，每个 fact 必须恰有一个 ADD/UPDATE/DELETE/NONE。冲突检索不衰减，临时整数 ID、用户归属、重复目标和整批动作在写入前原子校验。租约支持进程恢复，失败按 1/5/30 分钟三档重试后 dead，并提供 thread 运维重投命令。
+- `memory_entries` 新增 `last_confirmed_at` 并移除运行时 `status/deleted_at`。ADD/UPDATE 与重复 `NONE + id` 刷新确认时间；普通召回不刷新。精确 Hash 重复转换为确认，用户级 SHA-256 唯一约束和嵌套事务覆盖并发 ADD；关键词由 LLM 最多 8 个别名与确定性分词/静态领域别名合并，校验去重后最多 32 个，Embedding 仍只编码原始 `memory`。
+- Agent 召回继续使用 PostgreSQL/pgvector BGE-M3 1024 维与关键词无权重 RRF，融合后按确认年龄线性乘以 1.0→0.6（180 天封底），只重排不筛除；冲突召回不衰减。DELETE 在写只读审计的同一事务中物理删除当前态，向量外键级联删除；不再提供恢复或撤销，历史由 Worker 每日清理 180 天前记录。
+- Memory Outbox 增加租约恢复、8 档 5～600 秒指数退避、dead-letter 和事件重投命令，投影失败不回滚当前记忆，成功幂等 upsert。Compose 新增 `memory-consolidation-worker`，不引入 Kafka/RabbitMQ。
+- 所有 `/api/v1/memories` 路由、TaskResult 的 `memory_status/memory_changes`、用户侧 memory 事件、账户页记忆区域、商品结果通知和撤销入口已删除。Alembic head 更新为单向 `20260901_0007`，要求备份确认并输出当前记忆、历史、向量迁移前后数量及 Hash manifest。
+- 当前无付费统一门禁 `output/test-runs/delayed-memory-20260901/manifest.json` 全部通过：全仓 Ruff 与 compileall 通过，后端 `236 passed, 1 skipped`，shopping offline `6/6 PASS`，长期记忆离线评测 `4/4 PASS`，前端 Vitest `4 files / 19 tests PASS`，TypeScript/Vite 生产构建通过。本轮未执行真实 PostgreSQL 迁移或调用付费模型/商品 Provider。
+
+# 2026-09-01：长期记忆简化为 mem0 风格纯文本动作管线
+
+- 长期记忆运行时已一次性移除 `slot/category/key/subject/predicate/scope/confidence`、黑名单特殊语义、候选确认、强化与软衰减；成功 run 独立执行“提取事实 → 相关旧记忆召回 → ADD/UPDATE/DELETE/NONE 决策 → 原子校验写入”，失败或取消 run 不处理，记忆失败 fail-open。
+- 新核心表只保存当前纯文本、来源、状态和线性版本；`memory_history` 记录 `ADD/UPDATE/DELETE/UNDO/LEGACY_IMPORT` 及对应版本，撤销与历史排序不依赖时间戳精度。Alembic head 为 `20260901_0006`，迁移 active 原文并打印迁移前后数量和 SHA-256 manifest；旧 archived/deleted、版本与 pending 候选只写审计，不重新激活。该迁移依赖执行前备份，明确不支持降级重建旧 slot 语义。
+- 检索继续固定为 LangGraph BaseStore + PostgreSQL/pgvector + BGE-M3 1024 维 + 关键词 GIN + 无权重 RRF；语义文本改为 `memory`，Embedding 仍由 Outbox 异步投影。已移除全量黑名单、scope 排序、confidence 乘数和时间衰减，删除项不参与召回，向量元数据不兼容时保留关键词降级。
+- API 简化为当前记忆列表、纯文本新增/修改、软删除、历史和单次撤销；删除候选、确认、拒绝、归档恢复接口。TaskResult 使用脱敏 `memory_changes`，新增四类可重放 memory processing/change 事件；个人中心仅展示当前文本、编辑、删除、历史与撤销，自动变更后提供通知和撤销入口。
+- 测试和评测已改用 Fake Encoder/Fake Memory Manager，覆盖精确去重、原位 UPDATE、DELETE、UNDO、同时间戳版本顺序、跨用户伪造 ID、重复目标整批零写入、临时/敏感事实过滤、成功 run 自动处理、失败 fail-open、事件重放、投影和删除后不可召回。未调用真实付费模型或商品 Provider；后端全量 224 项通过，纯文本记忆离线回归连续两次 `4/4 PASS`，Ruff/compileall 通过，前端 Vitest 4 文件 20 项和 TypeScript/Vite 生产构建通过。
+
 ## 2026-08-29：完成三级意图路由与请求内临时 FAISS Hybrid
 
 - `ShoppingIntent` 已增加 `exact_product/category_explore/goal_explore`、置信度、稳定商品身份、Provider/词法/语义三类查询和 0～2 轮澄清计数。Planner 不再因已有预算自动取消模型明确提出的澄清；目标探索在收敛到一个主品类前由 Harness 阻止平台 fork 和 Provider 调用。

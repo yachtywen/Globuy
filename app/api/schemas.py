@@ -109,30 +109,3 @@ class UpdateWishlistItemRequest(StrictModel):
     status: Literal["active", "removed", "purchased"] | None = None
     target_price: Decimal | None = Field(default=None, ge=0)
     note: str | None = Field(default=None, max_length=1000)
-
-
-class CreateMemoryRequest(StrictModel):
-    category: Literal["blacklist", "preference", "history"]
-    key: str = Field(min_length=1, max_length=128)
-    content: str = Field(min_length=1, max_length=4000)
-    confidence: Decimal = Field(default=Decimal("1"), ge=0, le=1)
-    source_thread_id: str | None = Field(default=None, pattern=ID_PATTERN)
-    source_run_id: str | None = Field(default=None, pattern=ID_PATTERN)
-    subject: str | None = Field(default=None, max_length=128)
-    predicate: str | None = Field(default=None, max_length=64)
-    value_json: Any | None = None
-    polarity: Literal["positive", "negative"] | None = None
-    scope_type: Literal["global", "category", "brand", "product"] | None = None
-    scope_value: str | None = Field(default=None, max_length=128)
-
-
-class UpdateMemoryRequest(StrictModel):
-    category: Literal["blacklist", "preference", "history"] | None = None
-    content: str | None = Field(default=None, min_length=1, max_length=4000)
-    confidence: Decimal | None = Field(default=None, ge=0, le=1)
-
-
-class ConfirmMemoryCandidateRequest(StrictModel):
-    category: Literal["blacklist", "preference", "history"] | None = None
-    key: str | None = Field(default=None, min_length=1, max_length=128)
-    content: str | None = Field(default=None, min_length=1, max_length=4000)

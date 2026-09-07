@@ -1,9 +1,22 @@
-"""Frozen dense-embedding adapters used by indexing and ItemSearch."""
+"""Long-term-memory embedding adapter backed by the local BGE-small ONNX artifact.
+
+The product-candidate FAISS chain and the pgvector long-term-memory chain now share
+the same frozen ``BAAI/bge-small-zh-v1.5`` encoder (512d, normalized). Memory vectors
+live only in PostgreSQL/pgvector; candidate vectors live only inside a single request's
+transient FAISS index. The two vector stores stay strictly separate even though the
+model is unified.
+
+Inference uses the deployment-prepared ONNX INT8 artifact under
+``GLOBUY_CANDIDATE_EMBEDDING_ONNX_PATH`` on CPU. Requests and workers never download,
+export or quantize a model.
+"""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 from app.config import Settings, get_settings
@@ -15,7 +28,7 @@ class EmbeddingMetadata:
     revision: str
     dimensions: int
     normalized: bool = True
-    semantic_text_version: str = "product-title-stable-attrs-v1"
+    semantic_text_version: str = "memory-text-v2"
 
 
 class EmbeddingEncoder(Protocol):
@@ -27,16 +40,8 @@ class EmbeddingEncoder(Protocol):
     def encode_query(self, text: str) -> list[float]: ...
 
 
-def _load_local_first(factory, model_name: str, **model_kwargs):
-    """Load a cached model offline, downloading only when the cache is absent."""
-    try:
-        return factory(model_name, local_files_only=True, **model_kwargs)
-    except OSError:
-        return factory(model_name, **model_kwargs)
-
-
-class BgeM3Encoder:
-    """Lazy local inference for the frozen BAAI/bge-m3 model."""
+class LocalOnnxEmbeddingEncoder:
+    """Lazy CPU inference over the local BGE-small ONNX INT8 artifact (512d)."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -47,40 +52,37 @@ class BgeM3Encoder:
         if self._model is not None:
             return self._model
         try:
-            import torch
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise RuntimeError(
-                "缺少 sentence-transformers；请安装项目检索依赖后再构建商品索引"
+                "缺少 sentence-transformers；请安装项目检索依赖后再启用记忆向量 lane"
             ) from exc
 
-        requested = self.settings.embedding_device
-        device = (
-            "cuda"
-            if requested == "auto" and torch.cuda.is_available()
-            else "cpu"
-            if requested == "auto"
-            else requested
-        )
-        model_kwargs = {
-            "revision": self.settings.embedding_model_revision,
-            "device": device,
-        }
-        # A built index must remain queryable without Hugging Face network access.
-        # The first index build falls back to the normal download path when the
-        # requested snapshot is not present in the local cache yet.
-        model = _load_local_first(
-            SentenceTransformer,
-            self.settings.embedding_model_name,
-            **model_kwargs,
+        model_path = Path(self.settings.candidate_embedding_onnx_path)
+        if not model_path.exists():
+            raise RuntimeError(
+                "local BGE-small ONNX INT8 artifact is missing: "
+                f"{model_path}（长期记忆与商品候选共用该产物）"
+            )
+        model = SentenceTransformer(
+            str(model_path),
+            backend="onnx",
+            device="cpu",
+            local_files_only=True,
+            model_kwargs={"file_name": self.settings.candidate_embedding_onnx_file},
         )
         model.max_seq_length = self.settings.embedding_max_length
-        if device == "cuda":
-            model.half()
-        config = getattr(getattr(model, "_first_module", lambda: None)(), "auto_model", None)
-        config = getattr(config, "config", None)
-        self._resolved_revision = str(
-            getattr(config, "_commit_hash", None) or self.settings.embedding_model_revision
+        manifest_path = model_path / "candidate_embedding_manifest.json"
+        manifest_revision = None
+        if manifest_path.exists():
+            try:
+                manifest_revision = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                ).get("resolved_revision")
+            except (OSError, ValueError, TypeError):
+                manifest_revision = None
+        self._resolved_revision = (
+            manifest_revision or self.settings.embedding_model_revision
         )
         self._model = model
         return model
@@ -105,7 +107,9 @@ class BgeM3Encoder:
         )
         result = vectors.tolist()
         if any(len(vector) != self.settings.embedding_dimensions for vector in result):
-            raise ValueError("BGE-M3 输出维度与 GLOBUY_EMBEDDING_DIMENSIONS 不一致")
+            raise ValueError(
+                "bge-small ONNX 输出维度与 GLOBUY_EMBEDDING_DIMENSIONS 不一致"
+            )
         return result
 
     def encode_documents(self, texts: list[str]) -> list[list[float]]:
@@ -116,5 +120,5 @@ class BgeM3Encoder:
 
 
 @lru_cache(maxsize=1)
-def get_embedding_encoder() -> BgeM3Encoder:
-    return BgeM3Encoder(get_settings())
+def get_embedding_encoder() -> LocalOnnxEmbeddingEncoder:
+    return LocalOnnxEmbeddingEncoder(get_settings())

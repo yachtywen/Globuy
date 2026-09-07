@@ -46,8 +46,8 @@ sequenceDiagram
 - 商品卡片只在 `rating`、`sales` 非 `null` 时展示相应字段；缺失值不显示“未提供”等占位文案。
 - 当前搜索快照基本没有可核验的运费，前端统一不展示 `shipping_fee` 或 `total_cost`。字段仍保留在
   后端工具契约中，供将来获得可核验费用时使用，不能按 0 元推断。
-- 长期记忆只有 BaseStore 接口位。`learned_preferences` 是待持久化结构，不得显示为“已记住”。
-- 本接口不改变 ItemSearch、CategoryInsight、fork 深度或 ShoppingSummary 的既有实现边界。
+- 长期记忆只供 Agent 内部召回与后台延迟沉淀；前端没有记忆 API、字段、通知或管理界面。
+- 本接口不改变 FAISS ItemSearch、fork 深度或 ShoppingSummary 的既有实现边界。
 
 ## 2. 当前实现与目标接口的区别
 
@@ -186,8 +186,7 @@ ID，否则浏览器会订阅错误会话。`run_id` 永远由后端生成。
   "earliest_available_sequence": 1,
   "terminal_event": null,
   "result": null,
-  "artifacts": [],
-  "memory_status": "not_configured"
+  "artifacts": []
 }
 ```
 
@@ -449,8 +448,6 @@ export type TaskResult = {
   final_text: string;
   picks: PickedItem[];
   unresolved: string[];
-  learned_preferences: PreferenceCandidate[];
-  memory_status: "not_configured" | "interface_only";
   source_kind: "offline_snapshot";
   artifacts: Artifact[];
 };
@@ -473,8 +470,8 @@ export type PickedItem = {
 };
 ```
 
-`learned_preferences` 当前只能标为“本次识别、尚未持久化”。`source_kind="offline_snapshot"` 必须
-在结果区持续可见。商品外链使用 `target="_blank" rel="noopener noreferrer nofollow"`。
+`source_kind="offline_snapshot"` 必须在结果区持续可见。商品外链使用
+`target="_blank" rel="noopener noreferrer nofollow"`。
 
 ## 11. 错误响应
 
