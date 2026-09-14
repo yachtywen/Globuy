@@ -41,3 +41,7 @@ datasets/headphones_1000/raw/
 datasets/headphones_1000/reports/
 datasets/headphones_1000/state/
 datasets/headphones_1000/structured/
+
+# 部署期生成的 ONNX 模型产物（scripts/prepare_candidate_embedding.py），不入库
+data/models/**/*.onnx
+data/models/**/onnx/
