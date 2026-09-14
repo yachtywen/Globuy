@@ -45,3 +45,9 @@ datasets/headphones_1000/structured/
 # 部署期生成的 ONNX 模型产物（scripts/prepare_candidate_embedding.py），不入库
 data/models/**/*.onnx
 data/models/**/onnx/
+
+# 环境变量文件：只允许 *.env.example 入库，其它一律忽略
+.env
+.env.*
+!.env.example
+!*.env.example

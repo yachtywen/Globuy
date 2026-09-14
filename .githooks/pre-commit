@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 阻止把 .env / 真实密钥提交进仓库（即使 git add -f 也会被拦下）
+# 启用方式：git config core.hooksPath .githooks
+blocked=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null \
+  | grep -E "(^|/)\.env($|\.)" | grep -vE "\.(example|sample|template)$" || true)
+if [ -n "$blocked" ]; then
+  echo "❌ 拒绝提交：检测到 .env 类文件（只允许 *.env.example）" >&2
+  echo "$blocked" | sed "s/^/   /" >&2
+  exit 1
+fi
+secrets=$(git diff --cached -U0 2>/dev/null | grep -E "^\+" \
+  | grep -InE "(sk-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})" || true)
+if [ -n "$secrets" ]; then
+  echo "❌ 拒绝提交：暂存内容里疑似真实密钥" >&2
+  echo "$secrets" | head -5 | sed "s/^/   /" >&2
+  exit 1
+fi
+exit 0
