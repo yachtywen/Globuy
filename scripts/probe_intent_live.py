@@ -172,7 +172,21 @@ async def run_turn_bound(
         try:
             state = await loop._invoke(user_text, thread_id)
         except Exception as exc:  # noqa: BLE001
-            print(f"[{label}] run 异常: {type(exc).__name__}: {exc}")
+            print(f"[{label}] run 异常: {type(exc).__name__}: {str(exc)[:500]}")
+            try:
+                snapshot = await loop.graph.aget_state(
+                    {"configurable": {"thread_id": thread_id}}
+                )
+                for message in (snapshot.values.get("messages") or []):
+                    kind = getattr(message, "type", "?")
+                    name = getattr(message, "name", "") or ""
+                    if kind == "ai" and message.tool_calls:
+                        ids = [str(call.get("id"))[:8] for call in message.tool_calls]
+                        print(f"  snapshot ai(tool_calls={ids}) content={str(message.content)[:120]!r}")
+                    elif kind == "tool":
+                        print(f"  snapshot tool name={name!r} id={str(getattr(message, 'tool_call_id', ''))[:8]}")
+            except Exception as dump_exc:  # noqa: BLE001
+                print(f"  (快照失败: {dump_exc})")
             return
         wall = time.perf_counter() - started
         for message in state.get("messages", []):
@@ -183,8 +197,21 @@ async def run_turn_bound(
             if kind == "tool":
                 if isinstance(content, str) and content.startswith("Error:"):
                     print(f"  msg[{kind}] name={name!r} content(尾部1500)={text[-1500:]}")
+                elif name in {"item_picker", "shopping_summary"}:
+                    print(f"  msg[{kind}] name={name!r} content(全文)={text}")
+                elif name == "item_search" and isinstance(content, str) and content.startswith("{"):
+                    try:
+                        payload = json.loads(content)
+                        cands = payload.get("candidates") or []
+                        url_ok = sum(1 for c in cands if str(c.get("product_url") or "").startswith("http"))
+                        keys = sorted(cands[0].keys()) if cands else []
+                        print(f"  msg[{kind}] item_search platform={payload.get('platform')} "
+                              f"candidates={len(cands)} has_url={url_ok} status={payload.get('status')} keys={keys}")
+                    except (ValueError, TypeError):
+                        print(f"  msg[{kind}] name={name!r} content={text[:360]}")
                 else:
-                    print(f"  msg[{kind}] name={name!r} content={text[:360]}")
+                    limit = 2400 if name in {"planner", "item_picker", "chat_fallback"} else 360
+                    print(f"  msg[{kind}] name={name!r} content={text[:limit]}")
         intent = _planner_intent(state)
         if intent:
             digest = _intent_digest(intent)

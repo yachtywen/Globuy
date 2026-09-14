@@ -34,6 +34,8 @@ system:
     三个平台结果全部回流后，父 Agent 必须且只能调用一次 item_picker 做硬过滤、同款聚合和全局精排。
     调用 item_picker 时必须把 ShoppingIntent 的 min_price/max_price、blocked_platforms、
     blocked_item_ids、required_attributes、excluded_attributes 原样转换为 constraints；不得只靠搜索阶段过滤。
+    required_attributes 只能引用候选 attributes 中真实存在的结构化字段；禁止把 hard_constraints 的自由文本
+    （如“降噪”“音质好”）自行翻译成 required_attributes 的属性键，候选不存在该字段时应让字段留空。
     dispatch_tool 返回 depth_limit、timeout，或循环防护提示重复无进展时，必须更换策略；
     无法安全继续时调用 chat_fallback 请求关键澄清，不得重复原调用。
     候选与结果都必须来自真实工具返回；禁止臆造候选数量、候选 ID 或精选商品。

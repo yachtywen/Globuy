@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import time
 import unicodedata
@@ -14,7 +15,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
@@ -124,7 +125,8 @@ class ItemPickerOutput(BaseModel):
 
 
 class RerankAssessment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # 模型输出只做引导：多余字段忽略、枚举在 _coerce_assessment 里归一化。
+    model_config = ConfigDict(extra="ignore")
     product_group_id: str
     relevance: Literal["exact", "high", "medium", "low"]
     preference_fit: Literal["strong", "partial", "unknown"]
@@ -146,7 +148,8 @@ class RerankAssessment(BaseModel):
 
 
 class RerankDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # 模型输出只做引导：多余字段忽略，非列表字段由宽松清洗保证。
+    model_config = ConfigDict(extra="ignore")
     ordered_group_ids: list[str] = Field(min_length=1, max_length=36)
     assessments: list[RerankAssessment] = Field(default_factory=list, max_length=36)
 
@@ -547,19 +550,34 @@ def _rerank_payload(groups: list[CandidateGroup]) -> list[dict[str, Any]]:
     ]
 
 
-def _validate_decision(
-    decision: RerankDecision, groups: list[CandidateGroup]
-) -> tuple[list[CandidateGroup], dict[str, RerankAssessment]]:
-    by_id = {group.product_group_id: group for group in groups}
-    ordered = decision.ordered_group_ids
-    if len(ordered) != len(set(ordered)) or any(group_id not in by_id for group_id in ordered):
-        raise ValueError("LLM rerank returned duplicate or unknown product_group_id")
-    assessments = {item.product_group_id: item for item in decision.assessments}
-    if len(assessments) != len(decision.assessments) or any(
-        key not in by_id for key in assessments
-    ):
-        raise ValueError("LLM rerank assessment references an invalid product group")
-    allowed_fields = {
+_RERANK_ENUM_VALUES: dict[str, frozenset[str]] = {
+    "relevance": frozenset({"exact", "high", "medium", "low"}),
+    "preference_fit": frozenset({"strong", "partial", "unknown"}),
+    "specification_fit": frozenset({"strong", "partial", "unknown"}),
+    "value": frozenset({"strong", "fair", "weak", "unknown"}),
+    "evidence_quality": frozenset({"high", "medium", "low"}),
+    "confidence": frozenset({"high", "medium", "low"}),
+}
+_RERANK_ENUM_FALLBACK: dict[str, str] = {
+    "relevance": "medium",
+    "preference_fit": "unknown",
+    "specification_fit": "unknown",
+    "value": "unknown",
+    "evidence_quality": "low",
+    "confidence": "medium",
+}
+_RERANK_RISK_CODES = frozenset(
+    {
+        "missing_rating",
+        "missing_sales",
+        "missing_model",
+        "stale_candidate",
+        "possible_duplicate",
+        "weak_preference_evidence",
+    }
+)
+_RERANK_EVIDENCE_FIELDS = frozenset(
+    {
         "title",
         "price",
         "platforms",
@@ -570,13 +588,129 @@ def _validate_decision(
         "evidence_completeness",
         "possible_duplicate",
     }
-    if any(
-        field not in allowed_fields
-        for item in assessments.values()
-        for field in item.evidence_fields
-    ):
-        raise ValueError("LLM rerank referenced an unavailable evidence field")
-    return [by_id[group_id] for group_id in ordered], assessments
+)
+
+
+def _coerce_enum(value: Any, field: str) -> str:
+    allowed = _RERANK_ENUM_VALUES[field]
+    fallback = _RERANK_ENUM_FALLBACK[field]
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in allowed:
+            return candidate
+        for token in allowed:
+            if token in candidate or candidate in token:
+                return token
+    return fallback
+
+
+def _coerce_assessment(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    group_id = raw.get("product_group_id")
+    if not isinstance(group_id, str) or not group_id.strip():
+        return None
+    return {
+        "product_group_id": group_id,
+        "relevance": _coerce_enum(raw.get("relevance"), "relevance"),
+        "preference_fit": _coerce_enum(raw.get("preference_fit"), "preference_fit"),
+        "specification_fit": _coerce_enum(raw.get("specification_fit"), "specification_fit"),
+        "value": _coerce_enum(raw.get("value"), "value"),
+        "evidence_quality": _coerce_enum(raw.get("evidence_quality"), "evidence_quality"),
+        "confidence": _coerce_enum(raw.get("confidence"), "confidence"),
+        "evidence_fields": [
+            str(item)
+            for item in (raw.get("evidence_fields") or [])
+            if isinstance(item, (str, int)) and str(item) in _RERANK_EVIDENCE_FIELDS
+        ][:8],
+        "risk_codes": [
+            str(item)
+            for item in (raw.get("risk_codes") or [])
+            if isinstance(item, str) and item in _RERANK_RISK_CODES
+        ],
+    }
+
+
+def _coerce_decision(raw: Any) -> RerankDecision | None:
+    """Lenient parse of LLM rerank output into a valid RerankDecision.
+
+    Unknown keys are dropped, enum values normalized, assessments backfilled with
+    neutral defaults, and ordered ids deduplicated/bounded. Returns None only when
+    the output contains no usable ordering at all.
+    """
+    if not isinstance(raw, dict):
+        return None
+    ordered_raw = raw.get("ordered_group_ids")
+    ordered: list[str] = []
+    if isinstance(ordered_raw, list):
+        for item in ordered_raw:
+            if isinstance(item, str) and item.strip() and item not in ordered:
+                ordered.append(item)
+    ordered = ordered[:36]
+    if not ordered:
+        return None
+    assessments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in (raw.get("assessments") or []):
+        coerced = _coerce_assessment(item)
+        if coerced is not None and coerced["product_group_id"] not in seen:
+            seen.add(coerced["product_group_id"])
+            assessments.append(coerced)
+        if len(assessments) >= 36:
+            break
+    try:
+        return RerankDecision.model_validate(
+            {"ordered_group_ids": ordered, "assessments": assessments}
+        )
+    except ValidationError:
+        return None
+
+
+async def _lenient_rerank_decision(
+    model: BaseChatModel,
+    messages: list[BaseMessage],
+    model_config: dict[str, Any],
+) -> RerankDecision | None:
+    """One plain-JSON retry when the strict function-calling parse failed."""
+    try:
+        reminder = SystemMessage(
+            content=(
+                "只输出一个 JSON 对象，不要 Markdown 代码块或注释。"
+                "ordered_group_ids 必须从候选 product_group_id 中按优先级选出；"
+                "assessments 的 relevance 只能取值 exact/high/medium/low，"
+                "preference_fit/specification_fit/value 的 unknown 以外取值见字段说明。"
+            )
+        )
+        reply = await model.ainvoke(
+            [messages[0], reminder, *messages[1:]],
+            config=model_config,
+        )
+        content = reply.content
+        if not isinstance(content, str):
+            content = str(content)
+        start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        return _coerce_decision(json.loads(content[start : end + 1]))
+    except Exception:
+        return None
+
+
+def _validate_decision(
+    decision: RerankDecision, groups: list[CandidateGroup]
+) -> tuple[list[CandidateGroup], dict[str, RerankAssessment]]:
+    """Sanitize an LLM rerank decision against the real group set instead of
+    rejecting it: drop duplicate/unknown ids and keep usable assessments."""
+    by_id = {group.product_group_id: group for group in groups}
+    ordered: list[CandidateGroup] = []
+    for group_id in decision.ordered_group_ids:
+        if group_id in by_id and group_id not in {item.product_group_id for item in ordered}:
+            ordered.append(by_id[group_id])
+    assessments: dict[str, RerankAssessment] = {}
+    for item in decision.assessments:
+        if item.product_group_id in by_id and item.product_group_id not in assessments:
+            assessments[item.product_group_id] = item
+    return ordered, assessments
 
 
 @lru_cache(maxsize=1)
@@ -615,9 +749,55 @@ def build_item_picker_tool(
         items, dropped_candidates = _parse_picker_items(items or [])
         constraints = _parse_constraints(constraints)
         shopping_intent = _parse_intent(shopping_intent)
+        if os.environ.get("PROBE_DEBUG_ITEMS") == "1":
+            for index, probe_item in enumerate(items[:50]):
+                reason = _hard_failure(probe_item, constraints or PickerConstraints())
+                print(
+                    f"[debug-picker] #{index} id={probe_item.item_id!r} "
+                    f"plat={probe_item.platform!r} url={(probe_item.product_url or '')[:36]!r} "
+                    f"cur={probe_item.currency!r} price={probe_item.price!r} fail={reason}",
+                    flush=True,
+                )
         bounded_limit = max(1, min(limit, 3))
         active_constraints = constraints or PickerConstraints()
+        # Free-text hard constraints (e.g. 降噪功能) are often echoed by the model
+        # as structured required_attributes keys ({"降噪": "是"}) that no provider
+        # attribute actually carries. A required key that exists in NO candidate
+        # cannot discriminate anything; enforcing it only zeroes honest candidates.
+        # Relax only such globally-unverifiable keys (log them); keys that exist in
+        # at least one candidate keep their strict per-item evidence check.
+        relaxed_required: list[str] = []
+        if (
+            active_constraints.required_attributes
+            and items
+            and len(items) >= 2
+        ):
+            available_attr_keys: set[str] = set()
+            for candidate in items:
+                available_attr_keys.update(candidate.attributes)
+            relaxed_required = sorted(
+                key
+                for key in active_constraints.required_attributes
+                if key not in available_attr_keys
+            )
+            if relaxed_required:
+                active_constraints = active_constraints.model_copy(
+                    update={
+                        "required_attributes": {
+                            key: value
+                            for key, value in active_constraints.required_attributes.items()
+                            if key not in relaxed_required
+                        }
+                    }
+                )
         groups, rejected, summary = _prepare_groups(items, active_constraints, None)
+        if relaxed_required:
+            note = (
+                "已放宽候选属性中不存在的必需字段："
+                + "、".join(relaxed_required)
+                + "（检索词已覆盖该语义，结构化校验未被放松）"
+            )
+            rejected = [note, *(rejected or [])]
         groups_before_selection = len(groups)
         monitor = current_monitor()
         if monitor is not None:
@@ -826,17 +1006,27 @@ def build_item_picker_tool(
             model_config["run_name"] = "item_picker.rerank"
             model_config["tags"] = [*model_config.get("tags", []), "item_rerank"]
             async with asyncio.timeout(settings.item_rerank_timeout_seconds):
-                response = await structured.ainvoke(
-                    messages,
-                    config=model_config,
-                    **model_request_kwargs(current_thread_id(), model=model),
-                )
-            decision = (
-                response
-                if isinstance(response, RerankDecision)
-                else RerankDecision.model_validate(response)
-            )
+                decision: RerankDecision | None = None
+                try:
+                    response = await structured.ainvoke(
+                        messages,
+                        config=model_config,
+                        **model_request_kwargs(current_thread_id(), model=model),
+                    )
+                    decision = (
+                        response
+                        if isinstance(response, RerankDecision)
+                        else RerankDecision.model_validate(response)
+                    )
+                except Exception:
+                    decision = None
+                if decision is None:
+                    decision = await _lenient_rerank_decision(model, messages, model_config)
+            if decision is None:
+                raise RuntimeError("LLM rerank output unusable after lenient retry")
             ordered, assessments = _validate_decision(decision, groups)
+            if not ordered:
+                raise RuntimeError("LLM rerank returned no usable ordering")
             seen = {group.product_group_id for group in ordered}
             ordered.extend(
                 group

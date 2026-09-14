@@ -98,6 +98,11 @@ class LoginRequest(StrictModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class ChangePasswordRequest(StrictModel):
+    email: str = Field(min_length=3, max_length=320)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class AddWishlistItemRequest(StrictModel):
     offer_id: str = Field(min_length=1, max_length=128)
     source_thread_id: str | None = Field(default=None, pattern=ID_PATTERN)

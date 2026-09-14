@@ -20,6 +20,7 @@ import { FormEvent, KeyboardEvent, memo, useCallback, useEffect, useRef, useStat
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { LandingPage } from "./LandingPage";
+import { Filing } from "./Filing";
 import { AccountPage } from "./AccountPage";
 import { AuthPage } from "./AuthPage";
 import { WishlistPage } from "./WishlistPage";
@@ -435,6 +436,7 @@ function WorkbenchPage({ navigate, routeThreadId, user, onLogout }: {
             threads={state.threads}
             viewingId={state.viewingThreadId}
           />
+          <Filing />
         </aside>
 
         <main className="conversation-panel">

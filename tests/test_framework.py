@@ -314,3 +314,83 @@ async def test_llm_item_picker_empty_after_dropping_invalid_entries_is_honest() 
     )
     assert result["status"] == "insufficient_data"
     assert result["picks"] == []
+
+
+def test_rerank_coerce_normalizes_messy_llm_output() -> None:
+    from app.products.grouping import CandidateGroup
+    from app.search.schemas import Candidate
+    from app.tools.item_picker import _coerce_decision, _validate_decision
+
+    messy = {
+        "ordered_group_ids": ["g-2", "g-2", "g-1", "no-such-group", 5],
+        "extra_key": "ignored",
+        "assessments": [
+            {"product_group_id": "g-1", "relevance": "HIGH", "confidence": "medium_confidence",
+             "value": "Strong!", "risk_codes": ["missing_rating", "made_up_code"],
+             "evidence_fields": ["title", "not_a_field"], "extra": 1},
+            {"product_group_id": "g-9"},  # 未知组
+            {"relevance": "high"},  # 缺 product_group_id
+        ],
+    }
+    decision = _coerce_decision(messy)
+    assert decision is not None
+    assert decision.ordered_group_ids == ["g-2", "g-1", "no-such-group"]
+    assert decision.assessments[0].relevance == "high"
+    assert decision.assessments[0].confidence == "medium"  # 归一化回退
+    assert decision.assessments[0].risk_codes == ["missing_rating"]
+
+    def make(group_id: str, title: str, order: int) -> CandidateGroup:
+        candidate = Candidate(
+            item_id=group_id, platform="taobao", title=title, price=1.0, currency="CNY"
+        )
+        return CandidateGroup(
+            product_group_id=group_id,
+            match_method="singleton",
+            representative=candidate,
+            offers=[candidate],
+            input_order=order,
+            possible_duplicate_group_ids=[],
+        )
+
+    groups = [make("g-1", "A", 1), make("g-2", "B", 2)]
+    ordered, assessments = _validate_decision(decision, groups)
+    assert [g.product_group_id for g in ordered] == ["g-2", "g-1"]
+    assert set(assessments) == {"g-1"}
+    assert "no-such-group" not in ordered
+
+
+def test_picker_items_restore_dropped_fields_from_real_search_results() -> None:
+    import json as _json
+
+    from langchain_core.messages import ToolMessage
+
+    from app.agent.middleware import _enrich_picker_items
+
+    search = {
+        "status": "ok",
+        "platform": "taobao",
+        "candidates": [
+            {"item_id": "i1", "platform": "taobao", "product_url": "https://x", "currency": "CNY",
+             "offer_id": "o1"},
+            {
+                "item_id": "i2", "platform": "jingdong", "product_url": "https://jd",
+                "currency": "CNY",
+            },
+        ],
+    }
+    tool_message = ToolMessage(
+        content=_json.dumps(search), name="item_search", tool_call_id="search-1"
+    )
+    items = [
+        {"item_id": "i1", "platform": "taobao", "title": "A", "price": 9.0},  # 模型丢了 URL/币种
+        {"item_id": "i2", "platform": "jingdong", "title": "B", "price": 8.0,
+         "product_url": "https://keep"},
+        {"item_id": "nope", "platform": "douyin", "title": "C", "price": 7.0},  # 查无来源
+    ]
+    enriched, changed = _enrich_picker_items(items, [tool_message])
+    assert changed is True
+    assert enriched[0]["product_url"] == "https://x"
+    assert enriched[0]["currency"] == "CNY"
+    assert enriched[0]["offer_id"] == "o1"
+    assert enriched[1]["product_url"] == "https://keep"
+    assert "product_url" not in enriched[2]

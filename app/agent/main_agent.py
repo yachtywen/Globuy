@@ -643,7 +643,7 @@ class AgentLoop:
                         auto_search = shopping_intent
                 except Exception:
                     auto_search = None
-            return {
+            result: dict[str, Any] = {
                 "phase": phase,
                 "tool_history": recent,
                 "last_observation_digest": recent[-1]["result_digest"] if recent else None,
@@ -653,6 +653,13 @@ class AgentLoop:
                 "catalog_summary": catalog_summary,
                 "auto_search": auto_search,
             }
+            # Close any tool-call group interrupted mid-round before the next model
+            # request (the 400 regression: an assistant tool_calls message without a
+            # matching ToolMessage). Runs every loop, not only at graph start.
+            repaired = repair_incomplete_tool_groups(state.get("messages", []))
+            if repaired is not None:
+                result["messages"] = repaired
+            return result
 
         async def compress(state: AgentState) -> dict[str, Any]:
             update = cache_breakpoint_update(state["messages"])

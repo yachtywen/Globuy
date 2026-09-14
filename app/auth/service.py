@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.errors import ApiError
@@ -254,6 +254,35 @@ class AuthService:
                 await client.delete(self._login_key(normalized_email))
         except Exception:
             return
+
+    async def change_password(self, email: str, new_password: str) -> dict[str, str]:
+        """Set a new password for the account identified by its email.
+
+        Deliberately keyed on email alone (user request): no old password is
+        checked. All existing auth sessions for the account are revoked so the
+        next login must use the new password.
+        """
+
+        normalized = normalize_email(email)
+        now = utc_naive()
+        async with self.database.sessions.begin() as session:
+            user = await session.scalar(
+                select(User)
+                .where(User.email_normalized == normalized)
+                .with_for_update()
+            )
+            if user is None or user.status != "active":
+                raise ApiError(404, "ACCOUNT_NOT_FOUND", "账号不存在或已停用")
+            user.password_hash = self.passwords.hash(new_password)
+            user.version += 1
+            user.updated_at = now
+            await session.execute(delete(AuthSession).where(AuthSession.user_id == user.user_id))
+        await self._clear_failed_logins(normalized)
+        return {
+            "user_id": user.user_id,
+            "email": user.email_normalized,
+            "updated_at": now.isoformat(),
+        }
 
     async def authenticate(self, cookie_value: str | None) -> Principal:
         if not cookie_value or "." not in cookie_value:

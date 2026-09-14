@@ -3,11 +3,40 @@
 > 最后更新时间：2026-09-07
 > 当前口径：商品检索只使用 PostgreSQL 候选集 + 请求内 FAISS；长期记忆只使用 PostgreSQL/pgvector。两者共用冻结 `BAAI/bge-small-zh-v1.5` 512 维本地 ONNX INT8 编码（用户 2026-09-06 批准），向量空间仍严格隔离。下方更早日期中关于 OpenSearch、CategoryInsight、商品索引 Outbox、三塔和 BGE-M3/1024d 记忆的描述仅是历史记录，不再代表当前实现。
 
+# 2026-09-07：前端底部增加 ICP 备案号（蜀ICP备2026047861号-1）
+
+- 用户提供备案号 `蜀ICP备2026047861号-1`，要求“项目下方添加、不改动现有 UI（含对话框）”。新增 `frontend/src/Filing.tsx`（文案链接到工信部 https://beian.miit.gov.cn/），插入点均走正常流/滚动区、不触碰对话面板：工作台左侧历史会话栏底部（`left-panel` 改为 flex column，历史区 `flex:1` 不改变滚动）；登录/注册/重置页与 Landing 页的 entry 区底部；账户页与心愿单页 main 末尾。CSS 全部新增类（`.filing`、`.left-panel` 布局），未改任何既有组件/样式规则。Vitest 4 文件 19 项通过，生产构建成功（bundle `index-CevtnUZw.js`），API 已重启并验证页面与 /healthz 正常。
+
+# 2026-09-07：定位并修复“检索后有真实候选却输出通用兜底”的链路故障（用户线程 b7c69a5d）
+
+- 用户反馈线程 `b7c69a5d…`（query“推荐适合通勤的降噪耳机”）检索触发了、但终态是“当前没有满足条件且可验证的商品候选”。真实链路取证（LangFuse + 复现探针）确认了三层根因，均为实现缺陷而非模型意图问题：
+  1. `item_picker.py` 于 11:38 被并行会话重写为“宽松入参”版本时，新调试钩子（`PROBE_DEBUG_ITEMS`）使用 `os.environ` 但**漏 import os**，导致每次 item_picker 调用都抛 NameError → ToolNode 错误文本 → 观察层无精选 → 通用兜底（修复：补 `import os`，全仓扫描确认无同类漏导）。
+  2. 修掉 NameError 后复现暴露第二层：模型把自由文本硬约束（“降噪功能”）翻译成 `required_attributes {"降噪": …}`，而任何 Provider 候选 attributes（店铺/类目/销量…）都没有该键 → picker 的“必须含可靠字段证据”硬过滤变成零信息过滤，16 个真实候选全被拒 → 空精选（修复：候选 ≥2 且某必需键在整个候选集都不存在（schema 级缺失、无法区分优劣）时，仅放宽该键并写入 `rejected_brief` 说明“检索词已覆盖语义，结构化校验未放松”；键在部分候选中存在时仍严格逐项校验；单候选无证据仍拒绝，保持既有契约）。同时 `prompts.yml` 加规则：禁止把 hard_constraints 自由文本自行翻译成 required_attributes 属性键，候选无该字段时留空。
+  3. 验证过程中出现偶发 OpenAI 400（assistant tool_calls 后缺 ToolMessage），为已知边缘；加固为 `observe` 每轮（而非仅图入口 prepare）执行 `repair_incomplete_tool_groups` 补闭合工具组。
+- 验证：新增生产工具（`build_item_picker_tool`，非测试用旧兼容 `item_picker`）用例——schema 级不可验证键放宽后有精选且带说明、可验证键缺失证据仍拒绝、单候选无证据仍拒绝；test_completion_loop/test_intent_routing/test_framework/test_item_search_tool 全绿，Ruff/compileall 通过。真实链路复测（同一 query，修复后 2 次）：planner(category_explore) → item_search×3（三平台各 15 条真实候选、均带链接）→ item_picker(19 组，LLM 精排 3 款：华为 FreeBuds 7i ¥539 / 森海塞尔 MOMENTUM4 ¥1201 / B&O ¥1369，真实来源链接) → shopping_summary 真实 Markdown 清单，无兜底无编造。
+- 结论：这两轮“通用兜底”是 harness 内两个具体 bug（漏导入、证据键 schema 不匹配），不是“意图识别/护栏过严限制 LLM”；意图分类与防编造护栏在链路中工作正常。
+
+# 2026-09-07：新增“邮箱直改密码”接口（用户要求，单账号自服务）
+
+- 用户遗忘了 globuy 控制台账号 `wenkx0518@gmail.com` 的密码（无 Gmail 找回需求，是应用内账号）。先由运维在真实 PostgreSQL 中用 argon2 直接重置密码（临时密码已交付，存于被 Git 忽略的 `/root/install-logs/globuy-temp-pass.txt`，旧 auth_sessions 已清）。
+- 按用户要求新增接口：`POST /api/v1/auth/change-password`，body 只含 `email` + `new_password`（8–256 字符，与注册同规则）——**不做旧密码校验，直接按邮箱改密**，并吊销该账号全部既有会话、清除 Redis 失败登录计数，改后须用新密码重新登录。账号不存在返回 `404 ACCOUNT_NOT_FOUND`，弱密码 422。
+- 实现位置：`app/api/auth_routes.py`（路由，含风险注释）、`app/auth/service.py::AuthService.change_password`（argon2 重哈希 + version+1 + 会话清理）、`app/api/schemas.py::ChangePasswordRequest`。
+- 安全取舍（如实记录）：该接口被设计为邮箱即可重置，属于用户明确要求的单账号自服务便利；若未来多用户或需要更严格，应改为“登录态 + 旧密码校验”或加验证码/限流，现有登录限流（Redis）不覆盖该接口。
+- 验证：`tests/test_mysql_persistence.py::test_change_password_resets_login_and_revokes_sessions`（sqlite，无付费）：注册→改密→旧密码 401→新密码 200→旧会话吊销；404/422 分支；全文件 6 passed。真实 PostgreSQL 实例重启后在线验证：`/docs` 已列出该路由，422 与 404 行为正确。
+- 前端 UI 补全：账户页新增「SECURITY / 修改密码」表单（`frontend/src/AccountPage.tsx` + `api.ts::authApi.changePassword` + `styles.css`），直接输入邮箱+新密码（两次一致、8–256 位），成功后提示并用新密码重新登录（调 onLogout）。Vitest 4 文件 19 项通过，生产构建成功并重启 API 生效（新 bundle `index-CSg53WVk.js`）。
+- 修正入口位置：账户页表单在登录态之后才可见，对“忘记密码无法登录”的用户形成死循环；因此在登录/注册页（`AuthPage.tsx`）增加 `reset` 模式——登录页「忘记密码？」入口（含 INVALID_CREDENTIALS 错误旁快捷按钮），未登录即可直接输入邮箱+新密码调用同一 `change-password` 接口，成功后自动切回登录（bundle `index-HDsGvkoc.js`）。
+
 # 2026-09-07：模型切换为 deepseek-v4-flash，1M 窗口与 75% 压缩边界（用户批准）
 
 - 用户要求主对话模型从 kimi-k2.6/Moonshot 切换为官方 DeepSeek `deepseek-v4-flash`（`https://api.deepseek.com/v1`），本地 `.env` 已写入对应 Key（不提交、不打印）；`.env.example`、`app/config.py` 默认值、`codex/codex.md`、README 同步更新。
 - 上下文窗口改为 1M（`GLOBUY_LLM_CONTEXT_WINDOW_TOKENS=1000000`），Cache Breakpoint 维持 0.75/0.50 比例推导：触发 75 万、目标压回 50 万；已用设置代码验证（`compression_trigger_tokens=750000`）。`llm.py` 为 deepseek 端点显式补 32K max_tokens 预算（与 kimi 一致）。
 - 真实冒烟：`deepseek-v4-flash` 最小请求 373ms 成功（模型与 Key 均有效）；请求级超时 120s/重试 1 保持。历史 Kimi 相关记录仅作背景，不再代表当前运行配置。
+
+# 2026-09-07：绑定域名 globuy.xyz（HTTPS 反代）与开机自启补全
+
+- 对外访问切换为用户自有域名 **`https://globuy.xyz`**（www 同指向）：DNS A 记录已指到 `8.141.102.3`；nginx 新增 vhost 将整站（UI/`/api/v1`/WebSocket/`/healthz`/`/docs`）反代到 `127.0.0.1:6412`（含 `$connection_upgrade` map 支持 WebSocket），原静态占位页 `/var/www/globuy.xyz` 不再使用；default 站点（博客/html）未改动。certbot（apt，1.21.0）签发 Let's Encrypt 证书并自动续期（到期 2026-12-06），http 301 跳 https；公网 80/443 已验证可达。后端仍监听 `0.0.0.0:6412`，IP 直连保留为兜底。README、全局链接偏好已同步。
+- 开机自启：docker postgres 容器 restart 策略从 `no` 改为 `unless-stopped`；新增 `/etc/systemd/system/globuy-api.service`（Conda globuy + `python -m app.api`，WorkingDirectory=/root/globuy）并 enable 作为冷启动兜底。注意：当前运行实例由外部控制器用 systemd API 创建的瞬态单元 `globuy-api.service` 托管（先于本会话手工 nohup 进程存在），运行时不要与它抢管理权；持久化单元只在冷启动（无瞬态）时生效，二者同名不会同时绑定 6412。
+- 尚未处理：`GLOBUY_AUTH_COOKIE_SECURE=false` 保持双通道（http IP 兜底 + https 域名）可登录；若未来关闭 IP 直连 6412，可把该开关置 true 并同步清理文档。
 
 # 2026-09-07：真实链路复现定位“Kimi 无法完成商品搜索”并修复三层根因
 

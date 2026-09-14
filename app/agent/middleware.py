@@ -55,6 +55,58 @@ def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _item_search_lookup(messages: Sequence[BaseMessage]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Build (platform, item_id) -> real candidate map from this run's searches."""
+    lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for message in messages:
+        if getattr(message, "name", None) != "item_search":
+            continue
+        content = message.content
+        try:
+            payload = json.loads(content) if isinstance(content, str) else content
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        platform = str(payload.get("platform") or "")
+        for candidate in payload.get("candidates") or []:
+            if isinstance(candidate, dict) and candidate.get("item_id"):
+                item_id = str(candidate["item_id"])
+                lookup[(platform, item_id)] = candidate
+                lookup[(str(candidate.get("platform") or platform), item_id)] = candidate
+    return lookup
+
+
+def _enrich_picker_items(
+    items: Sequence[Any], messages: Sequence[BaseMessage]
+) -> tuple[list[Any], bool]:
+    """Restore fields the model may have dropped when echoing candidates.
+
+    LLMs often trim long fields (product_url/currency/…) when re-serializing
+    item_search results into an item_picker call; without the source URL every
+    candidate would fail the hard filter. Merge missing fields back from the real
+    server-side search results of this run.
+    """
+    lookup = _item_search_lookup(messages)
+    enriched: list[Any] = []
+    changed = False
+    for raw in items:
+        if not isinstance(raw, dict):
+            enriched.append(raw)
+            continue
+        candidate = lookup.get(
+            (str(raw.get("platform") or ""), str(raw.get("item_id") or ""))
+        )
+        item = dict(raw)
+        if candidate is not None:
+            for key in ("product_url", "currency", "image_url", "offer_id", "product_id"):
+                if (item.get(key) in (None, "")) and candidate.get(key) not in (None, ""):
+                    item[key] = candidate[key]
+                    changed = True
+        enriched.append(item)
+    return enriched, changed
+
+
 def _strip_private_payload(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -237,11 +289,19 @@ async def guarded_tool_call(
     if name == "item_search" and not arguments.get("intent") and state.get("shopping_intent"):
         arguments = {**arguments, "intent": state["shopping_intent"]}
         request = request.override(tool_call={**call, "args": arguments})
-    if name == "item_picker" and not arguments.get("shopping_intent") and state.get(
-        "shopping_intent"
-    ):
-        arguments = {**arguments, "shopping_intent": state["shopping_intent"]}
-        request = request.override(tool_call={**call, "args": arguments})
+    if name == "item_picker":
+        picker_patched = False
+        if isinstance(arguments.get("items"), list):
+            enriched_items, picker_patched = _enrich_picker_items(
+                arguments["items"], state.get("messages") or []
+            )
+            if picker_patched:
+                arguments = {**arguments, "items": enriched_items}
+        if not arguments.get("shopping_intent") and state.get("shopping_intent"):
+            arguments = {**arguments, "shopping_intent": state["shopping_intent"]}
+            picker_patched = True
+        if picker_patched:
+            request = request.override(tool_call={**call, "args": arguments})
     # Honesty guard: never let the model claim unverified system statuses
     # (maintenance/failure) when the product chain simply has no candidates.
     if name == "chat_fallback" and isinstance(arguments.get("message"), str):

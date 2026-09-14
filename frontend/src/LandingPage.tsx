@@ -1,4 +1,5 @@
 import { ArrowRight, ClockCounterClockwise, GlobeHemisphereWest } from "@phosphor-icons/react";
+import { Filing } from "./Filing";
 import heroIllustration from "./assets/globuy-hero.webp";
 import brandMark from "./assets/globuy-mark.webp";
 
@@ -39,6 +40,7 @@ export function LandingPage({ onContinue, onStart }: { onContinue: () => void; o
           <button className="landing-primary" onClick={onStart}>开始选购 <ArrowRight size={18} weight="bold" /></button>
           <button className="landing-secondary" onClick={onContinue}><ClockCounterClockwise size={17} />继续上次会话</button>
         </div>
+        <Filing />
       </section>
     </main>
   );

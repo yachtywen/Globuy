@@ -30,7 +30,7 @@ from app.agent.middleware import (
 from app.api.run_registry import _accumulate_final_state, _product_search_summary
 from app.config import Settings
 from app.tools import CORE_TOOL_NAMES, TERMINAL_TOOLS, TOOL_PHASES, build_core_tools
-from app.tools.item_picker import PickedItem, item_picker
+from app.tools.item_picker import PickedItem, build_item_picker_tool, item_picker
 from app.tools.shopping_summary import SummaryNarrative, build_shopping_summary_tool
 from app.utils.thread_ctx import thread_scope
 
@@ -591,6 +591,47 @@ def test_item_picker_rejects_missing_hard_constraint_evidence() -> None:
     )
     assert result["status"] == "insufficient_data"
     assert "缺少硬约束属性证据" in result["rejected_brief"][0]
+
+
+@pytest.mark.asyncio
+async def test_item_picker_relaxes_schema_level_unverifiable_attribute_requirement() -> None:
+    # 模型把自由文本硬约束（降噪功能）翻译成 required_attributes {"降噪": "是"}，但候选
+    # 属性 schema 根本不含该键（≥2 个候选、全数据集都无此键时无法区分优劣）——生产工具应放宽
+    # 该键并继续，而不是让全部真实候选被零信息过滤。
+    tool = build_item_picker_tool(None)
+    first = candidate("a", rank=1, price=100)
+    second = {**candidate("b", rank=2, price=200), "product_id": "product-b"}
+    result = await tool.ainvoke(
+        {
+            "items": [first, second],
+            "constraints": {"required_attributes": {"降噪": "是"}},
+            "limit": 3,
+        }
+    )
+    assert result["status"] in {"ok", "degraded"}
+    assert result["picks"]
+    assert any(
+        "已放宽候选属性中不存在的必需字段：降噪" in line for line in result["rejected_brief"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_item_picker_keeps_enforcing_verifiable_required_attribute() -> None:
+    # 键在部分候选中存在时可区分优劣，缺失证据的候选仍被拒绝（契约不变）。
+    tool = build_item_picker_tool(None)
+    first = {**candidate("with-evidence", rank=1, price=100, material="金属"), "product_id": "p3"}
+    second = candidate("without-evidence", rank=2, price=200)
+    second["attributes"] = {}
+    result = await tool.ainvoke(
+        {
+            "items": [first, second],
+            "constraints": {"required_attributes": {"material": "金属"}},
+            "limit": 3,
+        }
+    )
+    assert result["status"] in {"ok", "degraded"}
+    assert [item["item_id"] for item in result["picks"]] == ["with-evidence"]
+    assert any("缺少硬约束属性证据" in line for line in result["rejected_brief"])
 
 
 @pytest.mark.asyncio

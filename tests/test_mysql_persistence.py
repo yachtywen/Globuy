@@ -311,3 +311,68 @@ def test_snapshot_import_flushes_product_before_offer_with_foreign_keys(tmp_path
     assert result["rows"] == 1
     assert asyncio.run(counts()) == (1, 1)
     asyncio.run(database.close())
+
+
+def test_change_password_resets_login_and_revokes_sessions(tmp_path) -> None:
+    url, database = _database(tmp_path)
+    asyncio.run(database.close())
+    settings = Settings(
+        database_url=url,
+        output_dir=tmp_path / "output",
+        uploaded_dir=tmp_path / "uploaded",
+        model_provider="mock",
+        observability_provider="none",
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
+        web_search_provider="none",
+        redis_url=None,
+    )
+    app = create_app(settings=settings, agent_runner=_agent)
+    with TestClient(app) as client:
+        registered = client.post(
+            "/api/v1/auth/register",
+            headers={"Idempotency-Key": "change-password-register"},
+            json={
+                "email": "reset-me@example.com",
+                "password": "original-password-1",
+                "display_name": "改密测试",
+            },
+        )
+        assert registered.status_code == 201
+        assert client.get("/api/v1/auth/me").status_code == 200
+
+        # 直接输入邮箱 + 新密码改密（旧会话应被吊销）
+        changed = client.post(
+            "/api/v1/auth/change-password",
+            json={"email": "reset-me@example.com", "new_password": "brand-new-password-9"},
+        )
+        assert changed.status_code == 200
+        assert changed.json()["status"] == "ok"
+        assert changed.json()["email"] == "reset-me@example.com"
+
+        # 旧密码不能再登录；改密前签发的会话也已失效
+        old_login = client.post(
+            "/api/v1/auth/login",
+            json={"email": "reset-me@example.com", "password": "original-password-1"},
+        )
+        assert old_login.status_code == 401
+        assert client.get("/api/v1/auth/me").status_code == 401
+
+        new_login = client.post(
+            "/api/v1/auth/login",
+            json={"email": "reset-me@example.com", "password": "brand-new-password-9"},
+        )
+        assert new_login.status_code == 200
+        assert client.get("/api/v1/auth/me").status_code == 200
+
+        # 不存在账号与过短密码
+        missing = client.post(
+            "/api/v1/auth/change-password",
+            json={"email": "nobody@example.com", "new_password": "brand-new-password-9"},
+        )
+        assert missing.status_code == 404
+        weak = client.post(
+            "/api/v1/auth/change-password",
+            json={"email": "reset-me@example.com", "new_password": "short"},
+        )
+        assert weak.status_code == 422

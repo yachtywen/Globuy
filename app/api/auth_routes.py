@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Request, Response
 
 from app.api.errors import ApiError
-from app.api.schemas import LoginRequest, RegisterRequest
+from app.api.schemas import ChangePasswordRequest, LoginRequest, RegisterRequest
 from app.auth.dependencies import csrf_user, current_user
 from app.auth.service import AuthService, IssuedSession, Principal
 
@@ -72,6 +72,22 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
     issued = await _service(request).login(payload.email, payload.password)
     _set_session(response, request, issued)
     return {"user": _public(issued.principal), "csrf_token": issued.csrf_token}
+
+
+@router.post("/change-password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+) -> dict:
+    """Set a new password by email alone (no old-password check).
+
+    Revokes every existing session for the account, so the owner must log in
+    again with the new password. Use with care: anyone who knows the email can
+    reset it. Intended for this single-account deployment's self-service reset.
+    """
+
+    updated = await _service(request).change_password(payload.email, payload.new_password)
+    return {"status": "ok", **updated}
 
 
 @router.post("/logout", status_code=204)

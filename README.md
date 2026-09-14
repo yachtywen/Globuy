@@ -111,7 +111,7 @@ python -m alembic stamp 20260901_0007
 
 阿里云部署建议使用单实例 API。当前 `RunRegistry`、事件缓冲与 LangGraph checkpointer 仍是进程内实现，不能直接把 API 横向扩容为多个 worker；如需多实例，必须先迁移到共享任务、事件和 checkpoint 基础设施。
 
-当前服务器对外访问端口固定为 `6412`（`.env` 已设 `GLOBUY_HOST=0.0.0.0` / `GLOBUY_PORT=6412`，`compose.yaml` 的 api 服务同步）。前端已按生产构建托管在同一端口：浏览器访问 `http://<IP>:6412` 即打开 `globuy Agent Console`（UI 与 `/api/v1`、WebSocket 同源同端口）。公网访问需在云安全组放行 TCP 6412；PostgreSQL（5433）与 Redis（6379）保持内网使用，后续部署其他项目时自行分配端口即可。
+对外访问已绑定域名：**`https://globuy.xyz`**（nginx 反代 80/443 → `127.0.0.1:6412`，Let's Encrypt 证书已配自动续期，http 自动 301 跳 https）。后端仍监听 `0.0.0.0:6412`（`.env` 设 `GLOBUY_HOST=0.0.0.0` / `GLOBUY_PORT=6412`），IP 直连 `http://8.141.102.3:6412` 保留为兜底。UI 与 `/api/v1`、WebSocket、`/healthz`、`/docs` 同源同域。公网需在云安全组放行 TCP 80/443（6412 如需对外同样放行）；PostgreSQL（5433）与 Redis（6379）保持内网使用。
 
 修改前端后重新发布：先在本机（或服务器）执行 `cd frontend && npm run build`，再重启 API。
 

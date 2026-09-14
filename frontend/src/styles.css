@@ -470,3 +470,40 @@ body.modal-open { overflow: hidden; }
   .wishlist-card { padding: 12px; grid-template-columns: 1fr; gap: 14px; }.wishlist-media { aspect-ratio: 4 / 2.5; }.wishlist-actions { grid-column: auto; display: grid; grid-template-columns: 1fr; }.wishlist-button-row { grid-template-columns: 1fr 1fr 44px; }.wishlist-button-row > a, .wishlist-button-row > button, .more-wrap > button { min-height: 44px; }.wishlist-ip-left, .wishlist-ip-right { display: none; }
   .price-history-modal { max-height: 84dvh; padding: 22px 16px; border-radius: 22px 22px 0 0; }.wishlist-page .modal-backdrop { padding: 0; align-items: end; }.confirm-dialog { margin: 12px; }
 }
+
+/* 账户页：修改密码 */
+.account-section + .account-section { margin-top: 22px; }
+.password-change-form { display: grid; gap: 14px; max-width: 440px; margin-top: 6px; }
+.password-change-form label { display: grid; gap: 6px; font-size: 13px; font-weight: 650; color: #5f564c; }
+.password-change-form input { width: 100%; box-sizing: border-box; border: 1px solid #d8cec0; border-radius: 12px; padding: 12px 13px; background: #fffdf9; color: #28231f; font-size: 14px; }
+.password-change-form input:focus { outline: 2px solid rgba(23, 63, 54, .25); border-color: #173f36; }
+.password-change-form > button { border: 0; border-radius: 12px; padding: 13px; background: #173f36; color: #fff; font-weight: 750; cursor: pointer; font-size: 14px; }
+.password-change-form > button:hover { background: #315c4d; }
+.password-change-form > button:disabled { opacity: .5; cursor: not-allowed; }
+.password-ok { color: #1f6b45; font-weight: 650; }
+.password-tip { display: inline-flex; align-items: center; gap: 6px; margin: 14px 0 0; color: #8a8176; font-size: 12px; }
+
+/* 认证页：忘记密码/重置 */
+.auth-copy-sub { margin: 8px 0 0; color: #756e65; line-height: 1.6; font-size: 13px; }
+.auth-back-link, .auth-forgot { display: inline-flex; align-items: center; gap: 5px; margin-top: 12px; padding: 0; color: #173f36; background: transparent; border: 0; cursor: pointer; font-size: 13px; font-weight: 650; }
+
+/* 网站备案信息页脚（不影响现有布局，悬浮于正常流末尾/侧栏底部） */
+.filing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 14px auto 4px;
+  width: fit-content;
+  color: #a0978c;
+  font-size: 10.5px;
+  line-height: 1;
+  letter-spacing: .02em;
+  text-decoration: none;
+}
+.filing:hover { color: #173f36; text-decoration: underline; }
+.auth-entry > .filing, .landing-entry > .filing { margin: 18px auto 0; }
+.account-page > .filing, .wishlist-page > .filing { margin-top: 26px; }
+/* 工作台：左侧历史会话栏底部固定一行，不占用对话区 */
+.left-panel { display: flex; flex-direction: column; }
+.left-panel > .panel-content { flex: 1 1 auto; min-height: 0; height: auto; }
+.left-panel > .filing { flex: none; margin: 10px auto 14px; }

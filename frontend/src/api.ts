@@ -86,6 +86,13 @@ export const authApi = {
   me() {
     return request<{ user: AuthUser }>("/auth/me");
   },
+  changePassword(email: string, newPassword: string) {
+    return request<{ status: string; email: string }>("/auth/change-password", {
+      method: "POST",
+      csrf: false,
+      body: JSON.stringify({ email, new_password: newPassword }),
+    });
+  },
   logout() {
     return request<void>("/auth/logout", { method: "POST" });
   },
